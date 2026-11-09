@@ -54,4 +54,4 @@ agent 改完代码后，输入框里会出现灰色的建议文字「跑一下�
 
 ## 许可证
 
-尚未确定，见 [design.md §18](docs/design.md#18-开放问题)。
+[MIT](LICENSE)
