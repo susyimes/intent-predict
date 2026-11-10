@@ -136,6 +136,71 @@
         "at": { "type": "integer", "minimum": 0 }
       }
     },
+    "SubagentCompletedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "subagentId", "status", "at"],
+      "properties": {
+        "type": { "const": "agent.subagent_completed" },
+        "subagentId": { "type": "string", "minLength": 1 },
+        "goal": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "failed", "interrupted"]
+        },
+        "summary": { "type": "string" },
+        "at": { "type": "integer", "minimum": 0 }
+      },
+      "description": "Stage O2 event: a delegated subagent finished."
+    },
+    "BackgroundJobObservedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "jobId", "status", "at"],
+      "properties": {
+        "type": { "const": "agent.background_job" },
+        "jobId": { "type": "string", "minLength": 1 },
+        "command": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "failed", "ready_match"]
+        },
+        "exitCode": { "type": "integer" },
+        "summary": { "type": "string" },
+        "at": { "type": "integer", "minimum": 0 }
+      },
+      "description": "Stage O2 event: a background process or watcher exited or matched readiness."
+    },
+    "AgentTaskUpdatedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "taskId", "status", "at"],
+      "properties": {
+        "type": { "const": "agent.task_updated" },
+        "taskId": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["todo", "ready", "running", "blocked", "review", "done"]
+        },
+        "pendingReviews": { "type": "integer", "minimum": 0 },
+        "openTasksCount": { "type": "integer", "minimum": 0 },
+        "at": { "type": "integer", "minimum": 0 }
+      },
+      "description": "Stage O2 event: an agent kanban/todo task changed state."
+    },
+    "AgentSessionSwitchedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "fromSessionId", "toSessionId", "at"],
+      "properties": {
+        "type": { "const": "agent.session_switched" },
+        "fromSessionId": { "type": "string" },
+        "toSessionId": { "type": "string", "minLength": 1 },
+        "at": { "type": "integer", "minimum": 0 }
+      },
+      "description": "Stage O2 event: active session focus switched inside the agent."
+    },
     "TerminalCommandObservedEvent": {
       "type": "object",
       "additionalProperties": true,
@@ -227,6 +292,10 @@
         { "$ref": "#/$defs/ArtifactEvent" },
         { "$ref": "#/$defs/StateEvent" },
         { "$ref": "#/$defs/TurnCompletedEvent" },
+        { "$ref": "#/$defs/SubagentCompletedEvent" },
+        { "$ref": "#/$defs/BackgroundJobObservedEvent" },
+        { "$ref": "#/$defs/AgentTaskUpdatedEvent" },
+        { "$ref": "#/$defs/AgentSessionSwitchedEvent" },
         { "$ref": "#/$defs/TerminalCommandObservedEvent" },
         { "$ref": "#/$defs/GitStatusObservedEvent" },
         { "$ref": "#/$defs/FileWatcherObservedEvent" },

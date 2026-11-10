@@ -119,32 +119,30 @@ Qwen 的 Web Shell 里还有一个更接近"意图"的设计。它对用户正�
 | Feedback | 预测展示之后用户的处理结果：接受、编辑、忽略、关闭、过期 |
 | Sampler | 宿主提供的模型采样委托接口：既支持缓存共享分叉（`mode: 'fork'`），也支持委托宿主已有模型跑紧凑提示词（`mode: 'compact'`），实现零配置运行 |
 
-## 5. 总体架构：让任意 Agent 成为全场景 Intent Predict Agent
+## 5. 总体架构：双轴三阶段演进（O1/O2/O3 观察阶段 × A1/A2/A3 行动力阶段）
 
-接入 `intent-predict` 后，宿主不再只是被动等待用户输入的对话机器人，而是升级为具备**全场景感知（Omni-Context Observation）**与**三阶段行动力（3-Stage Agency）**的 **Intent Predict Agent**：
+借鉴 OpenAI Symphony 的 **Spec-as-Prompt（`SPEC.md`）+ 仓库契约文件（`INTENTS.md`）** 模式，任意宿主 Agent 接入后即升级为 **Intent Predict Agent**，并沿着**观察范围（O1→O2→O3）**和**行动力（A1→A2→A3）**两个正交的三阶段轴渐进演进：
 
 ```mermaid
 flowchart TB
-  subgraph Observers["1. 全场景观察层（Omni-Context Observers，超越单一对话）"]
+  subgraph Obs["1. 观察范围三阶段演进（Observation Stages: O1 → O2 → O3）"]
     direction LR
-    O_CHAT["宿主对话事件<br/>turn / message / tool / artifact"]
-    O_TERM["终端观察器<br/>env.terminal_command (exitCode/cwd)"]
-    O_GIT["Git 工作区观察器<br/>env.git_status (dirty/staged/branch)"]
-    O_FS["文件变动观察器<br/>env.file_changed (user/external)"]
-    O_IDE["IDE 焦点与诊断<br/>env.ide_context (activeFile/errors)"]
-    O_AMB["桌面与剪贴板环境<br/>env.ambient_context (stacktrace/url)"]
+    O1["Stage O1：观察单一会话<br/>(Single-Session)<br/>当前 thread 的消息、工具调用与文件产物"]
+    O2["Stage O2：观察整个 Agent<br/>(Agent-Wide)<br/>跨会话 / 子 Agent (subagent) / 后台任务 / Kanban 状态"]
+    O3["Stage O3：观察全局环境<br/>(Global / Ambient)<br/>外部终端命令、Git 工作区、IDE 焦点/报错、桌面剪贴板"]
+    O1 -->|"扩展信号范围"| O2 -->|"扩展信号范围"| O3
   end
 
-  subgraph Core["2. intent-predict SDK 核心引擎（使能任意 Agent）"]
+  subgraph Core["2. intent-predict 核心流水线（SPEC.md 确定性外壳 + INTENTS.md 提示词契约）"]
     direction LR
-    ST["Session & Env Store<br/>对话信号 + 环境信号 + 提议风险扫描"]
-    TG["多源触发 + 守卫<br/>turn 边界 / 环境事件防抖触发"]
-    SR["有限场景路由<br/>专用场景 (p:10..30) → 兜底场景 (p:1)<br/>Per-Intent 来源策略绑定"]
-    CS["候选生成<br/>Rule (仅 explicit 短路) / Prior / Model (top-1 + runnerUps)"]
-    FU["融合 + 风险对齐门控<br/>effectiveRisk = max(risk, proposedRisk)<br/>裁决通道: ghost_text / chips / button"]
-    RD["确定性模板 & Action 插值<br/>+ 9 条 CJK/安全过滤"]
+    LD["Contract Loader<br/>加载 INTENTS.md / pack.json<br/>(YAML 配置头 + Prompt 正文)"]
+    ST["Signal & Risk Engine<br/>提取 O1/O2/O3 信号<br/>+ proposedRisk 提议风险扫描"]
+    SR["有限场景路由<br/>按 stage/triggers/match 过滤<br/>专用场景 → 兜底场景 | 未命中 → none"]
+    CS["候选生成<br/>Rule (仅 explicit 短路)<br/>Prior / Model (top-1 + runnerUps)"]
+    FG["融合 + Per-Intent 门控 + 通道裁决<br/>→ 模板/Action 原子插值 → 9 条安全过滤"]
     FB[("本地反馈与校准日志<br/>near-match 豁免退避")]
-    ST --> TG --> SR --> CS --> FU --> RD
+    LD --> SR
+    ST --> SR --> CS --> FG
     FB -.->|"Dirichlet 先验 / 阈值退避"| CS
   end
 
@@ -153,26 +151,38 @@ flowchart TB
     S_COMP["L1 Compact 模式<br/>SDK 先脱敏 → 委托宿主模型"]
   end
 
-  subgraph Agency["3. 三阶段行动力输出（Progressive Agency）"]
+  subgraph Agency["3. 行动力三阶段演进（Agency Stages: A1 → A2 → A3）"]
     direction LR
-    A1["Stage 1：纯建议输出（M0/M1 默认）<br/>Ghost Text / 多候选 Chips / 确认按钮"]
-    A2["Stage 2：推测预执行（M2 可选）<br/>后台静默预跑只读检查/拉取上下文 (prepPlan)"]
-    A3["Stage 3：建议 + 委托执行（M3 可选）<br/>用户一键确认 → 派发给宿主或跨工具执行"]
+    A1["Stage A1：纯建议输出（默认）<br/>Ghost Text / 多候选 Chips / 确认按钮"]
+    A2["Stage A2：推测预执行（可选）<br/>后台静默预跑只读检查/预取上下文 (prepPlan)"]
+    A3["Stage A3：建议 + 委托执行（可选）<br/>用户一键确认 → 派发给目标 Agent 执行"]
     A1 -.->|"渐进升级"| A2 -.->|"渐进升级"| A3
   end
 
-  Observers -->|"AgentEvent 流 (Adapter / Sidecar)"| ST
+  Obs -->|"AgentEvent 流 (O1 / O2 / O3)"| ST
   CS <-->|"sampler/sample + sampler/cancel"| HostModel
-  RD -->|"Prediction (含 displayChannel & agencyStage)"| Agency
+  FG -->|"Prediction (含 displayChannel & agencyStage)"| Agency
   Agency -->|"Feedback (含 Bigram Dice similarity)"| FB
 ```
 
-数据流与职责边界：
-- **多源感知汇聚**：除了宿主自身的对话轮次事件（`turn.*`、`tool.*`），外部或宿主内置的轻量观察器（Shell Hook、Git Watcher、FS Watcher、IDE 插件、剪贴板监听）都可以向 SDK 投递 `env.*` 事件。例如用户在终端手敲 `pytest` 失败，即使还没跟 Agent 说话，SDK 也能立即感知并让 Agent 浮现「帮我修一下刚才终端里的 pytest 报错」。
-- **三阶段行动力（Agency Stages）**：
-  - **Stage 1（`suggest_only`，当前默认）**：只输出结构化预测与建议文本，按安全等级投递到宿主 UI（低风险走 `ghost_text`，确认类与外部副作用强制走 `chips` 或 `action_button`），绝不自动执行。
-  - **Stage 2（`speculative_prep`，第二阶段）**：预测产出的同时附带只读预备计划 `prepPlan`（如预取报错文件、静默跑 `git diff` 或 AST 检查），等用户按 Tab 确认时直接秒回。
-  - **Stage 3（`propose_and_dispatch`，第三阶段）**：用户在浮现的意图卡片上点击确认后，直接触发 `action` 派发给目标 Agent 或工具链完成闭环。
+### 5.1 观察范围三阶段（Observation Stages：O1 → O2 → O3）
+
+| 阶段 | 观察边界 | 采集事件 | 典型场景示例 |
+|---|---|---|---|
+| **Stage O1：观察单一会话**（`single_session`，基线必选） | 当前对话 thread 内部 | `turn.*`、`message.*`、`tool.*`、`artifact`、`state` | Agent 改完代码未跑测试 → 建议「跑一下测试验证看看」；Agent 提问 → Chips 建议确认或比较利弊 |
+| **Stage O2：观察整个 Agent**（`agent_wide`，跨会话/子任务） | 宿主 Agent 全局运行时（子 Agent、后台进程、任务看板、多会话切换） | O1 全部 + `agent.subagent_completed`、`agent.background_job`、`agent.task_updated`、`agent.session_switched` | 派发的子 Agent 刚跑完研究任务返回 → 建议「结合子任务的结果继续处理」；后台长耗时构建结束 → 建议验证产出 |
+| **Stage O3：观察全局环境**（`global_ambient`，跨工具/桌面） | 宿主之外的终端、Git 工作区、文件系统、IDE 焦点与桌面剪贴板 | O1+O2 全部 + `env.terminal_command`、`env.git_status`、`env.file_changed`、`env.ide_context`、`env.ambient_context` | 用户自己在终端跑命令挂了或复制了一段报错栈 → 建议「帮我看看刚才终端命令为什么报错并修一下」 |
+
+### 5.2 行动力三阶段（Agency Stages：A1 → A2 → A3）
+
+- **Stage A1（`suggest_only`，默认）**：只输出结构化预测与建议文本，按安全等级投递到宿主 UI（低风险走 `ghost_text`，确认类与外部副作用强制走 `chips` 或 `action_button`），绝不自动执行。
+- **Stage A2（`speculative_prep`，第二阶段）**：预测产出的同时附带只读预备计划 `prepPlan`（如预取报错文件、静默跑 `git diff` 或 AST 检查），等用户按 Tab 确认时直接秒回。
+- **Stage A3（`propose_and_dispatch`，第三阶段）**：用户在浮现的意图卡片上点击确认后，直接触发 `action` 派发给目标 Agent 或工具链完成闭环。
+
+### 5.3 Symphony 式的交付与定制契约（`SPEC.md` + `INTENTS.md`）
+
+1. **外层 `SPEC.md`（Spec-as-Prompt）**：顶层 [`SPEC.md`](../SPEC.md) 用 RFC 2119 规范语言完整定义了确定性外壳。开发者既可以直接使用本仓库的 TypeScript SDK / Sidecar，也可以直接把 `SPEC.md` 喂给任意 Coding Agent，让它在宿主原生语言（如 Hermes 的 Python、Codex 的 Rust）中生成零外部依赖的内嵌实现。
+2. **内层 `INTENTS.md`（YAML Front Matter + Markdown Prompt 正文）**：顶层 [`INTENTS.md`](../INTENTS.md) 像 Symphony 的 `WORKFLOW.md` 一样，用头部 YAML 声明 `O1/O2/O3` 场景、封闭意图目录、风险门控与槽位，用正文 Markdown 编写分类提示词。团队可以在自己的代码库中放置自定义 `INTENTS.md` 随 Git 版本管理。
 
 一次典型的全双工预测与取消时序：
 
@@ -239,7 +249,40 @@ export type AgentEvent =
       errorCode?: string;
       at: number;
     }
-  // ── 全场景环境观察事件（Omni-Context Environment Events，超越单一对话边界） ──
+  // ── Stage O2：Agent 全局事件（Agent-Wide Events：子 Agent / 后台任务 / 看板 / 会话切换） ──
+  | {
+      type: 'agent.subagent_completed';
+      subagentId: string;
+      goal?: string;
+      status: 'completed' | 'failed' | 'interrupted';
+      summary?: string;
+      at: number;
+    }
+  | {
+      type: 'agent.background_job';
+      jobId: string;
+      command?: string;
+      status: 'completed' | 'failed' | 'ready_match';
+      exitCode?: number;
+      summary?: string;
+      at: number;
+    }
+  | {
+      type: 'agent.task_updated';
+      taskId: string;
+      title?: string;
+      status: 'todo' | 'ready' | 'running' | 'blocked' | 'review' | 'done';
+      pendingReviews?: number;
+      openTasksCount?: number;
+      at: number;
+    }
+  | {
+      type: 'agent.session_switched';
+      fromSessionId?: string;
+      toSessionId: string;
+      at: number;
+    }
+  // ── Stage O3：全局环境观察事件（Global Environment Events，超越 Agent 边界） ──
   | {
       type: 'env.terminal_command';
       command: string;
@@ -430,14 +473,18 @@ v0.1 内置的信号：
 | `lastAgentMessage.hints` | `Hint[]` | 显式的下一步提示，结构为 `{ kind: 'slash' \| 'type_literal', value: string }` |
 | `lastUserMessage.text` | `string` | 用户最近一条消息原文 |
 | `user.locale` | `string` | 由用户最近的消息推断（算法见 §6.3.3），**不是** UI 语言 |
-| `env.lastTerminalCommand.command` | `string?` | 最近一次观察到的用户终端命令 |
-| `env.lastTerminalCommand.exitCode` | `number?` | 最近一次用户终端命令的退出码 |
-| `env.git.branch` | `string?` | 当前 Git 分支名 |
-| `env.git.dirtyCount` | `number?` | 工作区未提交改动文件数 |
-| `env.git.hasConflicts` | `boolean?` | 是否存在合并冲突 |
-| `env.ide.activeFile` | `string?` | IDE 当前焦点文件 |
-| `env.ide.diagnosticsErrors` | `number?` | IDE 当前活动文件的 LSP 报错数 |
-| `env.ambient.clipboardKind` | `string?` | 剪贴板内容分类（如 `stacktrace`、`error_log`） |
+| `agent.lastSubagent.status` | `string?` | **Stage O2**：最近完成的子 Agent 状态（`completed \| failed \| interrupted`） |
+| `agent.lastSubagent.summary` | `string?` | **Stage O2**：最近完成的子 Agent 摘要 |
+| `agent.lastBackgroundJob.status` | `string?` | **Stage O2**：最近完成的后台进程状态（`completed \| failed \| ready_match`） |
+| `agent.pendingReviews` | `number?` | **Stage O2**：Agent 任务看板中处于待审阅（`review`）或阻塞的任务数 |
+| `env.lastTerminalCommand.command` | `string?` | **Stage O3**：最近一次观察到的用户外部终端命令 |
+| `env.lastTerminalCommand.exitCode` | `number?` | **Stage O3**：最近一次用户外部终端命令的退出码 |
+| `env.git.branch` | `string?` | **Stage O3**：当前 Git 分支名 |
+| `env.git.dirtyCount` | `number?` | **Stage O3**：工作区未提交改动文件数 |
+| `env.git.hasConflicts` | `boolean?` | **Stage O3**：是否存在合并冲突 |
+| `env.ide.activeFile` | `string?` | **Stage O3**：IDE 当前焦点文件 |
+| `env.ide.diagnosticsErrors` | `number?` | **Stage O3**：IDE 当前活动文件的 LSP 报错数 |
+| `env.ambient.clipboardKind` | `string?` | **Stage O3**：剪贴板内容分类（如 `stacktrace`、`error_log`） |
 | `state.<key>` | `unknown` | 宿主上报的任意状态 |
 
 #### 6.3.3 派生信号的具体提取规则
