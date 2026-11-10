@@ -21,9 +21,7 @@ O1 单会话  Phase 1（当前，只做这一格）
 
 ## 1. Phase 1（O1 × A1）：当前精修范围
 
-独立 WebUI 界面示意图（概念图，非规范；信息架构以本文与 [design.md](design.md) §10 为准，视觉随实现迭代）：
-
-![intent-predict 独立 WebUI 界面示意图（Phase 1）](images/webui-phase1-mockup.png)
+本节不预设界面视觉参考。实现独立 WebUI 时，只需满足本文与 [design.md](design.md) §10 的信息架构、交互和安全边界，布局与视觉可自由发挥。
 
 ### 1.1 架构主图：一条建议从哪来、在哪被挡下
 

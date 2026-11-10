@@ -37,10 +37,6 @@ agent 改完代码（或子任务完成）后，SDK 的独立 WebUI 里会多出
 
 宿主可以根据这份结果绑定确定性的动作，比如 `/review`、后台只读预备任务（Stage A2）或快捷按钮，不需要从文本里猜用户的意思。
 
-Phase 1 的独立 WebUI 界面示意图（概念图，随实现打磨迭代；左侧卡片流、中间草稿、右侧检查面）：
-
-![intent-predict 独立 WebUI 界面示意图（Phase 1）](docs/images/webui-phase1-mockup.png)
-
 ## 架构图（当前 Phase 1：O1 × A1）
 
 双轴五阶段怎么走见 [ROADMAP.md](ROADMAP.md)；每阶段单独的说明图（含全景总图与后续增量图）见 [docs/diagrams.md](docs/diagrams.md)。下面只画当前阶段这一格：输入只有当前会话，输出只进 SDK 独立 WebUI 的卡片流（与宿主输入框完全解耦，见 [docs/design.md](docs/design.md) 决策 D10），流水线任一级不过就静默（红框）。
