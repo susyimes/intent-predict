@@ -2,7 +2,8 @@
 
 **intent-predict** 是一个让**任意 Agent 成为全场景意图预测 Agent（Intent Predict Agent）**的通用 SDK。它的观察范围不局限于对话气泡，还可以感知终端命令、Git 工作区、文件变动、IDE 焦点与桌面/剪贴板环境；在识别出的有限场景里从一个封闭集合中预测用户下一步最可能的意图，并支持从「纯建议输出」渐进升级到「推测预执行」与「委托执行」。没有把握时就不给建议（fail-closed）。
 
-> 当前状态：**设计规范 v0.4（审查修订版，尚无实现代码）**。规范与机读契约可直接照着实现；效果指标待回放数据验证。
+> 当前状态：**设计规范 v0.4（审查修订版，尚无实现代码），当前位于 Phase 1（O1 × A1）**。第一阶段只做好单会话观察 + 纯建议输出这一格，实现顺序、明确不做清单与出口标准见 [ROADMAP.md](ROADMAP.md)；规范与机读契约可直接照着实现；效果指标待回放数据验证。
+> - 阶段路线图（O×A 五阶段）：[ROADMAP.md](ROADMAP.md)
 > - 语言无关实现规范（Spec-as-Prompt，含权威划分）：[SPEC.md](SPEC.md)
 > - 场景与提示词契约（内置包的单一来源）：[INTENTS.md](INTENTS.md)
 > - 非规范详细设计说明：[docs/design.md](docs/design.md)
@@ -38,7 +39,7 @@ agent 改完代码（或子 Agent 完成任务、或用户在终端手动跑完�
 
 ## 架构与双轴三阶段演进图
 
-`intent-predict` 将**观察范围（O1→O2→O3）**与**行动力（A1→A2→A3）**拆分为两个正交的三阶段演进轴：
+`intent-predict` 将**观察范围（O1→O2→O3）**与**行动力（A1→A2→A3）**拆分为两个正交的三阶段演进轴，按 [ROADMAP.md](ROADMAP.md) 以「一阶段一轴一格」单步推进（Phase 1 当前只做 O1 × A1）：
 
 ```mermaid
 flowchart TB
@@ -113,11 +114,11 @@ flowchart TB
 | `@intent-predict/core` | 事件和信号、谓词引擎、场景路由、候选来源、融合、门控、渲染、过滤、脱敏 |
 | `@intent-predict/ui` | 不依赖 UI 框架的建议控制器状态机，提供 React 和 Ink 绑定 |
 | `@intent-predict/sidecar` | JSON-RPC stdio 服务，支持 `sampler/sample` 反向调用，供 Python（如 Hermes）、Rust、Go 等宿主使用 |
-| `@intent-predict/adapters/*` | 适配 **Hermes Agent（首发）**、Codex、ACP、Claude Agent SDK、OpenAI Agents、Vercel AI、LangGraph |
+| `@intent-predict/adapters/*` | 适配 Hermes Agent（首个深度落地宿主，见路线图）、Codex、ACP、Claude Agent SDK、OpenAI Agents、Vercel AI、LangGraph |
 | `@intent-predict/pack-coding` | 内置的编程场景包（[`pack.json`](packages/pack-coding/pack.json)） |
 | `@intent-predict/models` | 可选的独立模型客户端（当宿主不提供 Sampler 时的兜底） |
 
-路线图见 [design.md §17](docs/design.md#17-路线图)。
+路线图见 [ROADMAP.md](ROADMAP.md)（当前：Phase 1，仅 O1 × A1）。
 
 ## 许可证
 

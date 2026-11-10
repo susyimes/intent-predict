@@ -4,6 +4,8 @@ Status: Draft v1.0 (Language-Agnostic, Symphony-Style Implementation Contract)
 
 Purpose: Define a deterministic-outer-shell + prompt-contract system that upgrades any host coding or general agent into an **Intent Predict Agent**, evolving across three observation stages (**O1 Single-Session → O2 Agent-Wide → O3 Global Environment**) and three agency stages (**A1 Suggest-Only → A2 Speculative-Prep → A3 Propose-and-Dispatch**).
 
+> **Current implementation phase: Phase 1 (O1 × A1)** — see [ROADMAP.md](ROADMAP.md). Implementations claim conformance per phase. The O2/O3 (§2.2–§2.4) and A2/A3 (§3) material is forward-compatible specification: a Phase 1 implementation MUST accept-and-ignore `agent.*`/`env.*` events and MUST NOT execute `prepPlan` or dispatch actions, but is NOT required to implement those sections.
+
 > **How to use this specification with a coding agent:**
 >
 > `"Implement intent-predict for <target host/language> according to https://github.com/susyimes/intent-predict/blob/main/SPEC.md and verify conformance against eval/golden.jsonl."`
@@ -325,7 +327,7 @@ When `{{#if compact}}` applies, build `{{transcript}}` deterministically:
 
 An implementation is conformant at observation stage O*n* if:
 1. All emitted payloads validate against `spec/*.schema.json` (Draft 2020-12), resolved offline (see Authority & Precedence).
-2. It loads `INTENTS.md` (equivalently `packages/pack-coding/pack.json`) and passes every `eval/golden.jsonl` case whose `config.observationStages` are within its declared stages.
+2. It loads `INTENTS.md` (equivalently `packages/pack-coding/pack.json`) and passes every `eval/golden.jsonl` case whose `config.observationStages` are within its declared stages. For **Phase 1 (O1 × A1)** that subset is 17 of the 20 current cases — all except `o2-subagent-fresh`, `o2-subagent-stale`, and `o3-env-cold-start` (the `o1-only-stage-gate` case is required: it proves out-of-phase events are ignored).
 3. Repository-level consistency passes: `python tools/validate.py`.
 
 **`eval/golden.jsonl` format** — one JSON object per line, deterministic (no live model):

@@ -72,7 +72,7 @@ Qwen 的 Web Shell 里还有一个更接近"意图"的设计。它对用户正�
 ### 非目标（v1）
 
 - 开放域的整句预测（即 Codex 的做法）不在 v1 范围内；v1 没有 `freeform` 意图，模型只能在目录内（含 `none`）选择。
-- 不做边打字边补全。打字过程中的意图路由放到 M3（见 §17）。
+- 不做边打字边补全。打字过程中的意图路由不在 [ROADMAP.md](../ROADMAP.md) 五阶段内（见 §17）。
 - SDK 不是 agent 框架，不负责执行意图。它只给出动作描述，执行由宿主完成。
 - 不做跨会话记忆和用户画像。唯一的例外是可选、只存在本地的意图转移先验。
 
@@ -101,7 +101,7 @@ Qwen 的 Web Shell 里还有一个更接近"意图"的设计。它对用户正�
 | 2 | 范围 | 开放 | 场景内的有限集合，加上 `none` |
 | 3 | 生成方式 | 主模型在缓存共享的分叉上生成 | 融合规则、先验和模型的约束分类。默认复用宿主模型/分叉 |
 | 4 | 何时展示 | 不保证每轮都有，策略没有公开 | 由门控显式决定：阈值、分差、冷却、风险等级 |
-| 5 | 宿主 | 只有 Codex 桌面版（本地和 SSH 线程） | 任意 agent（首发落地 Hermes Agent），通过适配器或 sidecar 接入 |
+| 5 | 宿主 | 只有 Codex 桌面版（本地和 SSH 线程） | 任意 agent（第一个深度落地 Hermes Agent），通过适配器或 sidecar 接入 |
 | 6 | 评估 | 接受率 | 分类指标、接受率、校准误差 |
 
 ## 4. 概念与术语
@@ -661,10 +661,10 @@ export interface Candidate {
 
 | 来源 | 阶段 | 说明 |
 |---|---|---|
-| **RuleSource** | M0 | 始终启用，本地执行，耗时 < 5ms。严格区分两类产出：<br>① **显式提示候选（`explicit: true`）**：当 `lastAgentMessage.hints` 含 `{ kind: 'slash', value: '/review' }` 且匹配某意图的 `action.command` / `examples`，或含 `{ kind: 'type_literal', value: X }` 且匹配某意图的 `examples` 时，产出 `score: 0.92, explicit: true`。此类候选直接短路模型。<br>② **结构化槽位预填与结构加分（`explicit: false`）**：当 `optionsCount > 1` 时为 `choose_option` 预填确定性槽位 `index = preferredOptionIndex` 并赋予结构加分 `b_rule = 0.20`；当 `endsWithQuestion === true` 时为 `confirm` 赋予结构加分 `b_rule = 0.15`。**非显式规则绝不伪造高置信度独立候选，避免与模型 `none` 打架** |
-| **ModelSource** | M0 | 约束分类。**优先走宿主的 `Sampler`（L2 分叉或 L1 宿主零配置模型委托）**，其次走独立配置的 `ModelClient`（L0）。<br>关闭 thinking/reasoning，温度设为 0，最多输出约 120 个 token。<br>要求模型返回首选意图 `intent`、置信度 `confidence` 以及最多 2 个备选 `runnerUps`（见 §7.5），为 chips 模式提供真实分布 |
-| **PriorSource** | M2 | 计算狄利克雷平滑转移概率 `P(i \| scenario, lastIntent) = (c(s, i_prev, i) + α₀·p₀(i)) / (Σⱼ c(s, i_prev, j) + α₀)`，其中 `α₀ = 5`，`p₀(i)` 为场景包声明的默认先验（未声明时均分，并为 `none` 预留 `p₀(none) = 0.25`）。数据来自本地反馈日志 |
-| **EmbeddingSource** | M2 | 以"agent 消息末尾 + 信号摘要"为查询，在本地已标注的样例上做余弦近邻检索。不需要调用 LLM |
+| **RuleSource** | Phase 1 | 始终启用，本地执行，耗时 < 5ms。严格区分两类产出：<br>① **显式提示候选（`explicit: true`）**：当 `lastAgentMessage.hints` 含 `{ kind: 'slash', value: '/review' }` 且匹配某意图的 `action.command` / `examples`，或含 `{ kind: 'type_literal', value: X }` 且匹配某意图的 `examples` 时，产出 `score: 0.92, explicit: true`。此类候选直接短路模型。<br>② **结构化槽位预填与结构加分（`explicit: false`）**：当 `optionsCount > 1` 时为 `choose_option` 预填确定性槽位 `index = preferredOptionIndex` 并赋予结构加分 `b_rule = 0.20`；当 `endsWithQuestion === true` 时为 `confirm` 赋予结构加分 `b_rule = 0.15`。**非显式规则绝不伪造高置信度独立候选，避免与模型 `none` 打架** |
+| **ModelSource** | Phase 1 | 约束分类。**优先走宿主的 `Sampler`（L2 分叉或 L1 宿主零配置模型委托）**，其次走独立配置的 `ModelClient`（L0）。<br>关闭 thinking/reasoning，温度设为 0，最多输出约 120 个 token。<br>要求模型返回首选意图 `intent`、置信度 `confidence` 以及最多 2 个备选 `runnerUps`（见 §7.5），为 chips 模式提供真实分布 |
+| **PriorSource** | Phase 2 | 计算狄利克雷平滑转移概率 `P(i \| scenario, lastIntent) = (c(s, i_prev, i) + α₀·p₀(i)) / (Σⱼ c(s, i_prev, j) + α₀)`，其中 `α₀ = 5`，`p₀(i)` 为场景包声明的默认先验（未声明时均分，并为 `none` 预留 `p₀(none) = 0.25`）。数据来自本地反馈日志 |
+| **EmbeddingSource** | Phase 2 | 以"agent 消息末尾 + 信号摘要"为查询，在本地已标注的样例上做余弦近邻检索。不需要调用 LLM |
 
 **短路规则（Short-circuit）**：
 - 当且仅当 `RuleSource` 给出了 `explicit: true` 候选，且该意图的有效风险 `effectiveRisk ∈ {'none', 'read_only', 'reversible'}`，且所有必填槽位已由 `slot.from` 或 `default` 解析完毕时，**直接采用该候选，跳过模型调用**。
@@ -873,7 +873,7 @@ export interface GatePolicy {
   - 展示时窗口是否在前台（`wasFocusedWhenShown`）
   - suppressed 的原因（标准化的 `SuppressedReason` 枚举）
   - scenario/intent id、来源、延迟、token 用量（含缓存命中）
-- 各阶段的学习内容：M0 只记录。M2 开始用于先验、校准和阈值调优。
+- 各阶段的学习内容：Phase 1 只记录。Phase 2 开始用于先验、校准和阈值调优。
 
 ## 8. 接入：对任意 agent 通用（零配置优先）
 
@@ -976,9 +976,9 @@ export interface Sampler {
 6. **可以取消**：收到 `signal` 后立即停止，并清理分叉。
 7. **只在空闲时运行**：源会话正在运行时直接拒绝。
 
-### 8.4 首发宿主适配：Hermes Agent 深度设计
+### 8.4 第一个深度落地宿主：Hermes Agent 设计
 
-本项目将 **Hermes Agent** 定为第一个要深度打通的宿主，但顺序上先在 M0 用回放评测（`eval/golden.jsonl` + 离线回放）把核心流水线正确性定住，Hermes 集成顺延到 M1，避免在核心未验证时同时背 TS core、sidecar、Python 钩子与三端 UI 四条战线。下文对 Hermes 内部结构（`run_agent.py` 钩子、Prompt Caching 不变量、toolsets 映射）的描述**尚未钉版本实测核实**（与 `prior-art.md` 对 Codex/Qwen 的钉提交核查不同），进入 M1 前须以同样方式逐项验证并记录版本；未验证前不得以本节为据估工时。Hermes 拥有 Python 核心循环（`run_agent.py`）、Ink TUI（`hermes --tui`）、Electron 桌面端（`hermes desktop`）以及 ACP 服务，适合在 M1 验证跨语言与多端架构：
+本项目将 **Hermes Agent** 定为第一个要深度打通的宿主，但排期上先在 Phase 1 用回放评测（`eval/golden.jsonl` + 离线回放）把核心流水线正确性定住，Hermes 深度集成随 Phase 2 前后展开，避免在核心未验证时同时背 TS core、sidecar、Python 钩子与三端 UI 四条战线。下文对 Hermes 内部结构（`run_agent.py` 钩子、Prompt Caching 不变量、toolsets 映射）的描述**尚未钉版本实测核实**（与 `prior-art.md` 对 Codex/Qwen 的钉提交核查不同），展开前须以同样方式逐项验证并记录版本；未验证前不得以本节为据估工时。Hermes 拥有 Python 核心循环（`run_agent.py`）、Ink TUI（`hermes --tui`）、Electron 桌面端（`hermes desktop`）以及 ACP 服务，适合届时验证跨语言与多端架构：
 
 1. **零配置模型委托（Sampler 实现）**：
    - **L2 Fork 路径**：Hermes 的核心不变量是"绝不破坏 Prompt Caching"（会话中固定 system prompt、toolsets 和历史消息前缀）。当一轮对话在 `run_agent.py` 结束（模型返回最终文本回复）时，Hermes 的消息数组 `[system, ...history, last_assistant_msg]` 已经在提供商侧建立了热缓存。Sampler 直接克隆该消息列表副本，在末尾追加一条 `role: 'user'` 的 4KB 意图分类 prompt（保留原 `tools` 声明以维持缓存前缀一致，`tool_choice: 'none'` 或在收到 `tool_calls` 时作废），直接命中 90%+ 的 `cachedInputTokens`。
@@ -998,7 +998,7 @@ export interface Sampler {
 
 | 宿主 | 事件来源 | Sampler（零配置模型来源） | 说明 |
 |---|---|---|---|
-| **Hermes Agent（首发）** | `run_agent.py` 钩子 / Gateway 事件流 | 同前缀 Fork 采样，或复用 Hermes 当前模型/辅助模型 | 通过 `@intent-predict/sidecar`（Python 侧）与 `@intent-predict/ui`（TUI/Desktop 侧）协同 |
+| **Hermes Agent（第一个深度落地，Phase 2 前后展开）** | `run_agent.py` 钩子 / Gateway 事件流 | 同前缀 Fork 采样，或复用 Hermes 当前模型/辅助模型 | 通过 `@intent-predict/sidecar`（Python 侧）与 `@intent-predict/ui`（TUI/Desktop 侧）协同 |
 | Codex（app-server） | `turn/started`、`turn/completed`、`item/started`、`item/completed` | `thread/sample`（L2 Fork） | 实验接口，需要在 initialize 时声明 experimental API 能力。源线程必须空闲，且是持久化的根线程；prompt 不超过 4,000 字节 |
 | ACP 代理 | `session/prompt`、`session/update` | 委托代理内部模型 (L1) | 预测通过 `_` 开头的自定义通知下发：`_intent_predict/prediction`（下行）与 `_intent_predict/feedback`（上行），命名空间已定。需要客户端支持才能显示 |
 | Claude Agent SDK | 消息流和 hooks | 复用 Agent SDK 当前 client / session fork（待验证） | |
@@ -1009,7 +1009,7 @@ export interface Sampler {
 
 ## 9. Sidecar 协议（JSON-RPC 2.0）
 
-非 JS 宿主（如 Hermes 的 Python 后端、Rust、Go 等）通过 sidecar 接入：`intent-predict serve --stdio`。传输用换行分隔的 JSON（NDJSON），和 Codex app-server、MCP 的 stdio 传输方式一致。HTTP/SSE 放到 M3。方法名对应 Codex 的 `thread/prediction/request` 和 `thread/prediction/updated`。完整 Schema 见 [`spec/rpc.schema.json`](../spec/rpc.schema.json)。
+非 JS 宿主（如 Hermes 的 Python 后端、Rust、Go 等）通过 sidecar 接入：`intent-predict serve --stdio`。传输用换行分隔的 JSON（NDJSON），和 Codex app-server、MCP 的 stdio 传输方式一致。HTTP/SSE 不在 `ROADMAP.md` 五阶段内，视需要另行排期。方法名对应 Codex 的 `thread/prediction/request` 和 `thread/prediction/updated`。完整 Schema 见 [`spec/rpc.schema.json`](../spec/rpc.schema.json)。
 
 | 方向 | 方法 | 类型 | 说明 |
 |---|---|---|---|
@@ -1273,24 +1273,20 @@ Python 等宿主（如 Hermes Agent 后端）通过 sidecar 接入或直接复�
 | D3 | **默认零配置委托宿主自身模型**（通过 `Sampler` 支持 `fork` 缓存共享分叉与 `compact` 宿主模型调用），独立 `ModelClient` 仅作可选兜底 | 要求用户为 SDK 单独配一套 API Key 和模型端点 | 宿主本身已有配置好的模型与凭证池；复用宿主既省去用户配置负担，又能享受缓存命中和主模型质量（§8.1） |
 | D4 | v1 的置信度由模型自报加规则显式分，阈值通过离线回放调优；v2 改用 logprobs 并做校准 | 一开始就做校准 | 先保证能跑通，校准需要真实反馈数据 |
 | D5 | Enter 默认不接受建议 | Qwen 的做法：Enter 填入并发送 | 满足 G5，和 Codex"接受后不自动发送"一致 |
-| D6 | 推测执行只定义策略接口，执行交给宿主，放到 M3 | 在 SDK 里实现 overlay 文件系统，即 Qwen 的方式 | SDK 不碰宿主的文件系统和工具，否则就不再宿主无关 |
-| D7 | 先用 TypeScript 实现，Python 等宿主通过 JSON-RPC sidecar 接入；首发落地宿主为 **Hermes Agent** | Python 优先 / Codex 优先 | 主流 agent 宿主多数是 TS 生态；而 Hermes 同时具备 Python 核心、Ink TUI、Electron 桌面端和 CLI，能一次性验证 Sidecar、L2 零配置分叉采样和三端 UI 控制器（§8.4） |
+| D6 | 推测执行只定义策略接口，执行交给宿主，放到 Phase 4（A2） | 在 SDK 里实现 overlay 文件系统，即 Qwen 的方式 | SDK 不碰宿主的文件系统和工具，否则就不再宿主无关 |
+| D7 | 先用 TypeScript 实现，Python 等宿主通过 JSON-RPC sidecar 接入；第一个深度落地宿主为 **Hermes Agent** | Python 优先 / Codex 优先 | 主流 agent 宿主多数是 TS 生态；而 Hermes 同时具备 Python 核心、Ink TUI、Electron 桌面端和 CLI，能验证 Sidecar、L2 零配置分叉采样和三端 UI 控制器（§8.4）；排期见 D9 |
 | D8 | 没有场景命中时直接输出 `none` | 退回到通用的开放预测 | 遵守"有限场景"的边界，宁缺毋滥 |
+| D9 | 双轴按「一阶段一轴一格」单步推进，**Phase 1 只做 O1 × A1**（单会话观察 + 纯建议），O2/O3 与 A2/A3 的规范先行但不实现 | 一次把全场景观察与三阶段行动力做全；或行动力优先先升 A2 | 观察优先、行动力殿后，效果变化可归因、安全风险后置；Phase 3/4 顺序保留在 Phase 2 出口凭数据对调的权利（见根目录 `ROADMAP.md`） |
 
 ## 17. 路线图
 
-| 里程碑 | 交付内容 | 完成标准 |
-|---|---|---|
-| **M0 骨架** | `spec/` JSON Schema、`SPEC.md`、`INTENTS.md`/`pack-coding`（v0.4，已完成，`tools/validate.py` 保一致）；`eval/golden.jsonl` 确定性用例（已落地，格式见 `SPEC.md` §7）；core（事件到信号、谓词引擎、场景路由、RuleSource、Sampler/ModelSource、融合/基线 profile 二选一、门控、模板渲染、9 条过滤、脱敏）；JSONL 反馈；回放评测 CLI | `eval/golden.jsonl` 100% 通过；效果指标（precision@shown、coverage）等有真实回放数据后再定目标值并记录基线，此前不设数字门槛 |
-| **M1 接入（Hermes 首发）** | `sidecar`（stdio JSON-RPC，支持 `sampler/sample` 反向调用）；Hermes Agent 适配器（Python 会话钩子 + 零配置 Sampler 委托）与三端 UI 接入（Hermes TUI / Desktop / CLI）；Codex 与 ACP 适配器 | 在 Hermes Agent 中实现零配置开箱即用，跑通 L1 与 L2 缓存共享采样，并给出真实缓存命中率与延迟数据 |
-| **M2 学习** | PriorSource、EmbeddingSource、置信度校准（logprobs 或温度缩放）、反馈分析报表 | 与 M0 相比，在同样的覆盖率下精度更高 |
-| **M3 扩展** | 打字时的草稿意图路由（参考 Qwen 的 btw/new_session）；只读意图的推测执行策略接口；Python 原生轻量 SDK；HTTP/SSE sidecar | 视需要再定 |
+路线图的单一入口是根目录 [`ROADMAP.md`](../ROADMAP.md)：O×A 网格五阶段（观察优先、每阶段一轴一格），含 Phase 1 的分段 1A–1D、明确不做清单与出口标准，以及与旧 M0–M3 的对照映射。**当前处于 Phase 1（O1 × A1）**：规范件（`spec/`、`SPEC.md`、`INTENTS.md`/`pack-coding` v0.4、`eval/golden.jsonl`、`tools/validate.py`）已齐，待实现 core 并以 Phase 1 子集（20 条 golden 中的 17 条）与回放基线完成验收。此后 Phase 2（O2×A1）→ Phase 3（O3×A1）→ Phase 4（×A2）→ Phase 5（×A3）依次开启，未过本阶段出口不开下一格。
 
 ## 18. 决议记录（原开放问题）
 
 1. ~~**许可证**~~：已定为 MIT（2026-11-10），见 [LICENSE](../LICENSE)。
-2. **实现语言**：先做 **TypeScript**（core 与 UI），同时将 [`spec/*.schema.json`](../spec) 作为跨语言单一事实来源；Python 宿主（如 Hermes Agent）通过 JSON-RPC stdio sidecar 接入，暂不做 Python 优先。
-3. **第一个落地的宿主**：定为 **Hermes Agent**（覆盖 Python 核心循环、Ink TUI、Electron 桌面端与 CLI，见 §8.4）。
+2. **实现语言**：先做 **TypeScript**（core 与 UI），数据结构以 [`spec/*.schema.json`](../spec) 为准、行为以根目录 `SPEC.md` 为准（见 `SPEC.md` 的 Authority & Precedence）；Python 宿主（如 Hermes Agent）通过 JSON-RPC stdio sidecar 接入，暂不做 Python 优先。
+3. **第一个深度落地的宿主**：**Hermes Agent**（见 §8.4）。排期按 `ROADMAP.md`：Phase 1 只要求一个 L0/L1 参考接入完成 dogfood，Hermes 三端深度适配随 Phase 2 前后展开。
 4. **compact 模式的默认模型**：**默认不需要用户额外配置**。SDK 通过 `Sampler` 接口（`mode: 'fork' | 'compact'`）直接委托宿主 Agent 使用其自身已配置的模型或辅助模型完成推理；仅当宿主不提供模型能力时，才允许可选注入独立 `ModelClient` 或自动退回纯本地规则模式。
 5. **是否采集 `finalText`**：默认关闭（`collectFinalText: false`）。在宿主或 UI 控制器本地计算 Bigram Dice 相似度标量（`Feedback.similarity`）上报，兼顾学习信号与隐私安全。
 6. **包名和 npm scope**：保持 `@intent-predict/*`。
