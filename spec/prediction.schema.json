@@ -3,7 +3,7 @@
   "$id": "https://intent-predict.dev/spec/prediction.schema.json",
   "title": "PredictionResult",
   "description": "Structured intent prediction output and suppression reason codes.",
-  "type": "object",
+  "$ref": "#/$defs/PredictionResult",
   "$defs": {
     "SuppressedReason": {
       "type": "string",
@@ -16,7 +16,6 @@
         "min_turns_not_met",
         "composer_dirty",
         "mode_blocked",
-        "budget_exhausted",
         "budget_exhausted_no_explicit_rule",
         "incognito",
         "no_scenario_matched",
@@ -48,30 +47,70 @@
     },
     "CandidateSourceId": {
       "type": "string",
-      "enum": ["rule", "prior", "model", "embedding"]
+      "enum": [
+        "rule",
+        "prior",
+        "model",
+        "embedding"
+      ]
     },
     "AlternativePrediction": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["intentId", "confidence", "text", "risk"],
+      "required": [
+        "intentId",
+        "confidence",
+        "text",
+        "risk"
+      ],
       "properties": {
-        "intentId": { "type": "string", "minLength": 1 },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-        "slots": { "type": "object" },
-        "text": { "type": "string", "minLength": 1 },
-        "risk": { "$ref": "scenario-pack.schema.json#/$defs/Risk" },
-        "action": { "$ref": "scenario-pack.schema.json#/$defs/ActionDescriptor" }
+        "intentId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "slots": {
+          "type": "object"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "risk": {
+          "$ref": "scenario-pack.schema.json#/$defs/Risk"
+        },
+        "action": {
+          "$ref": "scenario-pack.schema.json#/$defs/ActionDescriptor"
+        }
       }
     },
     "PredictionUsage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["latencyMs"],
+      "required": [
+        "latencyMs"
+      ],
       "properties": {
-        "inputTokens": { "type": "integer", "minimum": 0 },
-        "cachedInputTokens": { "type": "integer", "minimum": 0 },
-        "outputTokens": { "type": "integer", "minimum": 0 },
-        "latencyMs": { "type": "number", "minimum": 0 }
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cachedInputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "latencyMs": {
+          "type": "number",
+          "minimum": 0
+        }
       }
     },
     "Prediction": {
@@ -90,42 +129,92 @@
         "risk",
         "alternatives",
         "sources",
-        "createdAt"
+        "createdAt",
+        "qualifiedIntentId",
+        "displayChannel",
+        "agencyStage"
       ],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "sessionId": { "type": "string", "minLength": 1 },
-        "sourceTurnId": { "type": "string", "minLength": 1 },
-        "packId": { "type": "string", "minLength": 1 },
-        "packVersion": { "type": "string", "minLength": 1 },
-        "scenarioId": { "type": "string", "minLength": 1 },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceTurnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "packId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "packVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scenarioId": {
+          "type": "string",
+          "minLength": 1
+        },
         "qualifiedIntentId": {
           "type": "string",
           "minLength": 1,
-          "description": "Canonical globally unique key: '<packId>@<packVersion>/<scenarioId>#<intentId>'."
+          "description": "Versioned telemetry archive key: '<packId>@<packVersion>/<scenarioId>#<intentId>'. Online learning keys (cooldown/backoff/priors) MUST use the unversioned '<packId>/<scenarioId>#<intentId>' form so pack upgrades do not reset learning state."
         },
         "displayChannel": {
           "type": "string",
-          "enum": ["ghost_text", "chips", "action_button"],
+          "enum": [
+            "ghost_text",
+            "chips",
+            "action_button"
+          ],
           "default": "ghost_text",
           "description": "Recommended presentation channel determined by risk and gate policy."
         },
         "intent": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["id", "confidence", "slots"],
+          "required": [
+            "id",
+            "confidence",
+            "slots"
+          ],
           "properties": {
-            "id": { "type": "string", "minLength": 1 },
-            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-            "slots": { "type": "object" }
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "slots": {
+              "type": "object"
+            }
           }
         },
-        "text": { "type": "string", "minLength": 1 },
-        "locale": { "type": "string", "minLength": 2 },
-        "action": { "$ref": "scenario-pack.schema.json#/$defs/ActionDescriptor" },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "locale": {
+          "type": "string",
+          "minLength": 2
+        },
+        "action": {
+          "$ref": "scenario-pack.schema.json#/$defs/ActionDescriptor"
+        },
         "agencyStage": {
           "type": "string",
-          "enum": ["suggest_only", "speculative_prep", "propose_and_dispatch"],
+          "enum": [
+            "suggest_only",
+            "speculative_prep",
+            "propose_and_dispatch"
+          ],
           "default": "suggest_only",
           "description": "Stage 1: suggest_only (render suggestion in UI); Stage 2: speculative_prep (pre-run read-only context/checks in background); Stage 3: propose_and_dispatch (dispatch to target agent upon user confirmation)."
         },
@@ -135,28 +224,43 @@
           "properties": {
             "readOnlyTools": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
             "prefetchRefs": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             }
           },
           "description": "Optional read-only speculative preparation plan for Stage 2."
         },
-        "risk": { "$ref": "scenario-pack.schema.json#/$defs/Risk" },
+        "risk": {
+          "$ref": "scenario-pack.schema.json#/$defs/Risk"
+        },
         "alternatives": {
           "type": "array",
-          "maxItems": 3,
-          "items": { "$ref": "#/$defs/AlternativePrediction" }
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/AlternativePrediction"
+          }
         },
         "sources": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/CandidateSourceId" }
+          "items": {
+            "$ref": "#/$defs/CandidateSourceId"
+          }
         },
-        "createdAt": { "type": "integer", "minimum": 0 },
-        "usage": { "$ref": "#/$defs/PredictionUsage" }
+        "createdAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "usage": {
+          "$ref": "#/$defs/PredictionUsage"
+        }
       }
     },
     "PredictionResult": {
@@ -164,25 +268,44 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "prediction"],
+          "required": [
+            "type",
+            "prediction"
+          ],
           "properties": {
-            "type": { "const": "completed" },
+            "type": {
+              "const": "completed"
+            },
             "prediction": {
               "oneOf": [
-                { "$ref": "#/$defs/Prediction" },
-                { "type": "null" }
+                {
+                  "$ref": "#/$defs/Prediction"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
-            "suppressedReason": { "$ref": "#/$defs/SuppressedReason" }
+            "suppressedReason": {
+              "$ref": "#/$defs/SuppressedReason"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "error"],
+          "required": [
+            "type",
+            "error"
+          ],
           "properties": {
-            "type": { "const": "failed" },
-            "error": { "type": "string", "minLength": 1 }
+            "type": {
+              "const": "failed"
+            },
+            "error": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         }
       ]

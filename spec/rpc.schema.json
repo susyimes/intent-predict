@@ -3,51 +3,279 @@
   "$id": "https://intent-predict.dev/spec/rpc.schema.json",
   "title": "SidecarJsonRpcProtocol",
   "description": "JSON-RPC 2.0 protocol for @intent-predict/sidecar over stdio (NDJSON).",
-  "type": "object",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/JsonRpcRequest"
+    },
+    {
+      "$ref": "#/$defs/JsonRpcNotification"
+    },
+    {
+      "$ref": "#/$defs/JsonRpcSuccessResponse"
+    },
+    {
+      "$ref": "#/$defs/JsonRpcErrorResponse"
+    }
+  ],
   "$defs": {
+    "Method": {
+      "type": "string",
+      "enum": [
+        "initialize",
+        "session/observe",
+        "prediction/request",
+        "prediction/cancel",
+        "prediction/feedback",
+        "prediction/updated",
+        "sampler/sample",
+        "sampler/cancel"
+      ]
+    },
+    "JsonRpcRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jsonrpc",
+        "id",
+        "method"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "description": "Host-originated requests use integers or 'h-*' ids; SDK-originated reverse calls use 's-*' ids.",
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^(h|s)-.+"
+            }
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "params": {
+          "type": "object"
+        }
+      }
+    },
+    "JsonRpcNotification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jsonrpc",
+        "method"
+      ],
+      "not": {
+        "required": [
+          "id"
+        ]
+      },
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "$ref": "#/$defs/Method"
+        },
+        "params": {
+          "type": "object"
+        }
+      }
+    },
+    "JsonRpcSuccessResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jsonrpc",
+        "id",
+        "result"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "description": "Host-originated requests use integers or 'h-*' ids; SDK-originated reverse calls use 's-*' ids.",
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string",
+              "pattern": "^(h|s)-.+"
+            }
+          ]
+        },
+        "result": {}
+      }
+    },
+    "JsonRpcError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "integer",
+          "enum": [
+            -32700,
+            -32600,
+            -32601,
+            -32602,
+            -32603,
+            -32001,
+            -32002,
+            -32003
+          ],
+          "description": "JSON-RPC standard codes plus -32001 SESSION_BUSY, -32002 TURN_MISMATCH, -32003 SAMPLER_ABORTED."
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "data": {}
+      }
+    },
+    "JsonRpcErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jsonrpc",
+        "id",
+        "error"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/JsonRpcError"
+        }
+      }
+    },
     "InitializeParams": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["client", "capabilities"],
+      "required": [
+        "client",
+        "capabilities"
+      ],
       "properties": {
-        "protocolVersion": { "type": "string", "default": "0.1" },
+        "protocolVersion": {
+          "type": "string",
+          "default": "0.1"
+        },
         "client": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "version"],
+          "required": [
+            "name",
+            "version"
+          ],
           "properties": {
-            "name": { "type": "string", "minLength": 1 },
-            "version": { "type": "string", "minLength": 1 }
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
         "capabilities": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "sampler": {
+            "interactive": {
               "type": "boolean",
-              "default": false,
-              "description": "Host supports sampler/sample reverse RPC (L2 forked cache-sharing or zero-config host delegation)."
+              "default": true
             },
-            "interactive": { "type": "boolean", "default": true }
+            "samplerModes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "fork",
+                  "compact"
+                ]
+              },
+              "default": [],
+              "description": "Sampler modes the host can serve via sampler/sample. Empty means no sampler (SDK degrades to L0/L-Local)."
+            },
+            "displayChannels": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "ghost_text",
+                  "chips",
+                  "action_button"
+                ]
+              },
+              "default": [
+                "ghost_text"
+              ],
+              "description": "UI channels the host can render. Intents requiring an unsupported channel are suppressed with risk_disallowed_for_ghost_text."
+            }
           }
         },
         "packs": {
           "type": "array",
           "items": {
             "oneOf": [
-              { "type": "string", "description": "Built-in pack ID or file path." },
-              { "$ref": "scenario-pack.schema.json" }
+              {
+                "type": "string",
+                "description": "Built-in pack ID or file path."
+              },
+              {
+                "$ref": "scenario-pack.schema.json"
+              }
             ]
           }
         },
-        "policy": { "$ref": "scenario-pack.schema.json#/$defs/GatePolicyPartial" },
+        "policy": {
+          "$ref": "scenario-pack.schema.json#/$defs/GatePolicyPartial"
+        },
         "privacy": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "redact": { "type": "string", "enum": ["default", "strict", "off"], "default": "default" },
-            "collectFinalText": { "type": "boolean", "default": false }
+            "redact": {
+              "type": "string",
+              "enum": [
+                "default",
+                "strict",
+                "off"
+              ],
+              "default": "default"
+            },
+            "collectFinalText": {
+              "type": "boolean",
+              "default": false
+            }
           }
         }
       }
@@ -55,27 +283,51 @@
     "InitializeResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocolVersion", "server", "loadedPacks"],
+      "required": [
+        "protocolVersion",
+        "server",
+        "loadedPacks"
+      ],
       "properties": {
-        "protocolVersion": { "type": "string" },
+        "protocolVersion": {
+          "type": "string"
+        },
         "server": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "version"],
+          "required": [
+            "name",
+            "version"
+          ],
           "properties": {
-            "name": { "type": "string" },
-            "version": { "type": "string" }
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
           }
         },
         "loadedPacks": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["id", "version", "scenarioCount"],
+            "required": [
+              "id",
+              "version",
+              "scenarioCount"
+            ],
             "properties": {
-              "id": { "type": "string" },
-              "version": { "type": "string" },
-              "scenarioCount": { "type": "integer", "minimum": 0 }
+              "id": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "scenarioCount": {
+                "type": "integer",
+                "minimum": 0
+              }
             }
           }
         }
@@ -84,26 +336,45 @@
     "SessionObserveParams": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sessionId", "events"],
+      "required": [
+        "sessionId",
+        "events"
+      ],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1 },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
         "events": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "events.schema.json#/$defs/AgentEvent" }
+          "items": {
+            "$ref": "events.schema.json#/$defs/AgentEvent"
+          }
         }
       }
     },
     "PredictionRequestParams": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sessionId", "sourceTurnId"],
+      "required": [
+        "sessionId",
+        "sourceTurnId"
+      ],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1 },
-        "sourceTurnId": { "type": "string", "minLength": 1 },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceTurnId": {
+          "type": "string",
+          "minLength": 1
+        },
         "messages": {
           "type": "array",
-          "items": { "$ref": "events.schema.json#/$defs/SimpleMessage" }
+          "items": {
+            "$ref": "events.schema.json#/$defs/SimpleMessage"
+          }
         },
         "state": {
           "type": "object",
@@ -115,70 +386,141 @@
     "PredictionCancelParams": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sessionId"],
+      "required": [
+        "sessionId"
+      ],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1 },
-        "reason": { "type": "string" }
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string"
+        }
       }
     },
     "SamplerCancelParams": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sampleRequestId", "sessionId"],
+      "required": [
+        "sampleRequestId",
+        "sessionId"
+      ],
       "properties": {
         "sampleRequestId": {
           "type": "string",
           "pattern": "^s-[0-9]+$",
           "description": "JSON-RPC request id of the in-flight sampler/sample call to abort."
         },
-        "sessionId": { "type": "string", "minLength": 1 },
-        "reason": { "type": "string" }
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string"
+        }
       }
     },
     "PredictionUpdatedParams": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sessionId", "sourceTurnId", "result"],
+      "required": [
+        "sessionId",
+        "sourceTurnId",
+        "result"
+      ],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1 },
-        "sourceTurnId": { "type": "string", "minLength": 1 },
-        "result": { "$ref": "prediction.schema.json#/$defs/PredictionResult" }
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceTurnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "result": {
+          "$ref": "prediction.schema.json#/$defs/PredictionResult"
+        }
       }
     },
     "SamplerSampleParams": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sessionId", "expectedTurnId", "prompt"],
+      "required": [
+        "sessionId",
+        "expectedTurnId",
+        "prompt"
+      ],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1 },
-        "expectedTurnId": { "type": "string", "minLength": 1 },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedTurnId": {
+          "type": "string",
+          "minLength": 1
+        },
         "mode": {
           "type": "string",
-          "enum": ["fork", "compact"],
+          "enum": [
+            "fork",
+            "compact"
+          ],
           "default": "fork",
           "description": "'fork' appends prompt to an ephemeral cache-sharing fork of sessionId; 'compact' sends a self-contained prompt via the host's configured auxiliary/fast model without user configuration."
         },
-        "prompt": { "type": "string", "maxLength": 12000 },
-        "jsonSchema": { "type": "object" },
-        "effort": { "type": "string", "enum": ["none", "minimal", "low"] },
-        "maxOutputTokens": { "type": "integer", "minimum": 1, "maximum": 512, "default": 120 }
+        "prompt": {
+          "type": "string",
+          "maxLength": 12000
+        },
+        "jsonSchema": {
+          "type": "object"
+        },
+        "effort": {
+          "type": "string",
+          "enum": [
+            "none",
+            "minimal",
+            "low"
+          ]
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 512,
+          "default": 120
+        }
       }
     },
     "SamplerSampleResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["text"],
+      "required": [
+        "text"
+      ],
       "properties": {
         "text": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "usage": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "inputTokens": { "type": "integer", "minimum": 0 },
-            "cachedInputTokens": { "type": "integer", "minimum": 0 },
-            "outputTokens": { "type": "integer", "minimum": 0 }
+            "inputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cachedInputTokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "outputTokens": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       }

@@ -1,0 +1,155 @@
+# 设计审查问题清单（待修复）
+
+## 背景
+
+本仓库为纯设计仓库（无实现代码），审查基线为提交 `d055fc7`。审查范围包括 `SPEC.md`、`INTENTS.md`、`docs/design.md`、`docs/prior-art.md`、`spec/` 下 5 份 JSON Schema（`events`、`scenario-pack`、`prediction`、`feedback`、`rpc`）与 `packages/pack-coding/pack.json`。
+
+本清单合并两轮设计审查的全部结论。其中「实测」类条目已在仓库上实际验证：5 份 Schema 均通过 JSON Schema Draft 2020-12 元校验；`packages/pack-coding/pack.json` 通过 `spec/scenario-pack.schema.json` 校验且各场景先验和为 1.0；`INTENTS.md` 的 YAML front matter 直接校验同 Schema 报错 3 处（见 R3）。
+
+## 修复原则
+
+1. 只修下列问题，不新增功能、不新开文档。
+2. 每改一处，必须保证设计文档（`docs/design.md` / `SPEC.md`）、`spec/` Schema、`INTENTS.md` / `packages/pack-coding/pack.json` 三处一致。
+3. 修完逐条按编号回复「已改 / 不改+理由」，并注明改动的提交。
+
+## P0（不修复无法施工）
+
+### R1 唯一事实来源未定且已漂移
+
+- 现象：`docs/design.md` §6 称 TS 为权威定义、§15 称 `spec/` 为唯一来源，根目录 `SPEC.md` 又成为第三份规范文本。
+- 已确认的漂移：`qualifiedIntentId` / `displayChannel` 在设计中为必填语义，但 `spec/prediction.schema.json` 的 `Prediction.required` 未包含它们；`alternatives` 设计上限 2 条，Schema 为 `maxItems: 3`。
+- 要求：明确 precedence（例如 `SPEC.md` 为规范文本、`spec/` 为机读契约、`docs/design.md` 降级为非规范说明并注明冲突时以前两者为准），并消除上述不一致。
+
+### R2 四份 Schema 根节点无效
+
+- 现象：`spec/events.schema.json`、`spec/feedback.schema.json`、`spec/prediction.schema.json`、`spec/rpc.schema.json` 的根只有 `type: object` + `$defs`，无 `$ref` 指向主定义，任意对象（包括 `{}`）都能校验通过，代码生成只会产出空类型。
+- 附带问题：`rpc` 只有 params/result 碎片，JSON-RPC 信封、方法名与 `-32001` 等错误码不在 Schema 内；跨文件相对 `$ref` + `https://intent-predict.dev` 形式 `$id` 的解析方式未说明，多数工具会默认联网取。
+- 要求：根节点指向主定义；`rpc` 补齐信封、方法与错误码；声明 bundle 或本地 registry 的解析策略，不依赖联网。
+
+### R3 INTENTS.md 过不了自家 Schema（实测 3 处报错）
+
+把 `INTENTS.md` 的 YAML front matter 解析后直接用 Draft 2020-12 校验器对照 `spec/scenario-pack.schema.json`，报错：
+
+1. `observation_stages` 与 Schema 的 `observationStages` 命名不一致，转换规则未定义。
+2. 包级 `policy` 在 Schema 中不存在（Schema 只有场景级 `policy`）。
+3. 两个 O3 意图（`diagnose_terminal_error`、`fix_ide_diagnostics`）的 `description` 超过 Schema 的 80 字上限。
+
+- 要求：修复后 `INTENTS.md` 须能通过校验（直接校验，或先经规范中显式声明的字段映射转换后校验）；映射规则须写进规范，不得靠实现者猜测。Markdown 正文如何填入 Schema 的 `promptTemplate` 字段也须一并声明。
+
+### R4 INTENTS.md 与 pack.json 已分叉
+
+- 现象（实测比对）：`INTENTS.md` 独有 `coding.subagent_reported`、`coding.ambient_terminal_failed`、`coding.ambient_ide_diagnostics`；`packages/pack-coding/pack.json` 独有 `coding.explained`、`coding.exec_succeeded`、`coding.general_followup`（兜底场景）。版本一个 0.3.0、一个 0.1.0；pack 未填写新增的 `stage` / `triggers` / `observationStages` 字段。共同场景的意图集合一致。
+- 后果：用 `INTENTS.md` 丢兜底覆盖梯度，用 `pack.json` 完全没有 O2/O3；两者行为不同但被当作同一包的两种写法。
+- 要求：只保留一份为源，另一份改为构建产物并做等值校验（或删除其一）；README 示例中 `qualifiedIntentId` 的版本号与实际包版本一致。
+
+### R5 O2/O3 触发与过期语义未闭环
+
+1. **信号无时效**：`agent.lastSubagent.status`、`env.lastTerminalCommand.exitCode`、`env.ambient.clipboardKind` 等「最近一次」信号无时效窗口与消费语义。`coding.subagent_reported` 的 `triggers` 含 `turn.completed` 且 priority 22 高于 `coding.after_edit` 的 20，子任务完成一次后将每一轮幽灵命中并压过其他场景。要求给 O2/O3 信号定义新鲜度窗口或事件消费/确认标记。
+2. **fork 兼容**：`sourceTurnId = "env-0"` 时 fork 采样按 `expectedTurnId` 校验必然返回 `TURN_MISMATCH`，须写明冷启动 env 触发仅允许 compact 模式。
+3. **会话归属**：`agent.*` / `env.*` 事件不带 `sessionId`，须定义经哪个会话通道上报、预测交付给哪个会话，以及 O2 触发时 `sourceTurnId` 的取值规则（现规范只给了 O3 的兜底）。
+4. **stage 门控**：场景路由（SPEC §5.3）从未检查 `scenario.stage` 是否超出实现声明的观察等级。要求补齐该检查（及包级 `observationStages` 与场景级 `stage` 的关系），或删除该字段。
+
+### R6 SPEC.md 不自足、conformance 悬空
+
+- 现象：9 条过滤直接引用 `docs/design.md` §7.8.3；信号提取算法（问句检测、编号选项、locale 推断、hints、toolKind 推断）、compact 构建规则、槽位校验细节、Sampler 接口、反馈与相似度、RPC 方法表均不在 `SPEC.md` 内。开篇引用的 `eval/golden.jsonl` 与 §7 所称测试用例在仓库中不存在。
+- 要求：二选一并落地——要么把算法细节搬进 `SPEC.md` 使其可独立实现，并提交 `eval/golden.jsonl`；要么删除 conformance 宣称及 README 的「一句话让 Agent 实现」宣传。
+
+### R7 融合公式无据且双份维护
+
+- 现象：`docs/design.md` §7.6 的 α=0.85、显式短路 0.92、`altScore` 权重（0.65/0.35/0.15）与各风险阈值均为未经数据验证的常数，且作用在未校准的模型自报置信度上；这些常数现同时存在于 `docs/design.md` 与 `SPEC.md` 两处，已有漂移一例（SPEC 版默认 prompt 删除了 design 版「总概率 ≤ 1」约束句）。
+- 附带硬伤：pack 各场景意图先验和已为 1.0，与融合算法「为 `none` 预留先验 0.25」的归一化组合方式未定义。
+- 要求：算法与常数只在一处定义；标注为待校准参数；给出 M0 最简基线（模型原始置信度过阈值）作为默认路径，融合待回放数据验证后再启用。
+
+## P1（方向性风险，须改口径或补设计）
+
+### R8 安全过度承诺
+
+`proposedRisk` 正则词表与脱敏正则表均可被绕过（未命中时默认 `reversible`），须删除「彻底杜绝」「永远不会」「必须 100% 经过脱敏」等表述，降级为纵深防御的一层；`slot.pattern` 与 `privacy.customRedactors` 的正则须补长度/复杂度约束防 ReDoS；ghost text 与 chips 同为「仅填入不发送」，须重新论证把通道差异当作 `side_effect` 安全边界的依据（或改述为体验分级而非安全边界）。
+
+### R9 仓库级 INTENTS.md 的信任面
+
+意图的 `risk` 与提示词正文均由场景包作者自报。随仓库分发的 `INTENTS.md` 可把推送类意图标为 `risk: none` 塞进 ghost text，或用正文 prompt 诱导分类器恒选 `confirm`。要求定义仓库级契约的信任等级：是否默认启用、是否需用户确认、风险等级是否设系统下限。
+
+### R10 隐私与 `signals_json` 黑洞
+
+目标 G7 与 §11.2 承诺「只使用当前会话上下文」，但 O3 事件含剪贴板预览（最长 500 字符）、窗口标题、终端命令原文；而决定实际发送内容的 `signals_json` 的字段枚举、大小上限、逐字段脱敏规则均未定义。要求：逐项枚举 `signals_json`（及 compact `transcript` 的 env/agents 摘要）字段与处理规则；给出观察器（终端/Git/IDE/剪贴板）粒度的开关与同意模型。
+
+### R11 差异化能力未被样例证明
+
+全部意图仅 1 个槽位（`choose_option.index`）、2 处共用 `/review` 命令动作，`tool` / `custom` 动作零覆盖，槽位字面约束与 Action 插值原子性无法从样例验证。要求在 INTENTS/pack 中补至少 1 个带 `tool` 动作与多槽位的完整场景（可将 `docs/design.md` §14.2 的客服 YAML 例子转成通过 Schema 的正式示例）。
+
+### R12 首发路径与零配置口径
+
+三处须各给一句定版：① TS 优先却选 Python 的 Hermes 为首发宿主，首个用户前须落地 core+sidecar+Python 钩子+三端 UI，是否改为最短路径宿主先行验证；② Hermes 的缓存不变量、事件钩子等关键前提未像 `docs/prior-art.md` 对 Codex/Qwen 那样钉提交号核实，须补证据或标为未验证；③ §8.1 称 L-Local 靠 Rule+Prior 运行，§7.4 又规定无显式规则时 L-Local 直接放弃，PriorSource 在纯本地能否独立产出候选须定版。
+
+### R13 未经验算的阈值
+
+每条须补一个算例验证，或明确降为可调参数并给出初值来源：
+
+1. Bigram Dice 近似命中线 0.75：建议「跑一下测试验证看看」与用户实际发送「跑一下测试」为同一意图，但 Dice = 2×4/(4+8) ≈ 0.67，会被计为未命中负例并触发退避。
+2. 「目录截断 15 个意图即稳定落入 4,000 字节」：须给字节预算计算（每个意图含 80 字 description、examples、槽位说明，CJK 字节/字符相差 3 倍）与超限时的降级顺序。
+3. chips 通道裁决双处定义：§7.7 在核心按风险裁决、§10.2 又按 margin 区间决定 chips 形态，冲突时以何为准须定唯一裁决方。
+
+## P2（细节漂移，逐项对齐）
+
+### R14 SuppressedReason 计数与死枚举
+
+`README.md` 称 34 种，`spec/prediction.schema.json` 枚举实测 36 个；其中 `budget_exhausted` 在现行语义下永远发不出来（只发 `budget_exhausted_no_explicit_rule`）。修正计数，并删除该枚举或补发射点。
+
+### R15 events 拼写残留
+
+`spec/events.schema.json` 的 `IdeFocusObservedEvent` 中大写 D 的 `DiagnosticsErrors` 与小写的 `diagnosticsErrors` 并存，删大写残留；`AgentEvent` 上的 `discriminator` 是 OpenAPI 关键字，在 JSON Schema 中无语义，删除。
+
+### R16 信号词表三处不一致
+
+`SPEC.md` 的 `agent.activeSubagents`、`agent.recentSessionIds`、`agent.lastBackgroundJob.sessionId` 在 `docs/design.md`、`INTENTS.md` 与事件 Schema 中不存在（事件字段实际为 `jobId` / `subagentId`）。以一方为准，全表对齐（包括 `agent.lastSubagent.*` 的完整字段集）。
+
+### R17 提示词变量不一致
+
+`SPEC.md` §4.1 承诺支持 `{{catalog_lines}}`，`INTENTS.md` 正文实际使用 `{{#each intents}}` 与 `{{scenario.stage}}`（后者不在承诺清单内，前者未被使用）。要求统一模板变量集与语法子集，并说明正文中的 Markdown 标记（反引号、代码围栏）是原样进 prompt 还是剥离。
+
+### R18 AgentTaskUpdatedEvent 计数归属冲突
+
+事件本身携带 `pendingReviews` / `openTasksCount` 聚合快照，与 `SPEC.md` §2.2「SDK 按 task 状态计数」冲突；任务无删除事件、无连接初期的全量快照同步，本地计数必然漂移。二选一：宿主每次上报权威计数，或 SDK 维护任务表并定义快照同步事件。
+
+### R19 死引用清理
+
+过滤规则 4（`filter_evaluative`）豁免的 `acknowledge` 意图在任何场景包中不存在；`freeform` 意图在目标与关键决策中提及，但在 Schema 与 TS API 中无定义落点（缺少 `enabledByDefault: false` 意图的启用开关）。各自补落点或删除提及。
+
+### R20 会话存储与协议施工缺项
+
+1. 事件保留上限（轮数/条数）、`tool.result.output` 大小上限、多会话内存上界未定义。
+2. `session/observe` 为通知、无幂等键，事件乱序与重复的处理未定义。
+3. 冷却表与退避计数是否跨进程重启持久化未定义。
+4. 预算守卫（`budget_exhausted_no_explicit_rule`）无单位定义：调用次数、token 还是金额，窗口如何重置。
+5. `PredictionResult.failed` 与 `completed + prediction: null + suppressedReason` 的使用划分未定义。
+6. `qualifiedIntentId` 内含包版本号，导致包每次升版即清空冷却与先验计数；应把遥测归档键与在线学习键分离，或声明接受该代价。
+
+---
+
+## 处理记录（v0.4 修订）
+
+以下按编号记录处理结论。验证入口：`python tools/validate.py`（全部通过，含 Schema 元校验、INTENTS/pack/示例校验、pack 等值生成、golden 格式与事件校验）。
+
+- **R1 已改**：`SPEC.md` 卷首新增「Authority & Precedence」（数据结构以 `spec/` 为准、行为以 `SPEC.md` 为准、`docs/design.md` 为非规范说明）；`Prediction.required` 补 `qualifiedIntentId`/`displayChannel`/`agencyStage`；`alternatives` 上限改 2。
+- **R2 已改**：四份 Schema 根节点改为 `$ref`/信封 `oneOf`（实测非法对象现被拒）；`rpc` 补方法枚举、请求/通知/响应信封与错误码；`$ref` 离线解析规则写进 `SPEC.md`，`tools/validate.py` 用本地 registry 验证。
+- **R3 已改**：`INTENTS.md` 改用与 Schema 相同的 camelCase（`observationStages`）；Schema 新增包级 `policy`；两个超长 `description` 已缩短。实测 front matter 直接校验通过。
+- **R4 已改**：`INTENTS.md` 定为单一来源并合入原 pack 独有的 3 个 O1 场景（现共 10 场景、33 意图）；`pack.json` 由 `tools/build_pack.py` 生成（含正文→`promptTemplate` 映射规则）；统一版本 0.4.0，README 示例已同步。
+- **R5 已改**：`SPEC.md` §2.4 新增 O2/O3 新鲜度（`signalTtlMs` 默认 60s）、触发单次消费、会话归属与 `env-0` 仅 compact 规则；O2/O3 事件新增可选 `sessionId`；路由 §5.3 新增 stage 门控；`coding.subagent_reported` 移除 `turn.completed` 触发。
+- **R6 已改**：`SPEC.md` 补齐 §5.0 信号提取、§5.5.1–5.5.3 字节预算/compact 构建/输出解析、§5.6 全部 9 条过滤正则，使其可独立实现；`eval/golden.jsonl` 已落地（20 条确定性用例，格式定义于 §7）。
+- **R7 已改**：融合常数在 `SPEC.md` 标注为待校准默认值并提供可替代的 baseline profile（原始置信度过阈值）；`P_prior` 明确 `none` 占 0.25、包内先验按 0.75 缩放。 design 侧不再另立常数口径。
+- **R8 已改**：删除「彻底杜绝/永远不会/100%」类表述并写明边界；包内/自定义正则限长 256 且要求有界执行；通道差异改述为操作摩擦而非安全边界。
+- **R9 已改**：`SPEC.md` §4.2 新增仓库包信任模型（按包 id 显式启用、禁止自动加载、按 action 类型设风险下限建议）。
+- **R10 已改**：`SPEC.md` §6 第 3 项枚举 `signals_json` 允许字段与上限，自由文本禁止进入；O3 每类观察器须可由用户单独关闭。
+- **R11 已改**：新增 `examples/support.intents.md`（`orderId` 确定性槽位 + `tool` 动作插值 + 提示词正文），经 `tools/validate.py` 校验通过。
+- **R12 已改（顺序与口径）**：Hermes 顺延为 M1，M0 先以回放定核心；design §8.4 注明 Hermes 内部前提未钉版本核实；L-Local 定版为「只有显式规则候选可独立产出」。
+- **R13 已改**：相似度新增子串包含豁免（同一意图的截断文本不计负例）；4,000 字节改为实测口径并给出超限降级顺序；通道裁决唯一化到核心门控并求交 `capabilities.displayChannels`（Schema 与 initialize 示例同步，原 `capabilities.sampler` 布尔改 `samplerModes`）。
+- **R14 已改**：删除死枚举 `budget_exhausted`（现 35 种），README 计数同步。
+- **R15 已改**：删除 `DiagnosticsErrors` 大写残留与非标准的 `discriminator` 字段。
+- **R16 已改**：删除 `agent.activeSubagents`/`agent.recentSessionIds`/`lastBackgroundJob.sessionId` 等无来源信号名，O2 信号字段与事件 Schema 对齐。
+- **R17 已改**：模板变量集统一（删除 `catalog_lines`，补 `{{scenario.stage}}` 与 `{{#each intents}}` 语法，未知变量渲染为空）；正文按原样（去首尾空行）进入 prompt 已在 `SPEC.md` §4.1 与 `INTENTS.md` 正文对齐。
+- **R18 已改**：定版为宿主上报权威计数、SDK 不自行计数；事件缺计数时信号沿用旧值/缺席（fail-closed）。
+- **R19 已改**：`acknowledge` 定为保留意图 id 约定（golden 含豁免用例）；`freeform` 定版为 v1 不提供，相关提及已改。
+- **R20 已改**：`SPEC.md` §6 第 4 项补留存上限建议、`tool.result.output` 64KiB 上限、重复 `turn.completed` 不重触发、冷却默认仅内存、预算单位为每小时 ModelSource 调用数、`failed` 与 `completed+null` 划分；学习键改无版本号形式（R1 同步写进 Schema 描述）。
+
+仍开放（非本文问题，留待实现阶段）：效果指标目标待真实回放数据（M0）；Hermes 前提的钉版本核查（M1）；观察器（shell hook 等）的具体实现归属（M1+）。

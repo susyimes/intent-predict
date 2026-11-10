@@ -3,7 +3,7 @@
   "$id": "https://intent-predict.dev/spec/events.schema.json",
   "title": "IntentPredictEvents",
   "description": "Normalized agent events and simple messages reported from a host agent to the intent-predict SDK.",
-  "type": "object",
+  "$ref": "#/$defs/AgentEvent",
   "$defs": {
     "ToolKind": {
       "type": "string",
@@ -22,61 +22,138 @@
     "TurnStartedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "turnId", "at"],
+      "required": [
+        "type",
+        "turnId",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "turn.started" },
-        "turnId": { "type": "string", "minLength": 1 },
-        "at": { "type": "integer", "minimum": 0, "description": "Epoch milliseconds." }
+        "type": {
+          "const": "turn.started"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Epoch milliseconds."
+        }
       }
     },
     "MessageUserEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "turnId", "text"],
+      "required": [
+        "type",
+        "turnId",
+        "text"
+      ],
       "properties": {
-        "type": { "const": "message.user" },
-        "turnId": { "type": "string", "minLength": 1 },
-        "text": { "type": "string" },
-        "hasAttachments": { "type": "boolean" }
+        "type": {
+          "const": "message.user"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string"
+        },
+        "hasAttachments": {
+          "type": "boolean"
+        }
       }
     },
     "MessageAgentEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "turnId", "text"],
+      "required": [
+        "type",
+        "turnId",
+        "text"
+      ],
       "properties": {
-        "type": { "const": "message.agent" },
-        "turnId": { "type": "string", "minLength": 1 },
-        "text": { "type": "string" },
-        "final": { "type": "boolean", "default": true }
+        "type": {
+          "const": "message.agent"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string"
+        },
+        "final": {
+          "type": "boolean",
+          "default": true
+        }
       }
     },
     "ToolCallEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "turnId", "callId", "name"],
+      "required": [
+        "type",
+        "turnId",
+        "callId",
+        "name"
+      ],
       "properties": {
-        "type": { "const": "tool.call" },
-        "turnId": { "type": "string", "minLength": 1 },
-        "callId": { "type": "string", "minLength": 1 },
-        "name": { "type": "string", "minLength": 1 },
-        "kind": { "$ref": "#/$defs/ToolKind" },
+        "type": {
+          "const": "tool.call"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "callId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "$ref": "#/$defs/ToolKind"
+        },
         "input": {}
       }
     },
     "ToolResultEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "turnId", "callId", "status"],
+      "required": [
+        "type",
+        "turnId",
+        "callId",
+        "status"
+      ],
       "properties": {
-        "type": { "const": "tool.result" },
-        "turnId": { "type": "string", "minLength": 1 },
-        "callId": { "type": "string", "minLength": 1 },
+        "type": {
+          "const": "tool.result"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "callId": {
+          "type": "string",
+          "minLength": 1
+        },
         "status": {
           "type": "string",
-          "enum": ["ok", "error", "denied"]
+          "enum": [
+            "ok",
+            "error",
+            "denied"
+          ]
         },
-        "exitCode": { "type": "integer" },
+        "exitCode": {
+          "type": "integer"
+        },
         "summary": {
           "type": "string",
           "description": "Single-line summary eligible for compact model context after redaction."
@@ -89,10 +166,20 @@
     "ArtifactEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "turnId", "kind", "ref"],
+      "required": [
+        "type",
+        "turnId",
+        "kind",
+        "ref"
+      ],
       "properties": {
-        "type": { "const": "artifact" },
-        "turnId": { "type": "string", "minLength": 1 },
+        "type": {
+          "const": "artifact"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        },
         "kind": {
           "type": "string",
           "enum": [
@@ -104,15 +191,24 @@
             "other"
           ]
         },
-        "ref": { "type": "string", "minLength": 1 }
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "StateEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "key", "value"],
+      "required": [
+        "type",
+        "key",
+        "value"
+      ],
       "properties": {
-        "type": { "const": "state" },
+        "type": {
+          "const": "state"
+        },
         "key": {
           "type": "string",
           "minLength": 1,
@@ -124,200 +220,510 @@
     "TurnCompletedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "turnId", "status", "at"],
+      "required": [
+        "type",
+        "turnId",
+        "status",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "turn.completed" },
-        "turnId": { "type": "string", "minLength": 1 },
+        "type": {
+          "const": "turn.completed"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        },
         "status": {
           "type": "string",
-          "enum": ["completed", "failed", "interrupted"]
+          "enum": [
+            "completed",
+            "failed",
+            "interrupted"
+          ]
         },
-        "errorCode": { "type": "string" },
-        "at": { "type": "integer", "minimum": 0 }
+        "errorCode": {
+          "type": "string"
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "SubagentCompletedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "subagentId", "status", "at"],
+      "required": [
+        "type",
+        "subagentId",
+        "status",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "agent.subagent_completed" },
-        "subagentId": { "type": "string", "minLength": 1 },
-        "goal": { "type": "string" },
+        "type": {
+          "const": "agent.subagent_completed"
+        },
+        "subagentId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "goal": {
+          "type": "string"
+        },
         "status": {
           "type": "string",
-          "enum": ["completed", "failed", "interrupted"]
+          "enum": [
+            "completed",
+            "failed",
+            "interrupted"
+          ]
         },
-        "summary": { "type": "string" },
-        "at": { "type": "integer", "minimum": 0 }
+        "summary": {
+          "type": "string"
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional delivery-session attribution. If absent, the prediction is delivered to the session on whose observe channel the event arrived (or the active session)."
+        }
       },
       "description": "Stage O2 event: a delegated subagent finished."
     },
     "BackgroundJobObservedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "jobId", "status", "at"],
+      "required": [
+        "type",
+        "jobId",
+        "status",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "agent.background_job" },
-        "jobId": { "type": "string", "minLength": 1 },
-        "command": { "type": "string" },
+        "type": {
+          "const": "agent.background_job"
+        },
+        "jobId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command": {
+          "type": "string"
+        },
         "status": {
           "type": "string",
-          "enum": ["completed", "failed", "ready_match"]
+          "enum": [
+            "completed",
+            "failed",
+            "ready_match"
+          ]
         },
-        "exitCode": { "type": "integer" },
-        "summary": { "type": "string" },
-        "at": { "type": "integer", "minimum": 0 }
+        "exitCode": {
+          "type": "integer"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional delivery-session attribution. If absent, the prediction is delivered to the session on whose observe channel the event arrived (or the active session)."
+        }
       },
       "description": "Stage O2 event: a background process or watcher exited or matched readiness."
     },
     "AgentTaskUpdatedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "taskId", "status", "at"],
+      "required": [
+        "type",
+        "taskId",
+        "status",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "agent.task_updated" },
-        "taskId": { "type": "string", "minLength": 1 },
-        "title": { "type": "string" },
+        "type": {
+          "const": "agent.task_updated"
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        },
         "status": {
           "type": "string",
-          "enum": ["todo", "ready", "running", "blocked", "review", "done"]
+          "enum": [
+            "todo",
+            "ready",
+            "running",
+            "blocked",
+            "review",
+            "done"
+          ]
         },
-        "pendingReviews": { "type": "integer", "minimum": 0 },
-        "openTasksCount": { "type": "integer", "minimum": 0 },
-        "at": { "type": "integer", "minimum": 0 }
+        "pendingReviews": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "openTasksCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional delivery-session attribution. If absent, the prediction is delivered to the session on whose observe channel the event arrived (or the active session)."
+        }
       },
       "description": "Stage O2 event: an agent kanban/todo task changed state."
     },
     "AgentSessionSwitchedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "fromSessionId", "toSessionId", "at"],
+      "required": [
+        "type",
+        "fromSessionId",
+        "toSessionId",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "agent.session_switched" },
-        "fromSessionId": { "type": "string" },
-        "toSessionId": { "type": "string", "minLength": 1 },
-        "at": { "type": "integer", "minimum": 0 }
+        "type": {
+          "const": "agent.session_switched"
+        },
+        "fromSessionId": {
+          "type": "string"
+        },
+        "toSessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional delivery-session attribution. If absent, the prediction is delivered to the session on whose observe channel the event arrived (or the active session)."
+        }
       },
       "description": "Stage O2 event: active session focus switched inside the agent."
     },
     "TerminalCommandObservedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "command", "exitCode", "at"],
+      "required": [
+        "type",
+        "command",
+        "exitCode",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "env.terminal_command" },
-        "command": { "type": "string", "minLength": 1 },
-        "cwd": { "type": "string" },
-        "exitCode": { "type": "integer" },
-        "durationMs": { "type": "number", "minimum": 0 },
-        "summary": { "type": "string" },
-        "at": { "type": "integer", "minimum": 0 }
+        "type": {
+          "const": "env.terminal_command"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "durationMs": {
+          "type": "number",
+          "minimum": 0
+        },
+        "summary": {
+          "type": "string"
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional delivery-session attribution. If absent, the prediction is delivered to the session on whose observe channel the event arrived (or the active session)."
+        }
       },
       "description": "User-executed shell command outside or alongside the agent turn (shell hook / terminal observer)."
     },
     "GitStatusObservedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "branch", "dirtyCount", "at"],
+      "required": [
+        "type",
+        "branch",
+        "dirtyCount",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "env.git_status" },
-        "branch": { "type": "string" },
-        "stagedCount": { "type": "integer", "minimum": 0 },
-        "dirtyCount": { "type": "integer", "minimum": 0 },
-        "untrackedCount": { "type": "integer", "minimum": 0 },
-        "ahead": { "type": "integer", "minimum": 0 },
-        "behind": { "type": "integer", "minimum": 0 },
-        "hasConflicts": { "type": "boolean" },
-        "at": { "type": "integer", "minimum": 0 }
+        "type": {
+          "const": "env.git_status"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "stagedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dirtyCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "untrackedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ahead": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "behind": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hasConflicts": {
+          "type": "boolean"
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional delivery-session attribution. If absent, the prediction is delivered to the session on whose observe channel the event arrived (or the active session)."
+        }
       }
     },
     "FileWatcherObservedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "paths", "at"],
+      "required": [
+        "type",
+        "paths",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "env.file_changed" },
+        "type": {
+          "const": "env.file_changed"
+        },
         "paths": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "actor": {
           "type": "string",
-          "enum": ["user", "agent", "external"],
+          "enum": [
+            "user",
+            "agent",
+            "external"
+          ],
           "default": "user"
         },
-        "at": { "type": "integer", "minimum": 0 }
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional delivery-session attribution. If absent, the prediction is delivered to the session on whose observe channel the event arrived (or the active session)."
+        }
       }
     },
     "IdeFocusObservedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "at"],
+      "required": [
+        "type",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "env.ide_context" },
-        "activeFile": { "type": "string" },
-        "cursorLine": { "type": "integer", "minimum": 1 },
-        "selectionLength": { "type": "integer", "minimum": 0 },
-        "DiagnosticsErrors": { "type": "integer", "minimum": 0 },
-        "diagnosticsErrors": { "type": "integer", "minimum": 0 },
-        "diagnosticsWarnings": { "type": "integer", "minimum": 0 },
-        "at": { "type": "integer", "minimum": 0 }
+        "type": {
+          "const": "env.ide_context"
+        },
+        "activeFile": {
+          "type": "string"
+        },
+        "cursorLine": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "selectionLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "diagnosticsErrors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "diagnosticsWarnings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional delivery-session attribution. If absent, the prediction is delivered to the session on whose observe channel the event arrived (or the active session)."
+        }
       }
     },
     "WindowClipboardObservedEvent": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["type", "at"],
+      "required": [
+        "type",
+        "at"
+      ],
       "properties": {
-        "type": { "const": "env.ambient_context" },
-        "activeApp": { "type": "string" },
-        "windowTitle": { "type": "string" },
+        "type": {
+          "const": "env.ambient_context"
+        },
+        "activeApp": {
+          "type": "string"
+        },
+        "windowTitle": {
+          "type": "string"
+        },
         "clipboardKind": {
           "type": "string",
-          "enum": ["stacktrace", "error_log", "url", "code_snippet", "plain_text"]
+          "enum": [
+            "stacktrace",
+            "error_log",
+            "url",
+            "code_snippet",
+            "plain_text"
+          ]
         },
-        "clipboardPreview": { "type": "string", "maxLength": 500 },
-        "at": { "type": "integer", "minimum": 0 }
+        "clipboardPreview": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional delivery-session attribution. If absent, the prediction is delivered to the session on whose observe channel the event arrived (or the active session)."
+        }
       }
     },
     "AgentEvent": {
       "oneOf": [
-        { "$ref": "#/$defs/TurnStartedEvent" },
-        { "$ref": "#/$defs/MessageUserEvent" },
-        { "$ref": "#/$defs/MessageAgentEvent" },
-        { "$ref": "#/$defs/ToolCallEvent" },
-        { "$ref": "#/$defs/ToolResultEvent" },
-        { "$ref": "#/$defs/ArtifactEvent" },
-        { "$ref": "#/$defs/StateEvent" },
-        { "$ref": "#/$defs/TurnCompletedEvent" },
-        { "$ref": "#/$defs/SubagentCompletedEvent" },
-        { "$ref": "#/$defs/BackgroundJobObservedEvent" },
-        { "$ref": "#/$defs/AgentTaskUpdatedEvent" },
-        { "$ref": "#/$defs/AgentSessionSwitchedEvent" },
-        { "$ref": "#/$defs/TerminalCommandObservedEvent" },
-        { "$ref": "#/$defs/GitStatusObservedEvent" },
-        { "$ref": "#/$defs/FileWatcherObservedEvent" },
-        { "$ref": "#/$defs/IdeFocusObservedEvent" },
-        { "$ref": "#/$defs/WindowClipboardObservedEvent" }
-      ],
-      "discriminator": { "propertyName": "type" }
+        {
+          "$ref": "#/$defs/TurnStartedEvent"
+        },
+        {
+          "$ref": "#/$defs/MessageUserEvent"
+        },
+        {
+          "$ref": "#/$defs/MessageAgentEvent"
+        },
+        {
+          "$ref": "#/$defs/ToolCallEvent"
+        },
+        {
+          "$ref": "#/$defs/ToolResultEvent"
+        },
+        {
+          "$ref": "#/$defs/ArtifactEvent"
+        },
+        {
+          "$ref": "#/$defs/StateEvent"
+        },
+        {
+          "$ref": "#/$defs/TurnCompletedEvent"
+        },
+        {
+          "$ref": "#/$defs/SubagentCompletedEvent"
+        },
+        {
+          "$ref": "#/$defs/BackgroundJobObservedEvent"
+        },
+        {
+          "$ref": "#/$defs/AgentTaskUpdatedEvent"
+        },
+        {
+          "$ref": "#/$defs/AgentSessionSwitchedEvent"
+        },
+        {
+          "$ref": "#/$defs/TerminalCommandObservedEvent"
+        },
+        {
+          "$ref": "#/$defs/GitStatusObservedEvent"
+        },
+        {
+          "$ref": "#/$defs/FileWatcherObservedEvent"
+        },
+        {
+          "$ref": "#/$defs/IdeFocusObservedEvent"
+        },
+        {
+          "$ref": "#/$defs/WindowClipboardObservedEvent"
+        }
+      ]
     },
     "SimpleMessage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["role", "content"],
+      "required": [
+        "role",
+        "content"
+      ],
       "properties": {
         "role": {
           "type": "string",
-          "enum": ["user", "assistant", "tool"]
+          "enum": [
+            "user",
+            "assistant",
+            "tool"
+          ]
         },
-        "content": { "type": "string" },
-        "toolName": { "type": "string" },
-        "toolKind": { "$ref": "#/$defs/ToolKind" },
-        "exitCode": { "type": "integer" },
-        "isError": { "type": "boolean" }
+        "content": {
+          "type": "string"
+        },
+        "toolName": {
+          "type": "string"
+        },
+        "toolKind": {
+          "$ref": "#/$defs/ToolKind"
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "isError": {
+          "type": "boolean"
+        }
       }
     }
   }

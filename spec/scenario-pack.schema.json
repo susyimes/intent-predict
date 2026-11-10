@@ -5,7 +5,11 @@
   "description": "Portable bounded-scenario intent catalog definition.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "version", "scenarios"],
+  "required": [
+    "id",
+    "version",
+    "scenarios"
+  ],
   "properties": {
     "id": {
       "type": "string",
@@ -17,15 +21,29 @@
       "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
       "description": "SemVer string."
     },
-    "description": { "type": "string" },
+    "description": {
+      "type": "string"
+    },
     "observationStages": {
       "type": "array",
       "items": {
         "type": "string",
-        "enum": ["O1", "O2", "O3"]
+        "enum": [
+          "O1",
+          "O2",
+          "O3"
+        ]
       },
-      "default": ["O1"],
-      "description": "Supported observation stages: O1 (Single-Session), O2 (Agent-Wide), O3 (Global Environment)."
+      "default": [
+        "O1"
+      ],
+      "description": "Supported observation stages: O1 (Single-Session), O2 (Agent-Wide), O3 (Global Environment).",
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "policy": {
+      "$ref": "#/$defs/GatePolicyPartial",
+      "description": "Optional pack-level gate policy overrides. Precedence: global < pack < origin scenario."
     },
     "promptTemplate": {
       "type": "string",
@@ -34,7 +52,9 @@
     "scenarios": {
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/ScenarioSpec" }
+      "items": {
+        "$ref": "#/$defs/ScenarioSpec"
+      }
     }
   },
   "$defs": {
@@ -51,19 +71,39 @@
     "SignalLeafPredicate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["signal"],
+      "required": [
+        "signal"
+      ],
       "properties": {
-        "signal": { "type": "string", "minLength": 1 },
+        "signal": {
+          "type": "string",
+          "minLength": 1
+        },
         "eq": {},
         "ne": {},
-        "gt": { "type": "number" },
-        "gte": { "type": "number" },
-        "lt": { "type": "number" },
-        "lte": { "type": "number" },
-        "in": { "type": "array" },
+        "gt": {
+          "type": "number"
+        },
+        "gte": {
+          "type": "number"
+        },
+        "lt": {
+          "type": "number"
+        },
+        "lte": {
+          "type": "number"
+        },
+        "in": {
+          "type": "array"
+        },
         "contains": {},
-        "matches": { "type": "string", "description": "ECMA-262 regular expression source." },
-        "exists": { "type": "boolean" }
+        "matches": {
+          "type": "string",
+          "description": "ECMA-262 regular expression source."
+        },
+        "exists": {
+          "type": "boolean"
+        }
       }
     },
     "SignalPredicate": {
@@ -71,52 +111,78 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["all"],
+          "required": [
+            "all"
+          ],
           "properties": {
             "all": {
               "type": "array",
               "minItems": 1,
-              "items": { "$ref": "#/$defs/SignalPredicate" }
+              "items": {
+                "$ref": "#/$defs/SignalPredicate"
+              }
             }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["any"],
+          "required": [
+            "any"
+          ],
           "properties": {
             "any": {
               "type": "array",
               "minItems": 1,
-              "items": { "$ref": "#/$defs/SignalPredicate" }
+              "items": {
+                "$ref": "#/$defs/SignalPredicate"
+              }
             }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["not"],
+          "required": [
+            "not"
+          ],
           "properties": {
-            "not": { "$ref": "#/$defs/SignalPredicate" }
+            "not": {
+              "$ref": "#/$defs/SignalPredicate"
+            }
           }
         },
-        { "$ref": "#/$defs/SignalLeafPredicate" }
+        {
+          "$ref": "#/$defs/SignalLeafPredicate"
+        }
       ]
     },
     "SlotSpec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["string", "number", "enum", "path"]
+          "enum": [
+            "string",
+            "number",
+            "enum",
+            "path"
+          ]
         },
-        "description": { "type": "string", "maxLength": 80 },
+        "description": {
+          "type": "string",
+          "maxLength": 80
+        },
         "enum": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "from": {
           "type": "string",
@@ -141,22 +207,39 @@
     "LocalizedTemplates": {
       "type": "object",
       "minProperties": 1,
-      "additionalProperties": { "type": "string", "minLength": 1 }
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "RenderSpec": {
       "oneOf": [
-        { "type": "string", "minLength": 1 },
-        { "$ref": "#/$defs/LocalizedTemplates" },
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "$ref": "#/$defs/LocalizedTemplates"
+        },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["mode"],
+          "required": [
+            "mode"
+          ],
           "properties": {
-            "mode": { "const": "model" },
+            "mode": {
+              "const": "model"
+            },
             "fallback": {
               "oneOf": [
-                { "type": "string", "minLength": 1 },
-                { "$ref": "#/$defs/LocalizedTemplates" }
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "$ref": "#/$defs/LocalizedTemplates"
+                }
               ]
             }
           }
@@ -168,38 +251,71 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type"],
+          "required": [
+            "type"
+          ],
           "properties": {
-            "type": { "const": "fill" }
+            "type": {
+              "const": "fill"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "command"],
+          "required": [
+            "type",
+            "command"
+          ],
           "properties": {
-            "type": { "const": "command" },
-            "command": { "type": "string", "minLength": 1 },
-            "args": { "type": "string" }
+            "type": {
+              "const": "command"
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1
+            },
+            "args": {
+              "type": "string"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "name", "input"],
+          "required": [
+            "type",
+            "name",
+            "input"
+          ],
           "properties": {
-            "type": { "const": "tool" },
-            "name": { "type": "string", "minLength": 1 },
-            "input": { "type": "object" }
+            "type": {
+              "const": "tool"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "input": {
+              "type": "object"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "name"],
+          "required": [
+            "type",
+            "name"
+          ],
           "properties": {
-            "type": { "const": "custom" },
-            "name": { "type": "string", "minLength": 1 },
+            "type": {
+              "const": "custom"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
             "payload": {}
           }
         }
@@ -209,32 +325,80 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "minConfidence": { "type": "number", "minimum": 0, "maximum": 1 },
-        "minMargin": { "type": "number", "minimum": 0, "maximum": 1 },
+        "minConfidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "minMargin": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
         "riskMinConfidence": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "none": { "type": "number", "minimum": 0, "maximum": 1 },
-            "read_only": { "type": "number", "minimum": 0, "maximum": 1 },
-            "reversible": { "type": "number", "minimum": 0, "maximum": 1 },
-            "side_effect": { "type": "number", "minimum": 0, "maximum": 1 },
-            "irreversible": { "type": "number", "minimum": 0, "maximum": 1 }
+            "none": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "read_only": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "reversible": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "side_effect": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "irreversible": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
           }
         },
         "ghostTextRisks": {
           "type": "array",
-          "items": { "$ref": "#/$defs/Risk" }
+          "items": {
+            "$ref": "#/$defs/Risk"
+          }
         },
-        "cooldownTurnsAfterDismiss": { "type": "integer", "minimum": 0 },
+        "cooldownTurnsAfterDismiss": {
+          "type": "integer",
+          "minimum": 0
+        },
         "ignoredBackoff": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["streak", "raiseBy"],
+          "required": [
+            "streak",
+            "raiseBy"
+          ],
           "properties": {
-            "streak": { "type": "integer", "minimum": 1 },
-            "raiseBy": { "type": "number", "minimum": 0, "maximum": 1 },
-            "maxRaise": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.25 },
+            "streak": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "raiseBy": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "maxRaise": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0.25
+            },
             "nearMatchSimilarityThreshold": {
               "type": "number",
               "minimum": 0,
@@ -244,18 +408,27 @@
             }
           }
         },
-        "maxPerSession": { "type": "integer", "minimum": 1 }
+        "maxPerSession": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "IntentSpec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "description", "risk"],
+      "required": [
+        "id",
+        "description",
+        "risk"
+      ],
       "properties": {
         "id": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9_]*$",
-          "not": { "const": "none" },
+          "not": {
+            "const": "none"
+          },
           "description": "Stable intent identifier within the pack; 'none' is reserved."
         },
         "description": {
@@ -265,15 +438,26 @@
         },
         "examples": {
           "type": "array",
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "when": { "$ref": "#/$defs/SignalPredicate" },
+        "when": {
+          "$ref": "#/$defs/SignalPredicate"
+        },
         "slots": {
           "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/SlotSpec" }
+          "additionalProperties": {
+            "$ref": "#/$defs/SlotSpec"
+          }
         },
-        "render": { "$ref": "#/$defs/RenderSpec" },
-        "risk": { "$ref": "#/$defs/Risk" },
+        "render": {
+          "$ref": "#/$defs/RenderSpec"
+        },
+        "risk": {
+          "$ref": "#/$defs/Risk"
+        },
         "dynamicRiskFromProposedAction": {
           "type": "boolean",
           "default": false,
@@ -283,11 +467,17 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["ghost_text", "chips", "action_button"]
+            "enum": [
+              "ghost_text",
+              "chips",
+              "action_button"
+            ]
           },
           "description": "Optional explicit UI channel whitelist for this intent."
         },
-        "action": { "$ref": "#/$defs/ActionDescriptor" },
+        "action": {
+          "$ref": "#/$defs/ActionDescriptor"
+        },
         "prior": {
           "type": "number",
           "minimum": 0,
@@ -302,7 +492,12 @@
     "ScenarioSpec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "description", "match", "intents"],
+      "required": [
+        "id",
+        "description",
+        "match",
+        "intents"
+      ],
       "properties": {
         "id": {
           "type": "string",
@@ -310,7 +505,11 @@
         },
         "stage": {
           "type": "string",
-          "enum": ["O1", "O2", "O3"],
+          "enum": [
+            "O1",
+            "O2",
+            "O3"
+          ],
           "default": "O1",
           "description": "Minimum observation stage required by this scenario: O1 (Single-Session), O2 (Agent-Wide), or O3 (Global Environment)."
         },
@@ -323,9 +522,14 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["completed", "failed"]
+            "enum": [
+              "completed",
+              "failed"
+            ]
           },
-          "default": ["completed"],
+          "default": [
+            "completed"
+          ],
           "description": "Turn completion statuses that activate this scenario."
         },
         "triggers": {
@@ -345,10 +549,14 @@
               "env.ambient_context"
             ]
           },
-          "default": ["turn.completed"],
+          "default": [
+            "turn.completed"
+          ],
           "description": "Event types that can trigger evaluation of this scenario across O1, O2, and O3."
         },
-        "match": { "$ref": "#/$defs/SignalPredicate" },
+        "match": {
+          "$ref": "#/$defs/SignalPredicate"
+        },
         "priority": {
           "type": "integer",
           "default": 0
@@ -357,9 +565,13 @@
           "type": "array",
           "minItems": 1,
           "maxItems": 15,
-          "items": { "$ref": "#/$defs/IntentSpec" }
+          "items": {
+            "$ref": "#/$defs/IntentSpec"
+          }
         },
-        "policy": { "$ref": "#/$defs/GatePolicyPartial" }
+        "policy": {
+          "$ref": "#/$defs/GatePolicyPartial"
+        }
       }
     }
   }

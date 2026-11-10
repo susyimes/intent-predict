@@ -1,8 +1,8 @@
 ---
 id: builtin/coding
-version: 0.3.0
+version: 0.4.0
 description: Built-in bounded-scenario intent contract across O1 (Single-Session), O2 (Agent-Wide), and O3 (Global Environment).
-observation_stages: [O1, O2, O3]
+observationStages: [O1, O2, O3]
 policy:
   minConfidence: 0.60
   minMargin: 0.15
@@ -176,7 +176,7 @@ scenarios:
     stage: O2
     priority: 22
     description: A delegated subagent or background agent job just completed and returned its findings.
-    triggers: [agent.subagent_completed, agent.background_job, turn.completed]
+    triggers: [agent.subagent_completed, agent.background_job]
     match:
       any:
         - { signal: agent.lastSubagent.status, eq: completed }
@@ -212,7 +212,7 @@ scenarios:
       ne: 0
     intents:
       - id: diagnose_terminal_error
-        description: Ask the agent to diagnose and fix the command failure that just occurred in the terminal.
+        description: Ask the agent to diagnose and fix the terminal command failure.
         render: { zh-CN: "帮我看看刚才终端命令为什么报错并修一下", en: "diagnose and fix the terminal command failure" }
         risk: reversible
         prior: 0.65
@@ -233,7 +233,7 @@ scenarios:
         - { signal: env.ambient.clipboardKind, eq: stacktrace }
     intents:
       - id: fix_ide_diagnostics
-        description: Ask the agent to fix the type/compile errors in the active file or clipboard stacktrace.
+        description: Ask the agent to fix errors in the active file or stacktrace.
         render: { zh-CN: "修一下当前文件里的类型/编译报错", en: "fix the diagnostics errors in the active file" }
         risk: reversible
         prior: 0.65
@@ -242,11 +242,184 @@ scenarios:
         render: { zh-CN: "分析一下这段报错栈的原因", en: "trace and explain this error" }
         risk: none
         prior: 0.35
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Stage O1 (restored): read-only/inspection + conservative slope fallback
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: coding.exec_succeeded
+    stage: O1
+    priority: 14
+    description: The agent ran read-only or inspection commands that succeeded without modifying files.
+    triggers:
+    - turn.completed
+    triggerOnTurnStatuses:
+    - completed
+    match:
+      all:
+      - signal: lastTurn.filesChanged
+        eq: 0
+      - signal: lastTurn.toolKinds
+        contains: execute
+      - signal: lastTurn.failedExecs
+        eq: 0
+    intents:
+    - id: continue_task
+      description: Proceed with the next step based on the command output.
+      examples:
+      - 继续下一步
+      - 接着往下做
+      - continue with the next step
+      - proceed
+      render:
+        zh-CN: 继续下一步
+        en: continue with the next step
+      risk: reversible
+      prior: 0.5
+    - id: explain_output
+      description: Ask the agent to explain or summarize the command output.
+      examples:
+      - 解释一下这个输出
+      - 这代表什么意思
+      - explain this output
+      - what does this output mean?
+      render:
+        zh-CN: 解释一下这个输出结果
+        en: explain what this output means
+      risk: none
+      prior: 0.3
+    - id: apply_suggestion
+      description: Ask the agent to make the code changes implied by the inspection.
+      examples:
+      - 开始改代码吧
+      - 动手修改吧
+      - go ahead and make the changes
+      - implement the fix now
+      render:
+        zh-CN: 开始修改代码吧
+        en: go ahead and make the changes
+      risk: reversible
+      prior: 0.2
+  - id: coding.explained
+    stage: O1
+    priority: 10
+    description: The agent inspected or searched the codebase (read-only tools only) and provided an explanation or
+      plan without editing files.
+    triggers:
+    - turn.completed
+    triggerOnTurnStatuses:
+    - completed
+    match:
+      all:
+      - signal: lastTurn.filesChanged
+        eq: 0
+      - signal: lastTurn.failedExecs
+        eq: 0
+      - signal: lastAgentMessage.length
+        gte: 200
+      - any:
+        - signal: lastTurn.toolKinds
+          contains: read
+        - signal: lastTurn.toolKinds
+          contains: search
+    intents:
+    - id: apply_suggestion
+      description: Ask the agent to go ahead and implement the changes or plan it just explained.
+      examples:
+      - 照你说的改吧
+      - 直接实现它
+      - go ahead and implement this
+      - apply these changes
+      render:
+        zh-CN: 按这个思路直接修改代码
+        en: go ahead and implement these changes
+      risk: reversible
+      prior: 0.5
+    - id: write_plan
+      description: Ask the agent to turn the analysis into a step-by-step implementation plan.
+      examples:
+      - 先列个详细的修改计划
+      - 写一份实施步骤
+      - write a step-by-step plan first
+      - break this down into a plan
+      render:
+        zh-CN: 先列一份分步修改计划
+        en: write a step-by-step implementation plan first
+      risk: read_only
+      prior: 0.25
+    - id: ask_example
+      description: Ask for a concrete code example or call-site trace.
+      examples:
+      - 给个具体的代码示例看看
+      - 看下调用链路
+      - show me a concrete code example
+      - trace where this is called
+      render:
+        zh-CN: 举个具体的代码调用例子
+        en: show me a concrete code example
+      risk: none
+      prior: 0.25
+  - id: coding.general_followup
+    stage: O1
+    priority: 1
+    description: Fallback coding scenario when a turn completes normally without matching specialized edit/test/question
+      triggers; uses a conservative high-threshold gate.
+    triggers:
+    - turn.completed
+    triggerOnTurnStatuses:
+    - completed
+    match:
+      all:
+      - signal: lastTurn.status
+        eq: completed
+      - signal: lastTurn.failedExecs
+        eq: 0
+      - signal: lastAgentMessage.length
+        gte: 60
+    policy:
+      minConfidence: 0.75
+      minMargin: 0.25
+    intents:
+    - id: apply_suggestion
+      description: Ask the agent to implement or execute the proposed approach.
+      examples:
+      - 按你说的实现吧
+      - 直接改代码
+      - implement this now
+      - go ahead and code it
+      render:
+        zh-CN: 按这个方案实现吧
+        en: go ahead and implement this
+      risk: reversible
+      prior: 0.45
+    - id: write_plan
+      description: Ask the agent to outline a concrete implementation plan first.
+      examples:
+      - 先列个修改计划
+      - 写下具体步骤
+      - write an implementation plan first
+      - outline the steps first
+      render:
+        zh-CN: 先列一份修改计划
+        en: outline the implementation plan first
+      risk: read_only
+      prior: 0.3
+    - id: ask_example
+      description: Ask for a concrete code snippet or example.
+      examples:
+      - 给个具体例子
+      - 写段示例代码看看
+      - show me a concrete example
+      - give me a code snippet
+      render:
+        zh-CN: 给个具体的代码示例
+        en: show me a concrete code example
+      risk: none
+      prior: 0.25
 ---
 
 # Intent Classification Prompt Contract
 
-`[INTENT PREDICTION — do not continue the task. Do not call tools.]`
+[INTENT PREDICTION — do not continue the task. Do not call tools.]
 
 Predict the user's NEXT message or action in this session, choosing strictly from the active scenario's catalog below.
 
@@ -276,7 +449,7 @@ Predict the user's NEXT message or action in this session, choosing strictly fro
 {{/if}}
 
 ## Observed Signals (O1 / O2 / O3)
-`{{signals_json}}`
+{{signals_json}}
 
 Reply with a single JSON object only:
-`{"intent":"<id>","confidence":0.0,"slots":{},"text":"","runnerUps":[{"intent":"<id2>","confidence":0.0}]}`
+{"intent":"<id>","confidence":0.0,"slots":{},"text":"","runnerUps":[{"intent":"<id2>","confidence":0.0}]}

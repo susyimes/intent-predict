@@ -3,23 +3,45 @@
   "$id": "https://intent-predict.dev/spec/feedback.schema.json",
   "title": "Feedback",
   "description": "User outcome and telemetry event for a delivered or suppressed prediction.",
-  "type": "object",
+  "$ref": "#/$defs/Feedback",
   "$defs": {
     "Feedback": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["predictionId", "outcome"],
+      "required": [
+        "predictionId",
+        "outcome"
+      ],
       "properties": {
-        "predictionId": { "type": "string", "minLength": 1 },
-        "sessionId": { "type": "string" },
-        "sourceTurnId": { "type": "string" },
+        "predictionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "sourceTurnId": {
+          "type": "string"
+        },
         "outcome": {
           "type": "string",
-          "enum": ["accepted", "edited", "ignored", "dismissed", "expired"]
+          "enum": [
+            "accepted",
+            "edited",
+            "ignored",
+            "dismissed",
+            "expired"
+          ]
         },
         "method": {
           "type": "string",
-          "enum": ["tab", "right", "enter", "click", "shortcut"]
+          "enum": [
+            "tab",
+            "right",
+            "enter",
+            "click",
+            "shortcut"
+          ]
         },
         "selectedIntentId": {
           "type": "string",
@@ -35,9 +57,17 @@
           "type": "string",
           "description": "Only populated when privacy.collectFinalText is explicitly true."
         },
-        "wasFocusedWhenShown": { "type": "boolean" },
-        "msSinceShown": { "type": "number", "minimum": 0 },
-        "msToFirstKeystroke": { "type": "number", "minimum": 0 }
+        "wasFocusedWhenShown": {
+          "type": "boolean"
+        },
+        "msSinceShown": {
+          "type": "number",
+          "minimum": 0
+        },
+        "msToFirstKeystroke": {
+          "type": "number",
+          "minimum": 0
+        }
       }
     },
     "TelemetryRecord": {
@@ -50,18 +80,41 @@
         "outcome"
       ],
       "properties": {
-        "timestamp": { "type": "integer", "minimum": 0 },
-        "sessionId": { "type": "string" },
-        "sourceTurnId": { "type": "string" },
-        "predictionId": { "type": "string" },
-        "packId": { "type": "string" },
-        "packVersion": { "type": "string" },
-        "scenarioId": { "type": "string" },
-        "intentId": { "type": "string" },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "timestamp": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "sourceTurnId": {
+          "type": "string"
+        },
+        "predictionId": {
+          "type": "string"
+        },
+        "packId": {
+          "type": "string"
+        },
+        "packVersion": {
+          "type": "string"
+        },
+        "scenarioId": {
+          "type": "string"
+        },
+        "intentId": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
         "sources": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "outcome": {
           "type": "string",
@@ -74,14 +127,35 @@
             "suppressed"
           ]
         },
-        "suppressedReason": { "$ref": "prediction.schema.json#/$defs/SuppressedReason" },
-        "method": { "type": "string" },
-        "similarity": { "type": "number", "minimum": 0, "maximum": 1 },
-        "suggestionLength": { "type": "integer", "minimum": 0 },
-        "wasFocusedWhenShown": { "type": "boolean" },
-        "msSinceShown": { "type": "number", "minimum": 0 },
-        "msToFirstKeystroke": { "type": "number", "minimum": 0 },
-        "usage": { "$ref": "prediction.schema.json#/$defs/PredictionUsage" }
+        "suppressedReason": {
+          "$ref": "prediction.schema.json#/$defs/SuppressedReason"
+        },
+        "method": {
+          "type": "string"
+        },
+        "similarity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "suggestionLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wasFocusedWhenShown": {
+          "type": "boolean"
+        },
+        "msSinceShown": {
+          "type": "number",
+          "minimum": 0
+        },
+        "msToFirstKeystroke": {
+          "type": "number",
+          "minimum": 0
+        },
+        "usage": {
+          "$ref": "prediction.schema.json#/$defs/PredictionUsage"
+        }
       }
     }
   }

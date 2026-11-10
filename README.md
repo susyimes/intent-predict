@@ -2,19 +2,21 @@
 
 **intent-predict** 是一个让**任意 Agent 成为全场景意图预测 Agent（Intent Predict Agent）**的通用 SDK。它的观察范围不局限于对话气泡，还可以感知终端命令、Git 工作区、文件变动、IDE 焦点与桌面/剪贴板环境；在识别出的有限场景里从一个封闭集合中预测用户下一步最可能的意图，并支持从「纯建议输出」渐进升级到「推测预执行」与「委托执行」。没有把握时就不给建议（fail-closed）。
 
-> 当前状态：**施工级设计规范已完成（v0.3，Symphony 式 Spec + Contract 架构）**
-> - 语言无关实现规范（Spec-as-Prompt）：[SPEC.md](SPEC.md)
-> - 场景与提示词契约（Front Matter + Prompt Body）：[INTENTS.md](INTENTS.md)
-> - 详细设计文档：[docs/design.md](docs/design.md)
+> 当前状态：**设计规范 v0.4（审查修订版，尚无实现代码）**。规范与机读契约可直接照着实现；效果指标待回放数据验证。
+> - 语言无关实现规范（Spec-as-Prompt，含权威划分）：[SPEC.md](SPEC.md)
+> - 场景与提示词契约（内置包的单一来源）：[INTENTS.md](INTENTS.md)
+> - 非规范详细设计说明：[docs/design.md](docs/design.md)
 > - 形式化 JSON Schema：[spec/](spec/)（`events`、`scenario-pack`、`prediction`、`feedback`、`rpc`）
-> - 内置编程场景包（JSON 编译产物）：[packages/pack-coding/pack.json](packages/pack-coding/pack.json)
-> - 调研笔记：[docs/prior-art.md](docs/prior-art.md)
+> - 内置编程场景包（由 `tools/build_pack.py` 从 INTENTS.md 生成）：[packages/pack-coding/pack.json](packages/pack-coding/pack.json)
+> - 确定性黄金用例：[eval/golden.jsonl](eval/golden.jsonl)；非编程示例包：[examples/support.intents.md](examples/support.intents.md)
+> - 仓库一致性校验：`python tools/validate.py`（需 `pip install jsonschema pyyaml`）
+> - 调研笔记：[docs/prior-art.md](docs/prior-art.md)；审查问题与处理记录：[docs/review-issues.md](docs/review-issues.md)
 
 ## 如何用一句话让你的 Agent 实现或接入它（Symphony 模式）
 
 你可以像使用 [OpenAI Symphony](https://github.com/openai/symphony) 一样，直接让你的 Coding Agent（Hermes、Codex、Claude Code 等）根据本仓库的规范自行实现或接入：
 
-> Implement `intent-predict` according to https://github.com/susyimes/intent-predict/blob/main/SPEC.md and load scenarios from https://github.com/susyimes/intent-predict/blob/main/INTENTS.md
+> Implement `intent-predict` according to https://github.com/susyimes/intent-predict/blob/main/SPEC.md, load scenarios from https://github.com/susyimes/intent-predict/blob/main/INTENTS.md, and verify against https://github.com/susyimes/intent-predict/blob/main/eval/golden.jsonl
 
 ## 一个例子
 
@@ -23,7 +25,7 @@ agent 改完代码（或子 Agent 完成任务、或用户在终端手动跑完�
 ```json
 {
   "scenarioId": "coding.after_edit",
-  "qualifiedIntentId": "builtin/coding@0.3.0/coding.after_edit#run_tests",
+  "qualifiedIntentId": "builtin/coding@0.4.0/coding.after_edit#run_tests",
   "displayChannel": "ghost_text",
   "agencyStage": "suggest_only",
   "intent": { "id": "run_tests", "confidence": 0.82, "slots": {} },
@@ -99,8 +101,8 @@ flowchart TB
   - L2（Fork Sampler）：宿主在缓存共享的分叉上采样（如 Hermes 同前缀分叉、Codex `thread/sample`）
   - L1（Host-Delegated）：宿主传入实时事件流，并委托宿主自身模型执行紧凑分类
   - L0（Simple Messages）：每轮结束时传入消息数组
-  - L-Local（纯本地）：无模型时仅用本地规则（`RuleSource`）与转移先验（`PriorSource`）
-- **宁缺毋滥**：识别不出场景就不预测，出现任何异常都不给建议（fail-closed，标准化 34 种 `SuppressedReason`）。
+  - L-Local（纯本地）：无模型时只有 `RuleSource` 的显式候选能产出建议（转移先验只排备选，不单独猜测）
+- **宁缺毋滥**：识别不出场景就不预测，出现任何异常都不给建议（fail-closed，标准化 35 种 `SuppressedReason`）。
 - **不自动发送**：从不自动发送消息，也从不自动执行有副作用的动作。
 - **可评估与隐私安全**：内置脱敏管道、本地 Bigram Dice 相似度计算和离线回放评测。
 
