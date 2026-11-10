@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://intent-predict.dev/spec/rpc.schema.json",
-  "title": "SidecarJsonRpcProtocol",
-  "description": "JSON-RPC 2.0 protocol for @intent-predict/sidecar over stdio (NDJSON).",
+  "title": "IntentPredictRpc",
+  "description": "JSON-RPC 2.0 messages between a host, the core and a surface (SPEC 8). Every request and notification is validated against the params of its method. Results are defined here per method but, as a JSON-RPC response carries no method name, they are validated by the caller.",
   "oneOf": [
     {
       "$ref": "#/$defs/JsonRpcRequest"
@@ -18,19 +18,37 @@
     }
   ],
   "$defs": {
-    "Method": {
+    "Id": {
+      "description": "Ids of core-originated requests start with 's-'; hosts and surfaces must not use that prefix.",
+      "oneOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    },
+    "RequestMethod": {
       "type": "string",
       "enum": [
         "initialize",
-        "session/observe",
-        "prediction/request",
-        "prediction/cancel",
-        "prediction/feedback",
-        "prediction/updated",
+        "surface/attach",
+        "prediction/act",
         "sampler/sample",
-        "sampler/cancel",
         "dispatch/message",
         "dispatch/command"
+      ]
+    },
+    "NotificationMethod": {
+      "type": "string",
+      "enum": [
+        "session/observe",
+        "prediction/cancel",
+        "prediction/updated",
+        "prediction/invalidated",
+        "sampler/cancel"
       ]
     },
     "JsonRpcRequest": {
@@ -39,55 +57,223 @@
       "required": [
         "jsonrpc",
         "id",
-        "method"
+        "method",
+        "params"
       ],
       "properties": {
         "jsonrpc": {
           "const": "2.0"
         },
         "id": {
-          "description": "Host-originated requests use integers or 'h-*' ids; SDK-originated reverse calls use 's-*' ids.",
-          "oneOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "string",
-              "pattern": "^(h|s)-.+"
-            }
-          ]
+          "$ref": "#/$defs/Id"
         },
         "method": {
-          "$ref": "#/$defs/Method"
+          "$ref": "#/$defs/RequestMethod"
         },
         "params": {
           "type": "object"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "initialize"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/InitializeParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "surface/attach"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/SurfaceAttachParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "prediction/act"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/PredictionActParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "sampler/sample"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/SamplerSampleParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "dispatch/message"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/DispatchMessageParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "dispatch/command"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/DispatchCommandParams"
+              }
+            }
+          }
+        }
+      ]
     },
     "JsonRpcNotification": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "jsonrpc",
-        "method"
+        "method",
+        "params"
       ],
-      "not": {
-        "required": [
-          "id"
-        ]
-      },
       "properties": {
         "jsonrpc": {
           "const": "2.0"
         },
         "method": {
-          "$ref": "#/$defs/Method"
+          "$ref": "#/$defs/NotificationMethod"
         },
         "params": {
           "type": "object"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "session/observe"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/SessionObserveParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "prediction/cancel"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/PredictionCancelParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "prediction/updated"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/PredictionUpdatedParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "prediction/invalidated"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/PredictionInvalidatedParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "sampler/cancel"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/SamplerCancelParams"
+              }
+            }
+          }
+        }
+      ]
     },
     "JsonRpcSuccessResponse": {
       "type": "object",
@@ -102,18 +288,11 @@
           "const": "2.0"
         },
         "id": {
-          "description": "Host-originated requests use integers or 'h-*' ids; SDK-originated reverse calls use 's-*' ids.",
-          "oneOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "string",
-              "pattern": "^(h|s)-.+"
-            }
-          ]
+          "$ref": "#/$defs/Id"
         },
-        "result": {}
+        "result": {
+          "type": "object"
+        }
       }
     },
     "JsonRpcError": {
@@ -134,9 +313,10 @@
             -32603,
             -32001,
             -32002,
-            -32003
+            -32003,
+            -32004
           ],
-          "description": "JSON-RPC standard codes plus -32001 SESSION_BUSY, -32002 TURN_MISMATCH, -32003 SAMPLER_ABORTED."
+          "description": "JSON-RPC standard codes plus -32001 SESSION_BUSY, -32002 TURN_MISMATCH, -32003 SAMPLER_ABORTED, -32004 UNAUTHORIZED."
         },
         "message": {
           "type": "string",
@@ -160,10 +340,7 @@
         "id": {
           "oneOf": [
             {
-              "type": "integer"
-            },
-            {
-              "type": "string"
+              "$ref": "#/$defs/Id"
             },
             {
               "type": "null"
@@ -175,17 +352,97 @@
         }
       }
     },
+    "Options": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Host runtime options. Every knob the SPEC names is set here or in 'policy'.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "blockedModes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "plan"
+          ]
+        },
+        "settleMs": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 150
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4000
+        },
+        "samplerMode": {
+          "type": "string",
+          "enum": [
+            "compact",
+            "fork"
+          ],
+          "default": "compact",
+          "description": "Preferred mode when the host offers both."
+        },
+        "modelBudget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maxCallsPerHour"
+          ],
+          "properties": {
+            "maxCallsPerHour": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "maxPerSession": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cooldownTurnsAfterDismiss": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3
+        },
+        "altMinConfidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.15
+        },
+        "redact": {
+          "type": "string",
+          "enum": [
+            "default",
+            "strict"
+          ],
+          "default": "default"
+        },
+        "serveSurface": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether the core serves its bundled surface on loopback."
+        }
+      }
+    },
     "InitializeParams": {
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "protocolVersion",
         "client",
         "capabilities"
       ],
       "properties": {
         "protocolVersion": {
-          "type": "string",
-          "default": "0.1"
+          "const": "0.5"
         },
         "client": {
           "type": "object",
@@ -224,7 +481,7 @@
                 ]
               },
               "default": [],
-              "description": "Sampler modes the host can serve via sampler/sample. Empty means no sampler (SDK degrades to L0/L-Local)."
+              "description": "Empty means no sampler: only deterministic rules can produce predictions."
             },
             "dispatchModes": {
               "type": "array",
@@ -237,7 +494,12 @@
                 ]
               },
               "default": [],
-              "description": "Optional ways the host accepts user-approved input from the SDK's independent Web UI into a session: 'message' (send text as the next user message) and/or 'command' (invoke a slash command). Empty means copy-only; the SDK never writes to the host composer/input box."
+              "description": "How the host accepts a user-approved send from a surface. Empty means copy-only."
+            },
+            "surface": {
+              "type": "boolean",
+              "default": false,
+              "description": "True when this connection also acts as a surface: it receives prediction/updated and prediction/invalidated and may call prediction/act."
             }
           }
         },
@@ -247,7 +509,7 @@
             "oneOf": [
               {
                 "type": "string",
-                "description": "Built-in pack ID or file path."
+                "description": "Built-in pack id or a file path. Naming a path is the explicit opt-in SPEC 3.2 requires."
               },
               {
                 "$ref": "scenario-pack.schema.json"
@@ -258,24 +520,8 @@
         "policy": {
           "$ref": "scenario-pack.schema.json#/$defs/GatePolicyPartial"
         },
-        "privacy": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "redact": {
-              "type": "string",
-              "enum": [
-                "default",
-                "strict",
-                "off"
-              ],
-              "default": "default"
-            },
-            "collectFinalText": {
-              "type": "boolean",
-              "default": false
-            }
-          }
+        "options": {
+          "$ref": "#/$defs/Options"
         }
       }
     },
@@ -289,7 +535,7 @@
       ],
       "properties": {
         "protocolVersion": {
-          "type": "string"
+          "const": "0.5"
         },
         "server": {
           "type": "object",
@@ -311,6 +557,7 @@
           "type": "array",
           "items": {
             "type": "object",
+            "additionalProperties": false,
             "required": [
               "id",
               "version",
@@ -329,6 +576,10 @@
               }
             }
           }
+        },
+        "surfaceUrl": {
+          "type": "string",
+          "description": "Loopback URL (including its access token) of the bundled surface, when the core serves one. The host should show or open it for the user."
         }
       }
     },
@@ -348,37 +599,8 @@
           "type": "array",
           "minItems": 1,
           "items": {
-            "$ref": "events.schema.json#/$defs/AgentEvent"
+            "$ref": "events.schema.json#/$defs/ObservedEvent"
           }
-        }
-      }
-    },
-    "PredictionRequestParams": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "sessionId",
-        "sourceTurnId"
-      ],
-      "properties": {
-        "sessionId": {
-          "type": "string",
-          "minLength": 1
-        },
-        "sourceTurnId": {
-          "type": "string",
-          "minLength": 1
-        },
-        "messages": {
-          "type": "array",
-          "items": {
-            "$ref": "events.schema.json#/$defs/SimpleMessage"
-          }
-        },
-        "state": {
-          "type": "object",
-          "additionalProperties": true,
-          "description": "Optional L0 host state snapshot (e.g. { 'composer.dirty': false, pendingApproval: false, mode: 'code', incognito: false })."
         }
       }
     },
@@ -389,28 +611,6 @@
         "sessionId"
       ],
       "properties": {
-        "sessionId": {
-          "type": "string",
-          "minLength": 1
-        },
-        "reason": {
-          "type": "string"
-        }
-      }
-    },
-    "SamplerCancelParams": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "sampleRequestId",
-        "sessionId"
-      ],
-      "properties": {
-        "sampleRequestId": {
-          "type": "string",
-          "pattern": "^s-[0-9]+$",
-          "description": "JSON-RPC request id of the in-flight sampler/sample call to abort."
-        },
         "sessionId": {
           "type": "string",
           "minLength": 1
@@ -438,7 +638,179 @@
           "minLength": 1
         },
         "result": {
-          "$ref": "prediction.schema.json#/$defs/PredictionResult"
+          "$ref": "prediction.schema.json#/$defs/EvaluationResult"
+        },
+        "trace": {
+          "type": "object",
+          "description": "Optional, implementation-defined diagnostics for inspector surfaces (matched scenario, threshold, redacted signals). Not part of conformance."
+        }
+      },
+      "description": "Reports one evaluation. A result with prediction null never invalidates a live prediction; only prediction/invalidated does."
+    },
+    "PredictionInvalidatedParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "predictionId",
+        "reason"
+      ],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "predictionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "turn_started",
+            "resolved",
+            "cancelled"
+          ]
+        }
+      }
+    },
+    "SurfaceAttachParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "token": {
+          "type": "string",
+          "minLength": 16,
+          "description": "Per-launch access token. Required on every network transport."
+        },
+        "inspector": {
+          "type": "boolean",
+          "default": false,
+          "description": "Ask for suppressed evaluations and 'trace' as well."
+        }
+      }
+    },
+    "SurfaceAttachResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessions"
+      ],
+      "properties": {
+        "sessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sessionId"
+            ],
+            "properties": {
+              "sessionId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "live": {
+                "$ref": "prediction.schema.json#/$defs/Prediction"
+              }
+            }
+          }
+        },
+        "dispatchModes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "message",
+              "command"
+            ]
+          }
+        }
+      }
+    },
+    "PredictionActParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "predictionId",
+        "action"
+      ],
+      "properties": {
+        "predictionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "send",
+            "copy",
+            "dismiss"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "description": "For 'send': the exact text the user approved (the rendered text, or the user's edit of it)."
+        },
+        "choice": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Index into prediction.choices the user picked."
+        },
+        "alternative": {
+          "type": "string",
+          "description": "intentId of the alternative the user picked."
+        },
+        "confirmed": {
+          "type": "boolean",
+          "description": "True only if the surface showed a separate confirmation step and the user accepted it."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "send"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "text"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "choice",
+              "alternative"
+            ]
+          }
+        }
+      ]
+    },
+    "PredictionActResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "dispatched",
+            "recorded",
+            "stale",
+            "busy",
+            "confirmation_required",
+            "unsupported",
+            "failed"
+          ]
         }
       }
     },
@@ -448,6 +820,7 @@
       "required": [
         "sessionId",
         "expectedTurnId",
+        "mode",
         "prompt"
       ],
       "properties": {
@@ -465,23 +838,15 @@
             "fork",
             "compact"
           ],
-          "default": "fork",
-          "description": "'fork' appends prompt to an ephemeral cache-sharing fork of sessionId; 'compact' sends a self-contained prompt via the host's configured auxiliary/fast model without user configuration."
+          "description": "'fork': append prompt to an ephemeral cache-sharing fork of the session. 'compact': run the self-contained prompt on the host's own model connection, without tools."
         },
         "prompt": {
           "type": "string",
-          "maxLength": 12000
+          "minLength": 1,
+          "maxLength": 8000
         },
         "jsonSchema": {
           "type": "object"
-        },
-        "effort": {
-          "type": "string",
-          "enum": [
-            "none",
-            "minimal",
-            "low"
-          ]
         },
         "maxOutputTokens": {
           "type": "integer",
@@ -502,7 +867,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "null when the model tried to call a tool or produced no text."
         },
         "usage": {
           "type": "object",
@@ -524,12 +890,36 @@
         }
       }
     },
+    "SamplerCancelParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sampleRequestId",
+        "sessionId"
+      ],
+      "properties": {
+        "sampleRequestId": {
+          "type": "string",
+          "pattern": "^s-",
+          "description": "JSON-RPC id of the in-flight sampler/sample request to abort."
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
     "DispatchMessageParams": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "sessionId",
-        "text"
+        "text",
+        "expectedTurnId",
+        "predictionId"
       ],
       "properties": {
         "sessionId": {
@@ -540,7 +930,17 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 4000,
-          "description": "User-approved text from the SDK Web UI draft editor, delivered as the next user message."
+          "description": "User-approved text, to be handled exactly like a message the user typed."
+        },
+        "expectedTurnId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The turn the suggestion answers. The host must refuse with TURN_MISMATCH unless this is the session's latest completed turn, and with SESSION_BUSY while a turn is running."
+        },
+        "predictionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Idempotency key: the host must never create two messages for the same predictionId."
         }
       }
     },
@@ -549,7 +949,9 @@
       "additionalProperties": false,
       "required": [
         "sessionId",
-        "command"
+        "command",
+        "expectedTurnId",
+        "predictionId"
       ],
       "properties": {
         "sessionId": {
@@ -558,14 +960,25 @@
         },
         "command": {
           "type": "string",
-          "pattern": "^/",
-          "maxLength": 120
+          "pattern": "^/[a-z][a-z0-9_-]{1,30}$"
         },
         "args": {
           "type": "string",
           "maxLength": 1000
+        },
+        "expectedTurnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "predictionId": {
+          "type": "string",
+          "minLength": 1
         }
       }
+    },
+    "DispatchResult": {
+      "type": "object",
+      "description": "An empty object: the host accepted the input and started (not queued) a turn for it."
     }
   }
 }

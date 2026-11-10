@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://intent-predict.dev/spec/scenario-pack.schema.json",
   "title": "ScenarioPack",
-  "description": "Portable bounded-scenario intent catalog definition.",
+  "description": "Portable bounded-scenario intent catalog (v0.5, O1 x A1). An INTENTS.md front matter is exactly this object in YAML; the Markdown body maps to promptTemplate.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -24,30 +24,13 @@
     "description": {
       "type": "string"
     },
-    "observationStages": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "enum": [
-          "O1",
-          "O2",
-          "O3"
-        ]
-      },
-      "default": [
-        "O1"
-      ],
-      "description": "Supported observation stages: O1 (Single-Session), O2 (Agent-Wide), O3 (Global Environment).",
-      "minItems": 1,
-      "uniqueItems": true
-    },
     "policy": {
       "$ref": "#/$defs/GatePolicyPartial",
-      "description": "Optional pack-level gate policy overrides. Precedence: global < pack < origin scenario."
+      "description": "Pack-level confidence thresholds. Packs and scenarios can only tighten the host policy (SPEC 3.3)."
     },
     "promptTemplate": {
       "type": "string",
-      "description": "Optional Markdown prompt template body when loaded from an INTENTS.md contract."
+      "description": "Classification prompt template (the Markdown body of an INTENTS.md). When absent the default prompt of SPEC 4.5 is used."
     },
     "scenarios": {
       "type": "array",
@@ -64,9 +47,9 @@
         "none",
         "read_only",
         "reversible",
-        "side_effect",
-        "irreversible"
-      ]
+        "side_effect"
+      ],
+      "description": "Declared risk of what the user's message asks for. none: conversation only; read_only: inspection; reversible: local, undoable work (edits, tests, local commit); side_effect: leaves the workspace (push, PR, deploy, messages). Irreversible requests are not expressible as intents in this version."
     },
     "SignalLeafPredicate": {
       "type": "object",
@@ -99,6 +82,7 @@
         "contains": {},
         "matches": {
           "type": "string",
+          "maxLength": 256,
           "description": "ECMA-262 regular expression source."
         },
         "exists": {
@@ -186,11 +170,12 @@
         },
         "from": {
           "type": "string",
-          "description": "Deterministic signal path to resolve before falling back to model extraction."
+          "description": "Signal path resolved deterministically before any model-provided value."
         },
         "pattern": {
           "type": "string",
-          "description": "Regex validation pattern; if violated, the prediction is discarded."
+          "maxLength": 256,
+          "description": "Regex the string form of the value must match; otherwise the prediction is discarded."
         },
         "maxLength": {
           "type": "integer",
@@ -213,6 +198,7 @@
       }
     },
     "RenderSpec": {
+      "description": "The only source of user-visible suggestion text: a template, or templates keyed by locale. Placeholders are {slotName}.",
       "oneOf": [
         {
           "type": "string",
@@ -220,46 +206,12 @@
         },
         {
           "$ref": "#/$defs/LocalizedTemplates"
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "mode"
-          ],
-          "properties": {
-            "mode": {
-              "const": "model"
-            },
-            "fallback": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "$ref": "#/$defs/LocalizedTemplates"
-                }
-              ]
-            }
-          }
         }
       ]
     },
     "ActionDescriptor": {
+      "description": "Structured action the suggestion corresponds to. In this version only 'command' can be dispatched (as a slash command); 'tool' and 'custom' are metadata.",
       "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "type"
-          ],
-          "properties": {
-            "type": {
-              "const": "fill"
-            }
-          }
-        },
         {
           "type": "object",
           "additionalProperties": false,
@@ -273,7 +225,7 @@
             },
             "command": {
               "type": "string",
-              "minLength": 1
+              "pattern": "^/[a-z][a-z0-9_-]{1,30}$"
             },
             "args": {
               "type": "string"
@@ -321,6 +273,31 @@
         }
       ]
     },
+    "Enumerate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slot",
+        "over"
+      ],
+      "properties": {
+        "slot": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of a declared number slot that receives the 1-based position of each item."
+        },
+        "over": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Signal path that must resolve to an array of 2-9 strings."
+        },
+        "preferred": {
+          "type": "string",
+          "description": "Optional signal path resolving to the 1-based position to preselect."
+        }
+      },
+      "description": "Deterministic expansion of one intent into one choice per item of a signal array (SPEC 4.4 rule R2)."
+    },
     "GatePolicyPartial": {
       "type": "object",
       "additionalProperties": false,
@@ -328,89 +305,14 @@
         "minConfidence": {
           "type": "number",
           "minimum": 0,
-          "maximum": 1
+          "maximum": 1,
+          "description": "Minimum model confidence for none/read_only/reversible intents. Default 0.60."
         },
-        "minMargin": {
+        "sideEffectMinConfidence": {
           "type": "number",
           "minimum": 0,
-          "maximum": 1
-        },
-        "riskMinConfidence": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "none": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "read_only": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "reversible": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "side_effect": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "irreversible": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            }
-          }
-        },
-        "quickRisks": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Risk"
-          }
-        },
-        "cooldownTurnsAfterDismiss": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "ignoredBackoff": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "streak",
-            "raiseBy"
-          ],
-          "properties": {
-            "streak": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "raiseBy": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "maxRaise": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1,
-              "default": 0.25
-            },
-            "nearMatchSimilarityThreshold": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1,
-              "default": 0.75,
-              "description": "If an ignored suggestion has Bigram Dice similarity >= this threshold with the user's actual message, treat it as a near-match (reset streak instead of penalizing)."
-            }
-          }
-        },
-        "maxPerSession": {
-          "type": "integer",
-          "minimum": 1
+          "maximum": 1,
+          "description": "Minimum model confidence for side_effect intents. Default 0.80."
         }
       }
     },
@@ -420,6 +322,7 @@
       "required": [
         "id",
         "description",
+        "render",
         "risk"
       ],
       "properties": {
@@ -429,7 +332,7 @@
           "not": {
             "const": "none"
           },
-          "description": "Stable intent identifier within the pack; 'none' is reserved."
+          "description": "Intent identifier, unique within its scenario; 'none' is reserved."
         },
         "description": {
           "type": "string",
@@ -452,40 +355,22 @@
             "$ref": "#/$defs/SlotSpec"
           }
         },
+        "enumerate": {
+          "$ref": "#/$defs/Enumerate"
+        },
         "render": {
           "$ref": "#/$defs/RenderSpec"
         },
         "risk": {
           "$ref": "#/$defs/Risk"
         },
-        "dynamicRiskFromProposedAction": {
+        "passThrough": {
           "type": "boolean",
           "default": false,
-          "description": "When true (e.g. confirm / choose_option), effective risk is max(intent.risk, lastAgentMessage.proposedRisk), so dangerous agent proposals cannot slip through as low-risk ghost text."
-        },
-        "allowedChannels": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "quick",
-              "choice",
-              "confirm"
-            ]
-          },
-          "description": "Optional explicit UI channel whitelist for this intent."
+          "description": "True when the message approves or continues whatever the agent just proposed (confirm, pick an option, go ahead, continue). Such intents are removed from the catalog when the agent's proposal looks like an external or destructive action, must declare risk reversible or higher, and must be shown together with the agent text they answer."
         },
         "action": {
           "$ref": "#/$defs/ActionDescriptor"
-        },
-        "prior": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "enabledByDefault": {
-          "type": "boolean",
-          "default": true
         }
       }
     },
@@ -503,23 +388,24 @@
           "type": "string",
           "pattern": "^[a-z][a-z0-9_.]*$"
         },
-        "stage": {
-          "type": "string",
-          "enum": [
-            "O1",
-            "O2",
-            "O3"
-          ],
-          "default": "O1",
-          "description": "Minimum observation stage required by this scenario: O1 (Single-Session), O2 (Agent-Wide), or O3 (Global Environment)."
-        },
         "description": {
           "type": "string",
           "minLength": 1,
           "maxLength": 160
         },
+        "priority": {
+          "type": "integer",
+          "default": 0
+        },
+        "fallback": {
+          "type": "boolean",
+          "default": false,
+          "description": "Fallback scenarios are considered only when no non-fallback scenario matches."
+        },
         "triggerOnTurnStatuses": {
           "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
           "items": {
             "type": "string",
             "enum": [
@@ -529,37 +415,10 @@
           },
           "default": [
             "completed"
-          ],
-          "description": "Turn completion statuses that activate this scenario."
-        },
-        "triggers": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "enum": [
-              "turn.completed",
-              "agent.subagent_completed",
-              "agent.background_job",
-              "agent.task_updated",
-              "agent.session_switched",
-              "env.terminal_command",
-              "env.git_status",
-              "env.file_changed",
-              "env.ide_context",
-              "env.ambient_context"
-            ]
-          },
-          "default": [
-            "turn.completed"
-          ],
-          "description": "Event types that can trigger evaluation of this scenario across O1, O2, and O3."
+          ]
         },
         "match": {
           "$ref": "#/$defs/SignalPredicate"
-        },
-        "priority": {
-          "type": "integer",
-          "default": 0
         },
         "intents": {
           "type": "array",

@@ -1,162 +1,192 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://intent-predict.dev/spec/feedback.schema.json",
-  "title": "Feedback",
-  "description": "User outcome and telemetry event for a delivered or suppressed prediction.",
-  "$ref": "#/$defs/Feedback",
+  "title": "TelemetryRecord",
+  "description": "Local telemetry log (one JSON object per line). The core writes one evaluation record per pipeline evaluation and exactly one outcome record per delivered prediction. Records never contain message text.",
+  "$ref": "#/$defs/TelemetryRecord",
   "$defs": {
-    "Feedback": {
+    "Outcome": {
+      "type": "string",
+      "enum": [
+        "sent",
+        "dismissed",
+        "passed",
+        "expired"
+      ],
+      "description": "sent: the user sent it (possibly edited) from a surface. dismissed: the user closed it on a surface. passed: the user sent their own next message instead. expired: no user message followed."
+    },
+    "Selected": {
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "primary",
+            "choice",
+            "alternative"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Index into choices when kind is 'choice'."
+        },
+        "intentId": {
+          "type": "string",
+          "description": "Alternative intent id when kind is 'alternative'."
+        }
+      }
+    },
+    "EvaluationRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record",
+        "timestamp",
+        "sessionId",
+        "sourceTurnId",
+        "result"
+      ],
+      "properties": {
+        "record": {
+          "const": "evaluation"
+        },
+        "timestamp": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceTurnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "result": {
+          "type": "string",
+          "enum": [
+            "delivered",
+            "suppressed",
+            "failed"
+          ]
+        },
+        "suppressedReason": {
+          "$ref": "prediction.schema.json#/$defs/SuppressedReason"
+        },
+        "predictionId": {
+          "type": "string"
+        },
+        "qualifiedIntentId": {
+          "type": "string",
+          "description": "Set whenever an intent was selected, including when a later stage suppressed it."
+        },
+        "scenarioId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "rule",
+            "model"
+          ]
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Confidence threshold that applied to this evaluation, when the gate was reached."
+        },
+        "samplerMode": {
+          "type": "string",
+          "enum": [
+            "fork",
+            "compact"
+          ]
+        },
+        "usage": {
+          "$ref": "prediction.schema.json#/$defs/Usage"
+        }
+      }
+    },
+    "OutcomeRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record",
+        "timestamp",
+        "sessionId",
         "predictionId",
+        "qualifiedIntentId",
         "outcome"
       ],
       "properties": {
+        "record": {
+          "const": "outcome"
+        },
+        "timestamp": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
         "predictionId": {
           "type": "string",
           "minLength": 1
         },
-        "sessionId": {
-          "type": "string"
-        },
-        "sourceTurnId": {
-          "type": "string"
+        "qualifiedIntentId": {
+          "type": "string",
+          "minLength": 1
         },
         "outcome": {
-          "type": "string",
-          "enum": [
-            "accepted",
-            "edited",
-            "ignored",
-            "dismissed",
-            "expired"
-          ]
+          "$ref": "#/$defs/Outcome"
         },
-        "method": {
-          "type": "string",
-          "enum": [
-            "click",
-            "copy",
-            "send",
-            "edit_send",
-            "shortcut"
-          ]
+        "selected": {
+          "$ref": "#/$defs/Selected"
         },
-        "selectedIntentId": {
-          "type": "string",
-          "description": "Set when the user picked an alternative in a 'choice' presentation instead of the primary intent."
+        "edited": {
+          "type": "boolean",
+          "description": "For 'sent': the dispatched text differed from the rendered text of the selected item."
+        },
+        "copied": {
+          "type": "boolean",
+          "description": "A copy action was recorded before the outcome was finalized."
         },
         "similarity": {
           "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "description": "Normalized edit similarity in [0, 1] when outcome is 'edited' or 'ignored', computed locally without persisting raw finalText."
-        },
-        "finalText": {
-          "type": "string",
-          "description": "Only populated when privacy.collectFinalText is explicitly true."
-        },
-        "wasFocusedWhenShown": {
-          "type": "boolean"
+          "description": "For 'passed': surface-text similarity between the suggestion and the user's actual next message (SPEC 5.4). A cheap proxy that is recorded only; it never changes a gate in this version."
         },
         "msSinceShown": {
-          "type": "number",
-          "minimum": 0
-        },
-        "msToFirstKeystroke": {
           "type": "number",
           "minimum": 0
         }
       }
     },
     "TelemetryRecord": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "timestamp",
-        "sessionId",
-        "sourceTurnId",
-        "outcome"
-      ],
-      "properties": {
-        "timestamp": {
-          "type": "integer",
-          "minimum": 0
+      "oneOf": [
+        {
+          "$ref": "#/$defs/EvaluationRecord"
         },
-        "sessionId": {
-          "type": "string"
-        },
-        "sourceTurnId": {
-          "type": "string"
-        },
-        "predictionId": {
-          "type": "string"
-        },
-        "packId": {
-          "type": "string"
-        },
-        "packVersion": {
-          "type": "string"
-        },
-        "scenarioId": {
-          "type": "string"
-        },
-        "intentId": {
-          "type": "string"
-        },
-        "confidence": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "sources": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "outcome": {
-          "type": "string",
-          "enum": [
-            "accepted",
-            "edited",
-            "ignored",
-            "dismissed",
-            "expired",
-            "suppressed"
-          ]
-        },
-        "suppressedReason": {
-          "$ref": "prediction.schema.json#/$defs/SuppressedReason"
-        },
-        "method": {
-          "type": "string"
-        },
-        "similarity": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1
-        },
-        "suggestionLength": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "wasFocusedWhenShown": {
-          "type": "boolean"
-        },
-        "msSinceShown": {
-          "type": "number",
-          "minimum": 0
-        },
-        "msToFirstKeystroke": {
-          "type": "number",
-          "minimum": 0
-        },
-        "usage": {
-          "$ref": "prediction.schema.json#/$defs/PredictionUsage"
+        {
+          "$ref": "#/$defs/OutcomeRecord"
         }
-      }
+      ]
     }
   }
 }

@@ -1,1310 +1,156 @@
-# intent-predict 设计文档
+# intent-predict 设计说明
 
-> 一个让**任意 Agent 成为全场景意图预测 Agent（Intent Predict Agent）**的通用 SDK。它不仅能观察宿主对话，还能观察终端命令、Git 工作区、文件变动、IDE 焦点与桌面/剪贴板环境（Omni-Context Observers），在识别出的有限场景里从封闭集合中预测用户下一步意图；默认零配置复用宿主自身模型，行动力从阶段 1「纯建议输出」渐进演进到阶段 2「推测预执行」与阶段 3「建议+委托执行」。
+> 本文不具规范效力：行为以根目录 [SPEC.md](../SPEC.md) 为准，数据结构以 [spec/](../spec) 为准。这里只记录**为什么这么设计**、v0.5 相对 v0.4 改了什么，以及接入宿主时的经验。
 
 | 项 | 内容 |
 |---|---|
-| 状态 | v0.4（审查修订：R1–R20，见 [review-issues.md](review-issues.md)）。**本文为非规范性设计说明**：行为规范以根目录 `SPEC.md` 为准，数据结构以 `spec/*.schema.json` 为准，内置场景以根目录 `INTENTS.md` 为准（`pack.json` 为其生成产物）；冲突时以三者为准 |
-| 日期 | 2026-11-10 |
-| 调研依据 | [prior-art.md](prior-art.md)：Codex composer predictions 的开源后端、Qwen Code 的 NES 和推测执行、其他开源插件 |
+| 版本 | v0.5（2026-11-11）：按第三轮审查重设计，见 [review-issues.md](review-issues.md) R21–R34 |
+| 调研依据 | [prior-art.md](prior-art.md)：Codex composer predictions、Qwen Code NES 与其封闭集合意图分类 |
 
-## 目录
+## 1. 问题与核心思路
 
-1. [背景](#1-背景)
-2. [目标与非目标](#2-目标与非目标)
-3. [核心思路：有限场景](#3-核心思路有限场景)
-4. [概念与术语](#4-概念与术语)
-5. [总体架构](#5-总体架构)
-6. [数据模型](#6-数据模型)
-7. [预测流水线与算法细则](#7-预测流水线与算法细则)
-8. [接入：对任意 agent 通用（零配置优先）](#8-接入对任意-agent-通用零配置优先)
-9. [Sidecar 协议（JSON-RPC 2.0）](#9-sidecar-协议json-rpc-20)
-10. [UI 交互规范](#10-ui-交互规范)
-11. [安全与隐私](#11-安全与隐私)
-12. [性能与成本预算](#12-性能与成本预算)
-13. [评估](#13-评估)
-14. [场景包示例](#14-场景包示例)
-15. [包结构](#15-包结构)
-16. [关键决策](#16-关键决策)
-17. [路线图](#17-路线图)
-18. [决议记录（原开放问题）](#18-决议记录原开放问题)
+Codex 的 composer predictions 在每轮回复后生成一句用户可能要说的话。这种开放文本预测有四个结构性问题：只能看接受率、没法离线回归；文本上挂不了确定性动作和分级的风险策略；效果绑在某个宿主的分叉与界面上；没有可预测的下一步时也照样花一次模型调用。
 
----
+intent-predict 的做法是把问题改成分类：
 
-## 1. 背景
+> **有限场景**：一种能从会话事件里识别出来的情境，在这种情境下，用户下一步想做的事可以列成一个小的封闭集合，外加一个「都不是」。
 
-2026 年 10 月，OpenAI 在 Codex 桌面版以 beta 形式推出了 composer predictions。每轮回复结束后，输入框里可能出现一条预测，内容是用户接下来大概会发的话。按 Tab 可以接受，接受后还能编辑，不会自动发送。
+例如「agent 改了文件、没跑任何检查」之后，用户多半是要跑测试、看 diff、让它解释、继续、或提交。于是可以：按分类指标评测；给每个意图标风险；意图可以绑定确定性动作（如 `/review`）；识别不出场景就直接不调模型。
 
-这个功能分成两层（详见 [prior-art.md §1](prior-art.md#1-openai-codexcomposer-predictions)）：
+这个思路有一个没被验证的前提：封闭目录真的能覆盖足够多的真实下一句。验证它是路线图里排在最前面的未完成项（[ROADMAP.md](../ROADMAP.md) 1D）。
 
-- **后端是开源的**。codex-rs app-server 有一个实验接口 `thread/sample`。它在当前会话上开一个**临时分叉**，原样继承配置、工具和历史，目的是命中 prompt cache。然后追加一段 prompt，只取**一次**模型回复。如果模型试图调用工具，这次结果作废，返回 null。
-- **产品层是闭源的**。预测用的 prompt、什么时候显示、UI 怎么交互，都写在桌面客户端里。开源 TUI 收到 `thread/prediction/updated` 通知后什么也不做。
+## 2. v0.5 改了什么
 
-开源实现里最完整的是 Qwen Code 的 Next-step Suggestion（NES），包括：
-- 缓存共享分叉
-- 12 条过滤规则
-- 十几项守卫条件
-- 不依赖 UI 框架的控制器
-- 遥测
-- 可选的推测执行
+v0.4 的规范写得比证据多：融合公式、先验、退避、三档展示通道、O2/O3 的事件与时效规则都进了规范，但没有一条数据。第三轮审查的结论是往回收，并补上能执行的一致性检查。
 
-Qwen 的 Web Shell 里还有一个更接近"意图"的设计。它对用户正在输入的草稿做保守的封闭集合分类，输出 `btw | new_session | none` 外加置信度，再据此决定是否给出动作。
-
-这些实现都绑定在各自的宿主里。除了 Qwen Web Shell 的分类器，它们预测的都是**开放文本**。对一个通用 SDK 来说，开放文本有四个问题：
-
-1. **难评估**：只有接受率这一个指标，很难做离线回归。
-2. **难控制**：文本上挂不了确定性动作，也没法给不同意图设不同的风险策略。
-3. **难移植**：效果依赖宿主的分叉、缓存管线和 UI。
-4. **成本高**：每轮都要让大模型生成一次。
-
-## 2. 目标与非目标
-
-### 目标
-
-- **G1 不依赖宿主、零配置即用**：任何语言、任何框架都能接入，CLI、IDE、Web 形态的 agent 都行。默认复用宿主已配置的模型连接或 `Sampler` 能力，用户无需为 SDK 单独配置 API Key 或模型端点。
-- **G2 有限场景意图预测**：集成方声明场景和每个场景的有限意图集。输出是结构化的"意图 id + 槽位 + 置信度"，另附一句能直接填进输入框的文本。
-- **G3 宁缺毋滥**：默认输出 `none`。出现任何异常时都不给建议（fail-closed）。第一指标是展示精度（precision@shown）。
-- **G4 低延迟、低成本**：宿主支持分叉时，复用它的 prompt cache；常见显式提示直接走本地规则短路。过期的结果一律不展示。
-- **G5 人在回路**：不自动发送消息，也不自动执行有副作用的动作。
-- **G6 可度量**：反馈事件和离线回放评测是内置能力。
-- **G7 隐私优先**：默认只使用当前会话的上下文，提供脱敏钩子，也支持完全本地运行。
-
-### 非目标（v1）
-
-- 开放域的整句预测（即 Codex 的做法）不在 v1 范围内；v1 没有 `freeform` 意图，模型只能在目录内（含 `none`）选择。
-- 不做边打字边补全。打字过程中的意图路由不在 [ROADMAP.md](../ROADMAP.md) 五阶段内（见 §17）。
-- SDK 不是 agent 框架，不负责执行意图。它只给出动作描述，执行由宿主完成。
-- 不做跨会话记忆和用户画像。唯一的例外是可选、只存在本地的意图转移先验。
-
-## 3. 核心思路：有限场景
-
-> **有限场景（bounded scenario）**：能从信号中识别出来的一种情境。在这种情境下，用户下一步想做的事可以列举成一个小的封闭集合（建议 3 到 15 个意图），外加一个 `none`。
-
-举个例子：agent 刚改完代码、还没跑测试。这时用户的下一句话大多属于以下几类：跑测试、看 diff、提交、让它解释改动、继续下一步。
-
-这样设计有以下好处：
-
-| 好处 | 原因 |
-|---|---|
-| 准 | 候选集小，可以叠加规则和先验。没把握时输出 `none` |
-| 可测 | 问题变成了分类，可以算 top-1/top-3 准确率、校准误差和覆盖率-精度曲线 |
-| 可控 | 每个意图可以单独设置风险等级、阈值、冷却时间和动作 |
-| 便宜 | 规则、先验、向量近邻都能在本地跑，常见情况不需要调用模型 |
-| 可移植 | 场景包是数据（JSON/YAML），可以跨语言、跨宿主复用 |
-| 可执行 | 意图可以绑定确定性动作，例如 `/review`，不必从文本里猜 |
-
-与 Codex 的对比：
-
-| | | Codex composer predictions | intent-predict |
+| 主题 | v0.4 | v0.5 | 原因 |
 |---|---|---|---|
-| 1 | 输出 | 一句自由文本 | 意图 id、槽位、置信度、文本，以及可选的动作 |
-| 2 | 范围 | 开放 | 场景内的有限集合，加上 `none` |
-| 3 | 生成方式 | 主模型在缓存共享的分叉上生成 | 融合规则、先验和模型的约束分类。默认复用宿主模型/分叉 |
-| 4 | 何时展示 | 不保证每轮都有，策略没有公开 | 由门控显式决定：阈值、分差、冷却、风险等级 |
-| 5 | 宿主 | 只有 Codex 桌面版（本地和 SSH 线程） | 任意 agent（第一个深度落地 Hermes Agent），通过适配器或 sidecar 接入 |
-| 6 | 评估 | 接受率 | 分类指标、接受率、校准误差 |
+| 规范范围 | O1–O3 × A1–A3 全写在 SPEC 里 | SPEC 只写 O1 × A1；其余移到 [future.md](future.md) | 规范即提示词：写了什么，实现者就会去做什么 |
+| 界面 | 「永久」只有独立 WebUI，其与核心的协议不规定 | 宿主 / 核心 / 界面三个角色共用一套协议；自带网页是默认界面 | 原写法下别的语言的实现用不了自带界面，也排除了建议最有用的位置 |
+| 展示 | `displayChannel` 三档（quick / choice / confirm） | `confirmBeforeSend` 布尔值 + `choices` / `alternatives` | 三档把「展示几个」和「发送前多大摩擦」揉在一起，且内置包走不到 confirm |
+| 发送 | `dispatch/message {sessionId, text}` | 带 `expectedTurnId` 与 `predictionId`，宿主忙时拒绝、不排队 | 过期的「可以，继续」会批准别的提问 |
+| 透传授权 | 只有 `confirm` / `choose_option` 按提议风险处理 | `passThrough` 标记所有「照你说的办」类意图；提议像外部或破坏性操作时整类不提供；提供时必带 agent 原话 | `apply_suggestion`、`continue_task` 是同一类问题 |
+| 打分 | 模型置信度 × 先验 × 规则加分的对数线性融合，分差门槛，备选打分 | 只用模型自报置信度过一个门槛 | 公式算不出文档声称的结果，常数无来源 |
+| 场景合并 | 取前 2 个场景合并目录 | 一次求值只选一个场景 | 合并带来先验归一、提示词描述、策略归属等一串歧义 |
+| 建议文字 | 模板，或模型生成后过 9 条过滤 | 只有模板；输出检查剩 2 条 | 模型的字不上屏，针对模型文字的过滤就不需要了 |
+| 编号选项 | 一个带 `index` 槽位的意图，无推荐标记时固定选 1 | `enumerate`：每个选项一张可选的卡，纯规则 | 固定猜第一项没有依据 |
+| 信号 | `failedExecs` 统计整轮失败；有无 `execute` 区分场景 | `lastCheckFailed` / `checkRuns`：只看检查类命令、只看最后一次 | 「失败 → 修复 → 通过」的回合被路由成失败；以 shell 为主的 agent 每轮都有 execute |
+| 反馈 | 相似度推断的「忽略」累积成阈值退避 | 相似度只记录；改变行为的只有显式关闭 | 相似度量的是字面；且原规则下事件顺序使其恒为 expired |
+| 失效 | `completed + null` 兼作「让卡片过期」 | 单独的 `prediction/invalidated`；空结果不让任何东西失效 | 一次落空的求值不该清掉仍然有效的建议 |
+| 阈值归属 | 场景包可以覆盖宿主策略 | 场景包只能收紧 | 仓库里带来的包不该能放松门槛 |
+| 一致性 | 20 条手写用例，全部不经过模型 | 99 条用例覆盖全部抑制原因，含录制的模型输出与会话流程；参考求值器实际执行 | 原用例只写规则路径也能全过 |
 
-## 4. 概念与术语
+## 3. 关键决策
 
-| 术语 | 含义 |
-|---|---|
-| Session | 一次 agent 会话，相当于 thread |
-| Turn | 一轮：用户输入，agent 工作，agent 给出最终回复 |
-| Event | 宿主上报的规范化事件，包括消息、工具调用和结果、产物、状态 |
-| Signal | 从事件中派生的特征，例如"本轮改了几个文件"、"最后一条消息是不是以问句结尾" |
-| Scenario | 由信号识别出的有限场景，带有一个意图目录 |
-| Intent | 意图目录中的一项，包含 id、描述、样例、槽位、渲染模板、风险等级、动作 |
-| Scenario Pack | 可以分发的一组场景，格式为 JSON、YAML 或 TS，带版本号 |
-| Prediction | 针对某个 source turn 的预测结果：首选意图（或 none）、备选意图、文本、动作 |
-| Feedback | 预测展示之后用户的处理结果：接受、编辑、忽略、关闭、过期 |
-| Sampler | 宿主提供的模型采样委托接口：既支持缓存共享分叉（`mode: 'fork'`），也支持委托宿主已有模型跑紧凑提示词（`mode: 'compact'`），实现零配置运行 |
-
-## 5. 总体架构：双轴三阶段演进（O1/O2/O3 观察阶段 × A1/A2/A3 行动力阶段）
-
-借鉴 OpenAI Symphony 的 **Spec-as-Prompt（`SPEC.md`）+ 仓库契约文件（`INTENTS.md`）** 模式，任意宿主 Agent 接入后即升级为 **Intent Predict Agent**，并沿着**观察范围（O1→O2→O3）**和**行动力（A1→A2→A3）**两个正交的三阶段轴渐进演进。下图是**全景愿景图**；按阶段拆开的说明图在 [diagrams.md](diagrams.md)，当前精修与实现的只有其中 Phase 1（O1 × A1）的三张图，其余阶段在图上均按未启用理解：
-
-```mermaid
-flowchart TB
-  subgraph Obs["1. 观察范围三阶段演进（Observation Stages: O1 → O2 → O3）"]
-    direction LR
-    O1["Stage O1：观察单一会话<br/>(Single-Session)<br/>当前 thread 的消息、工具调用与文件产物"]
-    O2["Stage O2：观察整个 Agent<br/>(Agent-Wide)<br/>跨会话 / 子 Agent (subagent) / 后台任务 / Kanban 状态"]
-    O3["Stage O3：观察全局环境<br/>(Global / Ambient)<br/>外部终端命令、Git 工作区、IDE 焦点/报错、桌面剪贴板"]
-    O1 -->|"扩展信号范围"| O2 -->|"扩展信号范围"| O3
-  end
-
-  subgraph Core["2. intent-predict 核心流水线（SPEC.md 确定性外壳 + INTENTS.md 提示词契约）"]
-    direction LR
-    LD["Contract Loader<br/>加载 INTENTS.md / pack.json<br/>(YAML 配置头 + Prompt 正文)"]
-    ST["Signal & Risk Engine<br/>提取 O1/O2/O3 信号<br/>+ proposedRisk 提议风险扫描"]
-    SR["有限场景路由<br/>按 stage/triggers/match 过滤<br/>专用场景 → 兜底场景 | 未命中 → none"]
-    CS["候选生成<br/>Rule (仅 explicit 短路)<br/>Prior / Model (top-1 + runnerUps)"]
-    FG["融合 + Per-Intent 门控 + 通道裁决<br/>→ 模板/Action 原子插值 → 9 条安全过滤"]
-    FB[("本地反馈与校准日志<br/>near-match 豁免退避")]
-    LD --> SR
-    ST --> SR --> CS --> FG
-    FB -.->|"Dirichlet 先验 / 阈值退避"| CS
-  end
-
-  subgraph HostModel["宿主零配置 Sampler"]
-    S_FORK["L2 Fork 模式<br/>缓存共享临时分叉（隐私同宿主会话）"]
-    S_COMP["L1 Compact 模式<br/>SDK 先脱敏 → 委托宿主模型"]
-  end
-
-  subgraph Agency["3. 行动力三阶段演进（Agency Stages: A1 → A2 → A3）"]
-    direction LR
-    A1["Stage A1：纯建议输出（默认）<br/>独立 WebUI 建议卡<br/>quick / choice / confirm 三级摩擦"]
-    A2["Stage A2：推测预执行（可选）<br/>后台静默预跑只读检查/预取上下文 (prepPlan)"]
-    A3["Stage A3：建议 + 委托执行（可选）<br/>用户一键确认 → 派发给目标 Agent 执行"]
-    A1 -.->|"渐进升级"| A2 -.->|"渐进升级"| A3
-  end
-
-  Obs -->|"AgentEvent 流 (O1 / O2 / O3)"| ST
-  CS <-->|"sampler/sample + sampler/cancel"| HostModel
-  FG -->|"Prediction (含 displayChannel & agencyStage)"| Agency
-  Agency -->|"Feedback (含 Bigram Dice similarity)"| FB
-```
-
-### 5.1 观察范围三阶段（Observation Stages：O1 → O2 → O3）
-
-| 阶段 | 观察边界 | 采集事件 | 典型场景示例 |
+| # | 决策 | 放弃的方案 | 理由 |
 |---|---|---|---|
-| **Stage O1：观察单一会话**（`single_session`，基线必选） | 当前对话 thread 内部 | `turn.*`、`message.*`、`tool.*`、`artifact`、`state` | Agent 改完代码未跑测试 → WebUI 出卡「跑一下测试验证看看」；Agent 提问 → choice 卡建议确认或比较利弊 |
-| **Stage O2：观察整个 Agent**（`agent_wide`，跨会话/子任务） | 宿主 Agent 全局运行时（子 Agent、后台进程、任务看板、多会话切换） | O1 全部 + `agent.subagent_completed`、`agent.background_job`、`agent.task_updated`、`agent.session_switched` | 派发的子 Agent 刚跑完研究任务返回 → 建议「结合子任务的结果继续处理」；后台长耗时构建结束 → 建议验证产出 |
-| **Stage O3：观察全局环境**（`global_ambient`，跨工具/桌面） | 宿主之外的终端、Git 工作区、文件系统、IDE 焦点与桌面剪贴板 | O1+O2 全部 + `env.terminal_command`、`env.git_status`、`env.file_changed`、`env.ide_context`、`env.ambient_context` | 用户自己在终端跑命令挂了或复制了一段报错栈 → 建议「帮我看看刚才终端命令为什么报错并修一下」 |
+| D1 | 预测封闭目录中的一项或 `none` | 开放整句预测 | 可评测、可控、可挂动作 |
+| D2 | 没有场景命中就不预测 | 退回通用预测 | 守住「有限场景」的边界 |
+| D3 | 借宿主的模型（`sampler/sample`），不另配密钥 | 让用户为 SDK 配一套端点 | 宿主已经有可用的模型连接 |
+| D4 | `compact` 是基线采样方式，`fork` 可选 | 以共享缓存的分叉为首选 | 回放只能测 `compact`；分叉并不更快，长会话下也不更省 |
+| D5 | 置信度用模型自报值，只过一个门槛 | 融合、分差、校准 | 没有数据时，机制越多越无法归因 |
+| D6 | 建议文字只来自模板 | 模型按用户口吻生成 | 模型的字不上屏，注入面小一大块；内置包本来就全是模板 |
+| D7 | 发送是显式动作，钉在所属轮次，按 `predictionId` 幂等 | 点卡即发；可排队 | 人在回路要落在「发出去」这一步上 |
+| D8 | 透传授权类意图整类特殊对待 | 逐个意图写风险条件 | 风险在 agent 的提议里，不在「可以」这两个字里 |
+| D9 | 三个角色一套协议；自带界面只是默认界面 | 界面协议由实现自定 | 一个界面要能配任何一致的核心 |
+| D10 | 场景包只能收紧阈值，且需显式启用 | 包策略覆盖宿主策略 | 包的风险标注和提示词是作者自称 |
+| D11 | 一阶段一格，规范只写当前格 | 规范先行写全 | 见第 2 节 |
+| D12 | 参考求值器 + 黄金用例是一致性的准绳 | 只靠 Schema 与文字 | 两套独立实现对同一批用例给出相同结果，才说明规范是可实现且无歧义的 |
+| D13 | 在线只对显式关闭作出反应 | 用推断反馈调阈值 | 推断信号有偏，先离线验证 |
 
-### 5.2 行动力三阶段（Agency Stages：A1 → A2 → A3）
+## 4. 流水线为什么长这样
 
-- **Stage A1（`suggest_only`，默认）**：只输出结构化预测与建议文本，在 SDK 独立 WebUI 里按摩擦分级呈现（低风险 `quick` 一键载入草稿，确认类与外部副作用强制 `choice` 挑选或 `confirm` 确认一步），用户明确点「发给 Agent」或复制才离开 SDK，绝不自动发送或执行。
-- **Stage A2（`speculative_prep`，第二阶段）**：预测产出的同时附带只读预备计划 `prepPlan`（如预取报错文件、静默跑 `git diff` 或 AST 检查），卡片还挂在 WebUI 时就把结果备好，用户点发送后近乎秒回；用户关卡或自己开始下一轮立即中止预备。
-- **Stage A3（`propose_and_dispatch`，第三阶段）**：用户在 WebUI 意图卡片上显式确认后，触发 `action` 派发给目标 Agent 或工具链完成闭环。三阶段共用同一个独立 WebUI，宿主输入框自始至终不参与（决策 D10）。
+顺序是「守卫 → 选一个场景 → 确定性规则 → 模型 → 门槛 → 槽位与模板 → 输出检查」，每一步失败都收束到同一个出口：不给建议，记一个原因。
 
-### 5.3 Symphony 式的交付与定制契约（`SPEC.md` + `INTENTS.md`）
+- **规则先于模型**。两条规则都不带常数：agent 明说了「运行 `/review`」或「回复『继续』」，就选对应意图；agent 在末尾列了编号选项并且确实是在问，就把每个选项变成一张可选的卡。规则不能选 `side_effect` 意图——那一类必须过模型的高门槛。
+- **编号列表不等于在问**。「完成了以下改动：1. … 2. …」也是末尾的编号列表。只有列表前后有问句、或某项带「(推荐)」时才当作选择。
+- **检查命令靠一张模式表识别**。这张表注定不全（端到端测试第一次跑就发现缺了 `node --test`），所以宿主可以用 `tool.call.check` 直接声明。宿主不给 `command` 时，退化为「改完文件总是建议跑测试」，由模型兜底说 `none`。
+- **门槛只有两个数**：一般意图 0.60，有外部副作用的 0.80。都是占位值。
 
-1. **外层 `SPEC.md`（Spec-as-Prompt）**：顶层 [`SPEC.md`](../SPEC.md) 用 RFC 2119 规范语言完整定义了确定性外壳。开发者既可以直接使用本仓库的 TypeScript SDK / Sidecar，也可以直接把 `SPEC.md` 喂给任意 Coding Agent，让它在宿主原生语言（如 Hermes 的 Python、Codex 的 Rust）中生成零外部依赖的内嵌实现。
-2. **内层 `INTENTS.md`（YAML Front Matter + Markdown Prompt 正文）**：顶层 [`INTENTS.md`](../INTENTS.md) 像 Symphony 的 `WORKFLOW.md` 一样，用头部 YAML 声明 `O1/O2/O3` 场景、封闭意图目录、风险门控与槽位，用正文 Markdown 编写分类提示词。团队可以在自己的代码库中放置自定义 `INTENTS.md` 随 Git 版本管理。
+## 5. 界面与发送
 
-一次典型的全双工预测与取消时序：
+界面是协议角色。自带的那个是 sidecar 在回环地址上提供的单个网页：HTTP POST 发请求，Server-Sent Events 收通知，每次启动换 token，校验 Host 与 Origin，不加载任何外部资源，也不碰宿主的输入框。它同时是检查面：能看到被抑制的求值和原因。
 
-```mermaid
-sequenceDiagram
-  participant Env as 宿主对话 / 环境观察器 (Shell/Git/IDE)
-  participant H as 宿主 Agent (如 Hermes)
-  participant P as intent-predict SDK
-  participant M as 宿主 Sampler (Fork / Compact)
-  participant UI as 输入框 / 意图卡片
+把建议放在独立网页上，宿主一行界面代码都不用改，这是它被选为默认界面的原因；代价是用户要切窗口。**建议放在哪里最有用是个待测的问题**，不是设计前提：同一套协议下，宿主可以声明自己就是界面。
 
-  Env->>H: turn.completed 或 env.terminal_command(exit=1)
-  H->>P: session/observe (events)
-  P->>P: settleMs(150ms) → 守卫 → 提议风险扫描(proposedRisk) → 场景路由
-  alt RuleSource 命中 explicit 提示 且 effectiveRisk <= reversible
-    P-->>H: prediction/updated（直接短路，不调模型）
-  else 需要模型分类
-    P->>M: sampler/sample (id="s-1", mode="fork"|"compact")
-    alt 用户在采样中途开始打字 / 新一轮开始
-      H->>P: session/observe (composer.dirty=true / turn.started)
-      P->>M: sampler/cancel (sampleRequestId="s-1")
-      P-->>H: prediction/updated (prediction=null, reason="aborted")
-    else 采样正常返回
-      M-->>P: {intent, confidence, runnerUps, slots, text}
-      P->>P: 融合 → Per-Intent 门控与通道裁决 → 槽位/Action 原子插值 → 9 条过滤
-      P-->>H: prediction/updated (displayChannel="quick"|"choice"|"confirm")
-    end
-  end
-  H->>UI: 校验 sourceTurnId 未过期且输入框为空，300ms 后按通道渲染
-  UI-->>P: prediction/feedback (accepted | edited | ignored+similarity | dismissed)
-```
+发送的三条规矩都落在核心与宿主之间，界面绕不过去：
 
-## 6. 数据模型
+1. 建议只在所属轮次内有效。会话里一出现别的轮次的事件，核心就发 `prediction/invalidated`，之后的发送返回 `stale`。
+2. 派发请求带 `expectedTurnId`，宿主自己再核对一次，忙时拒绝而不是排队。
+3. `side_effect` 意图没带 `confirmed: true` 时核心不派发。
 
-下面用 TypeScript 给出**示意定义**，便于阅读。权威的机读定义在 `spec/` 目录的 JSON Schema Draft 2020-12 文件中（`events.schema.json`、`scenario-pack.schema.json`、`prediction.schema.json`、`feedback.schema.json`、`rpc.schema.json`），各语言代码生成与校验以它们为准；若下方 TS 示意与 Schema 不一致，以 Schema 为准并视为本文笔误。
+## 6. 接入宿主
 
-### 6.1 事件（宿主 → SDK）
-
-对应 [`spec/events.schema.json`](../spec/events.schema.json)：
-
-```ts
-/** 宿主上报的规范化事件。字段尽量精简，SDK 忽略未知字段。 */
-export type AgentEvent =
-  | { type: 'turn.started'; turnId: string; at: number }
-  | { type: 'message.user'; turnId: string; text: string; hasAttachments?: boolean }
-  | { type: 'message.agent'; turnId: string; text: string; final?: boolean }
-  | { type: 'tool.call'; turnId: string; callId: string; name: string; kind?: ToolKind; input?: unknown }
-  | {
-      type: 'tool.result'; turnId: string; callId: string;
-      status: 'ok' | 'error' | 'denied';
-      exitCode?: number;
-      summary?: string;   // 一行摘要，可能进入模型上下文（经过脱敏）
-      output?: unknown;   // 结构化输出，可选。只供 slot.from 读取，绝不发给模型
-    }
-  | {
-      type: 'artifact'; turnId: string;
-      kind: 'file_changed' | 'file_created' | 'file_deleted' | 'command_suggested' | 'link' | 'other';
-      ref: string;
-    }
-  | { type: 'state'; key: string; value: unknown }  // 例如 mode=plan、pendingApproval=true、composer.dirty=true
-  | {
-      type: 'turn.completed'; turnId: string;
-      status: 'completed' | 'failed' | 'interrupted';
-      errorCode?: string;
-      at: number;
-    }
-  // ── Stage O2：Agent 全局事件（Agent-Wide Events：子 Agent / 后台任务 / 看板 / 会话切换） ──
-  | {
-      type: 'agent.subagent_completed';
-      subagentId: string;
-      goal?: string;
-      status: 'completed' | 'failed' | 'interrupted';
-      summary?: string;
-      at: number;
-    }
-  | {
-      type: 'agent.background_job';
-      jobId: string;
-      command?: string;
-      status: 'completed' | 'failed' | 'ready_match';
-      exitCode?: number;
-      summary?: string;
-      at: number;
-    }
-  | {
-      type: 'agent.task_updated';
-      taskId: string;
-      title?: string;
-      status: 'todo' | 'ready' | 'running' | 'blocked' | 'review' | 'done';
-      pendingReviews?: number;
-      openTasksCount?: number;
-      at: number;
-    }
-  | {
-      type: 'agent.session_switched';
-      fromSessionId?: string;
-      toSessionId: string;
-      at: number;
-    }
-  // ── Stage O3：全局环境观察事件（Global Environment Events，超越 Agent 边界） ──
-  | {
-      type: 'env.terminal_command';
-      command: string;
-      cwd?: string;
-      exitCode: number;
-      durationMs?: number;
-      summary?: string;
-      at: number;
-    }
-  | {
-      type: 'env.git_status';
-      branch: string;
-      stagedCount?: number;
-      dirtyCount: number;
-      untrackedCount?: number;
-      ahead?: number;
-      behind?: number;
-      hasConflicts?: boolean;
-      at: number;
-    }
-  | {
-      type: 'env.file_changed';
-      paths: string[];
-      actor?: 'user' | 'agent' | 'external';
-      at: number;
-    }
-  | {
-      type: 'env.ide_context';
-      activeFile?: string;
-      cursorLine?: number;
-      selectionLength?: number;
-      diagnosticsErrors?: number;
-      diagnosticsWarnings?: number;
-      at: number;
-    }
-  | {
-      type: 'env.ambient_context';
-      activeApp?: string;
-      windowTitle?: string;
-      clipboardKind?: 'stacktrace' | 'error_log' | 'url' | 'code_snippet' | 'plain_text';
-      clipboardPreview?: string;
-      at: number;
-    };
-
-/** 可以直接从 ACP 的 tool kind 或 Hermes toolset 映射过来 */
-export type ToolKind = 'read' | 'search' | 'edit' | 'delete' | 'execute' | 'fetch' | 'ask_user' | 'other';
-
-/** L0 接入时的最小输入 */
-export interface SimpleMessage {
-  role: 'user' | 'assistant' | 'tool';
-  content: string;
-  toolName?: string;
-  toolKind?: ToolKind;
-  exitCode?: number;
-  isError?: boolean;
-}
-```
-
-### 6.2 场景与意图（由集成方定义，可以序列化）
-
-对应 [`spec/scenario-pack.schema.json`](../spec/scenario-pack.schema.json)：
-
-```ts
-export interface ScenarioPack {
-  id: string;                    // 'builtin/coding'
-  version: string;               // semver。遥测数据按 packId@version/intentId 归档
-  description?: string;
-  scenarios: ScenarioSpec[];
-}
-
-export interface ScenarioSpec {
-  id: string;                    // 'coding.after_edit'
-  description: string;           // 给模型看的一句话说明（≤ 160 字符）
-  triggerOnTurnStatuses?: Array<'completed' | 'failed'>; // 默认 ['completed']
-  match: SignalPredicate;        // 可序列化的谓词。TS 包也能传函数，但函数无法跨语言使用
-  priority?: number;             // 多个场景同时命中时，按此排序（默认 0）
-  intents: IntentSpec[];         // 有限集合，1 到 15 个。none 由 SDK 自动加入
-  policy?: Partial<GatePolicy>;  // 覆盖全局门控策略
-}
-
-export interface IntentSpec {
-  id: string;                    // 'run_tests'。在单个场景内唯一，禁止为 'none'
-  description: string;           // 给模型看，不超过 80 个字符
-  examples?: string[];           // 用户的真实说法，建议中英文各 1 到 2 条
-  when?: SignalPredicate;        // 前置条件。不满足时该意图不进入候选
-  slots?: Record<string, SlotSpec>;
-  render?: RenderSpec;           // 文本的生成方式
-  risk: Risk;                    // 基础风险等级
-  dynamicRiskFromProposedAction?: boolean; // 为 true 时（如 confirm/choose_option），有效风险取 max(risk, lastAgentMessage.proposedRisk)
-  allowedChannels?: Array<'quick' | 'choice' | 'confirm'>; // 显式限定允许展示的 UI 通道
-  action?: ActionDescriptor;     // 宿主可以执行的确定性动作
-  prior?: number;                // 场景内的默认先验 [0, 1]。不填时平均分配
-  enabledByDefault?: boolean;    // 默认 true；为 false 的意图需宿主在加载时按 id 显式开启才进入目录
-}
-
-/** none：纯对话；read_only：只读；reversible：本地可撤销（编辑、跑测试、本地 commit）；
- *  side_effect：影响工作区之外（push、发消息、部署）；irreversible：删除、force-push、支付等 */
-export type Risk = 'none' | 'read_only' | 'reversible' | 'side_effect' | 'irreversible';
-
-export interface SlotSpec {
-  type: 'string' | 'number' | 'enum' | 'path';
-  description?: string;
-  enum?: string[];
-  from?: SignalPath;             // 优先从信号中确定性地取值，取不到才让模型填写
-  pattern?: string;              // 正则校验。不通过时整条预测作废
-  maxLength?: number;            // 默认 80
-  required?: boolean;            // 默认 false
-  default?: unknown;             // 取不到值时的兜底值
-}
-
-export type RenderSpec =
-  | string                                                       // 单一模板：'跑一下 {target} 的测试'
-  | Record<string, string>                                       // 多语言模板：{ 'zh-CN': '…', en: '…' }
-  | { mode: 'model'; fallback?: string | Record<string, string> }; // 由模型按用户的说话风格生成
-
-export type ActionDescriptor =
-  | { type: 'fill' }                                             // 默认值：只填入输入框
-  | { type: 'command'; command: string; args?: string }          // 例如 '/review'
-  | { type: 'tool'; name: string; input: Record<string, unknown> }
-  | { type: 'custom'; name: string; payload?: unknown };
-```
-
-如果没有写 `render`，按以下顺序取文本：
-1. 有模型结果且非空时，用模型生成的文本。
-2. 否则，用第一条与 `user.locale` 语言族一致的 `examples`。
-3. 仍无匹配时，用 `examples[0]`。
-
-### 6.3 信号与谓词
-
-谓词是一个很小的声明式 DSL，可以序列化成 JSON，因此场景包能跨语言使用：
-
-```ts
-export type SignalPredicate =
-  | { all: SignalPredicate[] }
-  | { any: SignalPredicate[] }
-  | { not: SignalPredicate }
-  | {
-      signal: SignalPath;
-      eq?: unknown; ne?: unknown;
-      gt?: number; gte?: number; lt?: number; lte?: number;
-      in?: unknown[]; contains?: unknown;
-      matches?: string;   // ECMA-262 正则源码
-      exists?: boolean;
-    };
-```
-
-#### 6.3.1 谓词求值规则与命中特异性（Specificity）
-
-1. **缺失信号处理**：当 `signal` 指向的路径不存在或值为 `undefined` / `null` 时：
-   - `{ exists: false }` 返回 `true`；
-   - `{ exists: true }` 返回 `false`；
-   - `{ ne: x }`（其中 `x !== null`）返回 `false`（**严格 fail-closed**：缺失信号不视为“不等于某值”而放行，除非显式搭配 `exists: false`）；
-   - 其余所有比较算子（`eq`、`gt`、`gte`、`lt`、`lte`、`in`、`contains`、`matches`）一律返回 `false`。
-2. **叶子多算子关系**：同一个叶子对象里若同时声明多个算子（如 `{ signal: 'x', gte: 1, lte: 5 }`），所有算子必须同时成立（逻辑与）。
-3. **类型守卫**：
-   - `gt / gte / lt / lte` 仅当信号值为有限 `number` 时求值，否则为 `false`。
-   - `contains`：信号值为数组时检查元素相等（`Array.includes`）；信号值为字符串时检查子串包含（`String.includes`）；否则为 `false`。
-   - `in`：算子参数必须为数组，检查信号值是否在该数组中（若信号值本身是数组，则检查两数组是否有交集）。
-   - `matches`：仅当信号值为字符串时用 `new RegExp(pattern, 'u')` 匹配；正则表达式在加载场景包时预编译并限制最大长度（≤ 256 字符），若语法非法则拒绝加载该场景包。
-4. **命中特异性分数 `specificity(pred)`**（用于同 `priority` 场景排序，见 §7.3）：
-   - 命中为 `false` 时得分为 `0`。
-   - 命中为 `true` 的叶子节点得分 `1`。
-   - `{ all: [...] }` 得分为所有子节点得分之和 `∑ specificity(child)`。
-   - `{ any: [...] }` 得分为命中子节点中的最大得分 `max specificity(child)`。
-   - `{ not: child }` 命中时固定得分 `0.5`。
-
-v0.1 内置的信号：
-
-| 信号 | 类型 | 提取规则与说明 |
-|---|---|---|
-| `session.turnCount` | `number` | 当前会话已收到 `turn.completed` 的总轮数 |
-| `session.lastIntent` | `string?` | 上一轮被 `accepted` 或 `edited` 的意图 id |
-| `lastTurn.status` | `string` | `completed` \| `failed` \| `interrupted` |
-| `lastTurn.toolKinds` | `ToolKind[]` | 本轮调用过的去重 `ToolKind` 列表（若宿主未传 `kind`，按 §6.3.3 默认表推断） |
-| `lastTurn.toolNames` | `string[]` | 本轮调用过的去重工具名列表 |
-| `lastTurn.failedTools` | `number` | 本轮 `tool.result.status === 'error'` 的次数 |
-| `lastTurn.failedExecs` | `number` | 本轮 `kind === 'execute'` 且（`status === 'error'` 或 `exitCode !== undefined && exitCode !== 0`）的次数 |
-| `lastTurn.filesChanged` | `number` | 本轮 `artifact.kind` 属于 `file_changed \| file_created \| file_deleted` 的去重文件数；若宿主未发 `artifact` 事件，则统计 `kind` 属于 `edit \| delete` 且 `status === 'ok'` 的工具调用次数 |
-| `lastTurn.changedPaths` | `string[]` | 本轮变更的文件路径数组（供 `slot.from` 取值，如 `lastTurn.changedPaths.0`） |
-| `lastTurn.toolOutputs.<name>` | `unknown` | 工具 `<name>` 本轮最近一次 `tool.result.output`，**仅允许 `slot.from` 读取，绝不进入模型提示词** |
-| `lastAgentMessage.tail` | `string` | 最后一条 `message.agent` 的末尾，默认截取 1,500 字符 |
-| `lastAgentMessage.length` | `number` | 最后一条 `message.agent.text` 的字符长度 |
-| `lastAgentMessage.endsWithQuestion` | `boolean` | 中英文问句检测（算法见 §6.3.3） |
-| `lastAgentMessage.options` | `string[]` | 提取出的编号选项文本数组（算法见 §6.3.3） |
-| `lastAgentMessage.optionsCount` | `number` | `lastAgentMessage.options.length` |
-| `lastAgentMessage.preferredOptionIndex` | `number` | 若某选项含 `(Recommended)` / `（推荐）` 标记则取其 1-based 序号，否则默认 `1` |
-| `lastAgentMessage.proposedRisk` | `Risk` | 从助手最后一条消息的提议内容中检测出的潜在操作风险等级（算法见 §6.3.3），专门用于防止 `confirm` / `choose_option` 低摩擦放行高危操作 |
-| `lastAgentMessage.hints` | `Hint[]` | 显式的下一步提示，结构为 `{ kind: 'slash' \| 'type_literal', value: string }` |
-| `lastUserMessage.text` | `string` | 用户最近一条消息原文 |
-| `user.locale` | `string` | 由用户最近的消息推断（算法见 §6.3.3），**不是** UI 语言 |
-| `agent.lastSubagent.status` | `string?` | **Stage O2**：最近完成的子 Agent 状态（`completed \| failed \| interrupted`） |
-| `agent.lastSubagent.summary` | `string?` | **Stage O2**：最近完成的子 Agent 摘要 |
-| `agent.lastBackgroundJob.status` | `string?` | **Stage O2**：最近完成的后台进程状态（`completed \| failed \| ready_match`） |
-| `agent.pendingReviews` | `number?` | **Stage O2**：Agent 任务看板中处于待审阅（`review`）或阻塞的任务数 |
-| `env.lastTerminalCommand.command` | `string?` | **Stage O3**：最近一次观察到的用户外部终端命令 |
-| `env.lastTerminalCommand.exitCode` | `number?` | **Stage O3**：最近一次用户外部终端命令的退出码 |
-| `env.git.branch` | `string?` | **Stage O3**：当前 Git 分支名 |
-| `env.git.dirtyCount` | `number?` | **Stage O3**：工作区未提交改动文件数 |
-| `env.git.hasConflicts` | `boolean?` | **Stage O3**：是否存在合并冲突 |
-| `env.ide.activeFile` | `string?` | **Stage O3**：IDE 当前焦点文件 |
-| `env.ide.diagnosticsErrors` | `number?` | **Stage O3**：IDE 当前活动文件的 LSP 报错数 |
-| `env.ambient.clipboardKind` | `string?` | **Stage O3**：剪贴板内容分类（如 `stacktrace`、`error_log`） |
-| `state.<key>` | `unknown` | 宿主上报的任意状态 |
-
-#### 6.3.3 派生信号的具体提取规则
-
-1. **工具类别默认推断（当宿主未传 `tool.call.kind` 时）**：
-   - `read`：`read_file`、`view`、`cat`、`head`、`tail`
-   - `search`：`search_files`、`grep`、`rg`、`find`、`glob`、`web_search`、`session_search`
-   - `edit`：`patch`、`write_file`、`edit`、`apply_patch`、`notebook_edit`
-   - `delete`：`remove_file`、`delete_file`、`rm`
-   - `execute`：`terminal`、`bash`、`exec_command`、`execute_code`、`run_command`
-   - `fetch`：`web_extract`、`fetch`、`curl`、`browser_exec`
-   - `ask_user`：`clarify`、`ask_user`、`request_user_input`
-   - 其余归为 `other`。
-2. **问句检测 `lastAgentMessage.endsWithQuestion`**：
-   - 取 `lastAgentMessage.tail`，先剥离末尾代码块（```` ``` ````），再取最后一段非空文本行。
-   - 若该行在去掉末尾空白、括号、右引号（`”`、`'`、`"`、`）`、`]`）后以 `?` 或 `？` 结尾，或者 匹配句尾疑问词 `/(?:吗|呢|好吗|可以吗|对吗|是吗|如何|怎样|哪一个|哪个)\s*[。！!.]?$/u`，则判定为 `true`。
-3. **编号选项提取 `lastAgentMessage.options`**：
-   - 在 `lastAgentMessage.tail` 的非代码块行中，扫描**末尾连续**的编号列表行：匹配 `/^\s*(?:(\d{1,2})[.)、]|[(（](\d{1,2})[)）])\s+(.+)$/u`。
-   - 仅当提取出的编号从 `1` 开始连续递增且总数在 `2..9` 之间时，记录为有效 `options`。
-4. **显式提示提取 `lastAgentMessage.hints`**：
-   - 在 `lastAgentMessage.tail` 最后 5 行非代码块文本中匹配：
-     - **斜杠命令**（`kind: 'slash'`）：反引号、引号或行首的 `/[a-z][a-z0-9_-]{1,30}`，且命令名不含第二个 `/`（排除 `/usr/bin` 之类的路径）。
-     - **显式输入引导**（`kind: 'type_literal'`）：匹配 `/(?:type|run|enter|reply with|输入|发送|回复)\s+["'「『]([^"'」』\n]{1,40})["'」』]/iu`。
-5. **助手提议风险检测 `lastAgentMessage.proposedRisk`**（解决确认类意图的风险错位问题）：
-   - `confirm` / `choose_option` 等同意类意图本身的文本看似无害（如「可以，继续」），但真正的风险取决于**助手刚刚请求确认的操作**。SDK 对 `lastAgentMessage.tail`（含代码块）执行确定性风险扫描：
-     - **命中 `irreversible`**：匹配 `/(?:\brm\s+-[rRf]+\b|\bgit\s+push\s+[^\n]*--force\b|\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-[fd]+|\bdrop\s+(?:table|database|schema)\b|\btruncate\s+table\b|\bdelete\s+from\b|\bkubectl\s+delete\b|\bterraform\s+destroy\b|删库|强制推送|清空数据|不可恢复|永久删除)/iu`。
-     - **命中 `side_effect`**：匹配 `/(?:\bgit\s+push\b|\bgh\s+pr\s+(?:create|merge)\b|\bnpm\s+publish\b|\bcargo\s+publish\b|\bdeploy\b|\bkubectl\s+apply\b|\bterraform\s+apply\b|\bdocker\s+push\b|推送到远端|推到生产|发布到|部署到|合并\s*PR|发送邮件)/iu`。
-     - **默认**：未命中上述模式时返回 `'reversible'`。
-   - 任何声明了 `dynamicRiskFromProposedAction: true` 的意图（如 `confirm`、`choose_option`），其运行时的**有效风险等级**强制升级为 `effectiveRisk = max(intent.risk, lastAgentMessage.proposedRisk)`，且在内置 coding 包中默认通过 `when` 谓词直接排除 `proposedRisk ∈ {'side_effect', 'irreversible'}` 的自动确认候选，并限定 `allowedChannels: ['choice', 'confirm']`（禁止进入单击即用的 quick 分级）。
-6. **用户语言推断 `user.locale`**：
-   - 拼接当前会话最近最多 3 条 `message.user.text`（剥离代码块与 URL）。
-   - 统计 Unicode 字符占比：假名 `[\u3040-\u30ff]` > 5% → `'ja'`；谚文 `[\uac00-\ud7af]` > 5% → `'ko'`；CJK 表意文字 `[\u4e00-\u9fff]` ≥ 10%（或 CJK 字符数 ≥ 2 且拉丁字母词数 < 5）→ `'zh-CN'`；其余默认 → `'en'`。
-
-### 6.4 预测（SDK → 宿主）
-
-对应 [`spec/prediction.schema.json`](../spec/prediction.schema.json)：
-
-```ts
-export interface Prediction {
-  id: string;
-  sessionId: string;
-  sourceTurnId: string;          // 用于判断是否过期，见 §7.9
-  packId: string;
-  packVersion: string;
-  scenarioId: string;
-  qualifiedIntentId: string;     // 全局唯一归档键：'<packId>@<packVersion>/<scenarioId>#<intentId>'
-  displayChannel: 'quick' | 'choice' | 'confirm'; // 经门控裁定后的推荐展示通道
-  intent: { id: string; confidence: number; slots: Record<string, unknown> };
-  text: string;                  // 渲染好的建议，使用用户的语言和说话风格
-  locale: string;
-  action?: ActionDescriptor;
-  risk: Risk;
-  alternatives: Array<{
-    intentId: string;
-    confidence: number;
-    slots?: Record<string, unknown>;
-    text: string;
-    risk: Risk;
-    action?: ActionDescriptor;
-  }>;
-  sources: Array<'rule' | 'prior' | 'model' | 'embedding'>;
-  createdAt: number;
-  usage?: { inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; latencyMs: number };
-}
-
-/** 规范化的抑制原因枚举，便于遥测聚合与阈值诊断。全集定义见 spec/prediction.schema.json */
-export type SuppressedReason =
-  | 'disabled' | 'non_interactive' | 'pending_interaction' | 'failed_turn_unhandled'
-  | 'interrupted_turn' | 'min_turns_not_met' | 'composer_dirty' | 'mode_blocked'
-  | 'budget_exhausted_no_explicit_rule' | 'incognito'
-  | 'no_scenario_matched' | 'empty_catalog' | 'no_rule_hit_in_local_mode'
-  | 'model_none' | 'below_min_confidence' | 'below_risk_confidence' | 'below_min_margin'
-  | 'in_cooldown' | 'max_per_session_reached'
-  | 'invalid_model_output' | 'unknown_intent' | 'slot_validation_failed'
-  | 'filter_empty_or_meta' | 'filter_label_prefix' | 'filter_ai_voice' | 'filter_evaluative'
-  | 'filter_multiple_sentences' | 'filter_formatting' | 'filter_length'
-  | 'filter_error_text' | 'filter_dangerous' | 'timeout' | 'aborted' | 'stale_turn';
-
-/** 形状与 Codex 的 ThreadPredictionResult（completed | failed）对应 */
-export type PredictionResult =
-  | { type: 'completed'; prediction: Prediction | null; suppressedReason?: SuppressedReason }  // null 表示主动放弃
-  | { type: 'failed'; error: string };
-```
-
-### 6.5 反馈（宿主 → SDK）
-
-对应 [`spec/feedback.schema.json`](../spec/feedback.schema.json)：
-
-```ts
-export interface Feedback {
-  predictionId: string;
-  sessionId?: string;
-  sourceTurnId?: string;
-  outcome: 'accepted' | 'edited' | 'ignored' | 'dismissed' | 'expired';
-  method?: 'click' | 'copy' | 'send' | 'edit_send' | 'shortcut';  // 一律是 WebUI 内的动作，无宿主按键
-  selectedIntentId?: string;     // 当用户在 choice 呈现下选了备选意图时填写
-  similarity?: number;           // [0, 1]，由核心在下一条 message.user 到达时计算（推断反馈），不依赖宿主 UI
-  finalText?: string;            // 用户最终发出的内容。默认不采集，需要显式开启 collectFinalText
-  wasFocusedWhenShown?: boolean;
-  msSinceShown?: number;
-  msToFirstKeystroke?: number;
-}
-```
-
-`suppressed`（被门控拦下、从未展示）由 SDK 自己记录，宿主不需要上报。
-
-## 7. 预测流水线与算法细则
-
-### 7.1 触发
-
-- 默认在 `turn.completed` 且 `status=completed` 时触发。`status=failed` 只在存在声明了 `triggerOnTurnStatuses: ['completed', 'failed']` 的场景（如 `coding.checks_failed`）时才进入场景路由。`interrupted` 一律不触发（记为 `interrupted_turn`）。
-- 触发后先等待 `settleMs`（默认 150ms），把末尾滞后的 `artifact` / `state` 事件收齐。
-- 每个会话同时最多只有一个进行中的预测。新的触发会通过 `AbortController` 取消旧的。
-- 以下情况会立即取消进行中的预测，并向宿主发送一次 `completed + null`，让已经交付的预测立即失效：
-  - 收到 `turn.started`
-  - 收到 `message.user`
-  - 收到 `state composer.dirty=true`
-  - 会话切换
-
-### 7.2 守卫
-
-这部分借鉴了 Qwen Code，并做了通用化处理：
-
-| 守卫 | 判定条件 | 命中时的 `suppressedReason` | 默认行为 |
-|---|---|---|---|
-| 开关 | 全局关闭或用户关闭 | `disabled` | 默认开启 |
-| 交互性 | 宿主声明 `interactive=false`，例如 CI、headless、批处理 | `non_interactive` | 跳过 |
-| 有待处理的交互 | `state.pendingApproval`、`state.pendingInput`，或有对话框打开 | `pending_interaction` | 跳过 |
-| 出错的轮次 | 本轮以 API 错误结束 | `failed_turn_unhandled` | 跳过，除非场景声明要处理 |
-| 会话太短 | `session.turnCount < minTurns` | `min_turns_not_met` | `minTurns = 1` |
-| 输入框非空 | `state.composer.dirty` | `composer_dirty` | 跳过 |
-| 模式 | 宿主声明的模式黑名单，例如 plan 模式 | `mode_blocked` | 可以配置 |
-| 模型预算 | 会话或每小时**模型调用预算**用完 | `budget_exhausted_no_explicit_rule` | **仅跳过 `ModelSource`**（降级为 `L-Local`）：若 `RuleSource` 命中 `explicit: true` 候选仍正常产出建议；若未命中 `explicit` 规则则放弃并记录 `budget_exhausted_no_explicit_rule` |
-| 隐私模式 | `state.incognito` | `incognito` | 跳过 |
-
-### 7.3 场景路由、意图合并与作用域隔离
-
-1. **过滤与排序**：
-   - 遍历已加载的所有 `ScenarioPack` 中的场景，先检查 `triggerOnTurnStatuses` 是否包含当前 `lastTurn.status`，再求值 `match` 谓词。
-   - 命中的场景按以下优先级降序排列：
-     1. `scenario.priority ?? 0`（从高到低）
-     2. `specificity(scenario.match)`（谓词命中特异性，从高到低，见 §6.3.1）
-     3. 声明顺序（先声明的优先）
-2. **硬边界与覆盖梯度**：
-   - 若没有任何场景命中，立即返回 `{ type: 'completed', prediction: null, suppressedReason: 'no_scenario_matched' }`，**绝不调用模型**。
-   - 为避免场景条件过窄导致覆盖率悬崖，场景包采用“**高特异度场景（priority 10–30）+ 保守兜底场景（如 `coding.general_followup`，priority 1，自带高门控阈值 `minConfidence: 0.75, minMargin: 0.25`）**”的斜坡结构；且当已有 `priority ≥ 10` 的专用场景命中时，不再把 `priority ≤ 1` 的兜底场景混入 top-k。
-3. **Top-k 合并、来源场景绑定与全局唯一键**：
-   - 取排名前 `k` 个命中场景（默认 `k = 2`）。
-   - 遍历这 `k` 个场景中的意图，每个候选条目保留其**来源场景引用** `originScenario`（含 `packId`、`packVersion`、`scenarioId`、`scenario.policy`）：
-     - 过滤掉 `enabledByDefault === false`（且未被宿主显式开启）的意图；
-     - 若意图带有 `when` 谓词且求值为 `false`，剔除该意图；
-     - 若多个命中场景包含相同 `intent.id`，保留高优先级场景中的定义及其 `originScenario`。
-   - **策略归属（Per-Intent Origin Policy）**：门控阶段对最终胜出的首选意图 $i_{(1)}$ 求值时，使用的是**该意图所属 `originScenario.policy`** 与全局 `GatePolicy` 的合并结果（而非盲目使用第 1 场景的 policy），且最终 `Prediction.scenarioId` 与 `qualifiedIntentId`（格式：`<packId>@<packVersion>/<originScenarioId>#<intentId>`）均精确指向该意图的来源场景，避免跨场景门控错位与遥测串味。注意：带版本号的 `qualifiedIntentId` 仅作遥测归档键；在线学习（冷却、退避、先验计数）必须使用无版本号的 `<packId>/<scenarioId>#<intentId>` 键，避免包升版清零学习状态（见 `SPEC.md` §6.5）。
-   - **上限截断**：合并后的候选目录最多保留 **15 个意图**（超出时按 `(scenarioRank, intent.prior ?? 1/N)` 截断）。注意：目录上限不单独保证 fork 追加提示词 ≤ 4,000 字节（CJK 每字 3 字节）；超限按 `SPEC.md` §5.5.1 的顺序降级（先丢 examples，再丢目录尾部意图，仍超限则不调用模型）。
-   - 若过滤后候选目录为空，返回 `suppressedReason: 'empty_catalog'`。
-
-### 7.4 候选来源与规则定位
-
-```ts
-export interface CandidateSource {
-  id: 'rule' | 'prior' | 'model' | 'embedding' | (string & {});
-  propose(ctx: PredictContext, catalog: CatalogEntry[], signal: AbortSignal): Promise<Candidate[]>;
-}
-
-export interface Candidate {
-  intentId: string;              // 必须在目录内，或者是 'none'
-  score: number;                 // 取值 [0, 1]
-  explicit?: boolean;            // 是否来自 agent 的显式提示（唯一可短路模型的规则类型）
-  slots?: Record<string, unknown>;
-  text?: string;
-  evidence?: string;             // 调试用
-}
-```
-
-| 来源 | 阶段 | 说明 |
-|---|---|---|
-| **RuleSource** | Phase 1 | 始终启用，本地执行，耗时 < 5ms。严格区分两类产出：<br>① **显式提示候选（`explicit: true`）**：当 `lastAgentMessage.hints` 含 `{ kind: 'slash', value: '/review' }` 且匹配某意图的 `action.command` / `examples`，或含 `{ kind: 'type_literal', value: X }` 且匹配某意图的 `examples` 时，产出 `score: 0.92, explicit: true`。此类候选直接短路模型。<br>② **结构化槽位预填与结构加分（`explicit: false`）**：当 `optionsCount > 1` 时为 `choose_option` 预填确定性槽位 `index = preferredOptionIndex` 并赋予结构加分 `b_rule = 0.20`；当 `endsWithQuestion === true` 时为 `confirm` 赋予结构加分 `b_rule = 0.15`。**非显式规则绝不伪造高置信度独立候选，避免与模型 `none` 打架** |
-| **ModelSource** | Phase 1 | 约束分类。**优先走宿主的 `Sampler`（L2 分叉或 L1 宿主零配置模型委托）**，其次走独立配置的 `ModelClient`（L0）。<br>关闭 thinking/reasoning，温度设为 0，最多输出约 120 个 token。<br>要求模型返回首选意图 `intent`、置信度 `confidence` 以及最多 2 个备选 `runnerUps`（见 §7.5），为 choice 模式提供真实分布 |
-| **PriorSource** | Phase 2 | 计算狄利克雷平滑转移概率 `P(i \| scenario, lastIntent) = (c(s, i_prev, i) + α₀·p₀(i)) / (Σⱼ c(s, i_prev, j) + α₀)`，其中 `α₀ = 5`，`p₀(i)` 为场景包声明的默认先验（未声明时均分，并为 `none` 预留 `p₀(none) = 0.25`）。数据来自本地反馈日志 |
-| **EmbeddingSource** | Phase 2 | 以"agent 消息末尾 + 信号摘要"为查询，在本地已标注的样例上做余弦近邻检索。不需要调用 LLM |
-
-**短路规则（Short-circuit）**：
-- 当且仅当 `RuleSource` 给出了 `explicit: true` 候选，且该意图的有效风险 `effectiveRisk ∈ {'none', 'read_only', 'reversible'}`，且所有必填槽位已由 `slot.from` 或 `default` 解析完毕时，**直接采用该候选，跳过模型调用**。
-- 当没有 `explicit: true` 候选时：
-  - 若存在可用的 `Sampler` 或 `ModelClient`（且模型预算未耗尽），调用 `ModelSource`；此时 `RuleSource` 的非显式规则仅负责**确定性槽位预填**与**备选排序加分**，裁决权归模型。
-  - 若处于 `L-Local`（无模型或 `budget_exhausted`），不产生物理猜测，直接返回 `no_rule_hit_in_local_mode`（或 `budget_exhausted_no_explicit_rule`）。
-
-### 7.5 模型提示词与输出解析
-
-模板用英文写，以兼容更多模型并节省 token。输出文本要求跟随 `user.locale` 与用户说话风格。宿主 `Sampler` 的 fork 分叉模式下，会话本身已经在前缀里，因此省略 `Recent conversation` 一节。
-
-```text
-[INTENT PREDICTION — do not continue the task. Do not call tools.]
-Predict the user's NEXT message in this session, choosing from a fixed catalog.
-
-Scenario: {{scenario.description}}
-Catalog (pick from these ids):
-{{#each intents}}- {{id}}: {{description}}{{#if slots}} (slots: {{slots_spec}}){{/if}}{{#if examples}} e.g. {{examples}}{{/if}}
-{{/each}}- none: nothing above fits, or you are not confident.
-
-Rules:
-1. Predict what THE USER would type next, not what you think they should do.
-   THE TEST: Would the user think "I was just about to type that"?
-2. Read the last few lines of the assistant's message carefully: if it explicitly
-   offers a next step (a slash command, a direct question, or numbered options),
-   prefer the matching intent. If the assistant asks to confirm a destructive or
-   external side-effect action, return "none".
-3. Prefer "none" over a guess. A wrong suggestion costs more than no suggestion.
-4. "text" is what the user would type in locale "{{user.locale}}": one short
-   sentence matching the user's tone, no quotes, no markdown, never in the
-   assistant's voice. Leave "text" empty if intent is "none".
-5. Fill "slots" ONLY with values that literally appear in the conversation.
-6. Optionally list up to 2 plausible runner-up intents in "runnerUps" with their
-   probabilities; total probability (confidence + sum(runnerUps) + P(none)) <= 1.
-
-{{#if compact}}Recent conversation (oldest first):
-{{transcript}}
-{{/if}}Signals: {{signals_json}}
-
-Reply with a single JSON object only:
-{"intent":"<id>","confidence":0.0,"slots":{},"text":"","runnerUps":[{"intent":"<id2>","confidence":0.0}]}
-```
-
-#### 7.5.1 紧凑上下文（compact 模式）的确定性构建规则
-
-1. **轮次窗口**：截取最近 `K = 3` 个已完成轮次（按时间正序排列）。
-2. **先脱敏后截断**：所有进入 `transcript` 和 `signals_json` 的文本，必须先经过 §11.1 的脱敏管道。
-3. **单轮裁剪**：
-   - 用户消息（`User:`）：保留前 500 字符，超出部分替换为 `…`。
-   - 工具调用与结果（`Tool:`）：每条压缩为单行 `<name>(<keyArg>) -> <status>[ exit=<code?>]: <summary>`，例如 `exec_command(pytest) -> error exit=1: 3 failed`，最长 200 字符；同一轮超过 6 次工具调用时，保留前 2 次与最后 4 次（优先保留报错的工具）。
-   - 助手最终消息（`Assistant:`）：**保留末尾** 1,500 字符（超出时前置 `…`），因为下一步提示通常出现在结尾。
-   - 完全剔除 thinking/reasoning 块与 `tool.result.output` 原始对象。
-4. **总预算**：整个 compact prompt 字符数上限为 8,000 字符（约 2k tokens）；若超出，优先从最早的一轮（`t - 2`）开始丢弃。
-
-#### 7.5.2 模型输出严格解析器
-
-1. 若返回 `text === null` 或空串，判定为 `invalid_model_output`。
-2. 允许剥离外围单个 ` ```json ... ``` ` 围栏（兼容不支持 structured outputs 的本地/代理模型），随后执行 `JSON.parse`。不尝试正则硬抠残缺 JSON。
-3. 校验字段：
-   - `intent` 必须是字符串，且属于 `catalogIds ∪ {'none'}`（否则记为 `unknown_intent`）。
-   - `confidence` 必须是有限数字且在 `[0, 1]` 内（否则记为 `invalid_model_output`）。
-   - `slots` 若存在必须是纯对象（plain object）。
-   - `runnerUps` 若存在必须是数组（最多取前 2 项），每项的 `intent` 必须在 `catalogIds` 内且不等于主 `intent`，`confidence` 在 `[0, 1]` 内；非法项直接忽略。
-
-### 7.6 融合算法（消除规则与模型冲突，支持多候选 choice 呈现）
-
-设候选目录加上 `'none'` 构成集合 $\mathcal{I} = \{i_1, \dots, i_m, \text{none}\}$。
-
-1. **路径 A：显式提示短路（Explicit Rule Short-circuit）**
-   - 若 `RuleSource` 产出了 `explicit: true` 候选 $i^*$（且满足 §7.4 短路条件），直接令 $\text{final}(i^*) = 0.92$，不调用模型。
-   - 备选 `alternatives` 直接从同场景下其余满足 `when` 条件的意图中按先验 $P_{\text{prior}}(j)$ 选取前 2 项（分数设为 $0.25 \cdot P_{\text{prior}}(j) / \max_k P_{\text{prior}}(k)$）。
-2. **路径 B：模型分类与先验/结构加分融合（Standard Model Path）**
-   - **当模型返回 `intent === "none"` 时**：因为 `explicit: true` 已在路径 A 短路，走到这里的只剩非显式结构信号（如句子末尾有问号）。模型在阅读完整语义后判定 `none`（例如问句只是修辞、或涉及高危操作），**无条件尊重模型的否决权**，直接以 `suppressedReason: 'model_none'` 终止，不让非显式规则强行推翻模型。
-   - **当模型返回首选意图 $i_1$（置信度 $c_1$）及可选的 `runnerUps` $(i_2, c_2), (i_3, c_3)$ 时**：
-     - 记已知模型概率和 $S = \min(0.98, c_1 + c_2 + c_3)$，令 $P_{\text{model}}(\text{none}) = \max(1 - c_1, 1 - S)$。
-     - 对模型未显式列出的其余目录内意图 $j \notin \{i_1, i_2, i_3\}$，分配极小平滑底数 $\epsilon_0 = 0.02 / m$。
-     - 结合场景先验 $P_{\text{prior}}(i)$ 与非显式规则结构加分 $b_{\text{rule}}(i) \in [0, 0.20]$（见 §7.4）：
-       $$\tilde{S}(i) = \left(P_{\text{model}}(i) + 0.15 \cdot b_{\text{rule}}(i)\right)^{\alpha} \cdot P_{\text{prior}}(i)^{1 - \alpha}, \quad \text{final}(i) = \frac{\tilde{S}(i)}{\sum_{k \in \mathcal{I}} \tilde{S}(k)}$$
-       其中默认 $\alpha = 0.85$。
-   - **备选 `alternatives` 生成（确保 choice 呈现可用）**：
-     - 备选意图按 $\text{altScore}(j) = 0.65 \cdot P_{\text{model}}(j) + 0.35 \cdot P_{\text{prior}}(j) + 0.15 \cdot b_{\text{rule}}(j)$（$j \neq i_1, j \neq \text{none}$）降序排列。
-     - 只要主意图 $i_1$ 通过门控，且备选意图 $j$ 满足未冷却、有效风险非 `irreversible`、且 $\text{altScore}(j) \ge 0.18$，即可入选 `alternatives`（最多 2 项，使用各自模板确定性渲染文本）。这样即使模型只输出了 top-1，高先验或带规则加分的第二顺位意图（如 `after_edit` 下的 `review_diff`）依然能稳定进 choice 呈现。
-
-### 7.7 门控、风险对齐与摩擦分级裁决
-
-```ts
-export interface GatePolicy {
-  minConfidence: number;               // 默认 0.60
-  minMargin: number;                   // top1 − top2（含 none），默认 0.15
-  riskMinConfidence: Record<Risk, number>;
-  quickRisks: Risk[];              // 允许以 quick(单击载入草稿)分级出现的风险等级
-  cooldownTurnsAfterDismiss: number;   // 某意图被 Esc 关闭后，几轮内不再出现，默认 3
-  ignoredBackoff: {
-    streak: number;                    // 默认 3
-    raiseBy: number;                   // 默认 0.10
-    maxRaise: number;                  // 默认 0.25
-    nearMatchSimilarityThreshold: number; // 默认 0.75：忽略但打出高相似文本时视为弱正例
-  };
-  maxPerSession?: number;
-}
-```
-
-默认门控参数表：
-
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `minConfidence` | `0.60` | 全局最低置信度（场景级 `policy` 可覆盖，如兜底场景设为 `0.75`） |
-| `minMargin` | `0.15` | $\text{final}(i_{(1)}) - \max_{j \neq i_{(1)}} \text{final}(j) \ge 0.15$ |
-| `riskMinConfidence.none` | `0.55` | 纯对话问答 |
-| `riskMinConfidence.read_only` | `0.60` | 只读检查/查看 |
-| `riskMinConfidence.reversible` | `0.65` | 跑测试、本地修改、本地提交 |
-| `riskMinConfidence.side_effect` | `0.80` | 推送远端、创建 PR、发外部请求 |
-| `riskMinConfidence.irreversible` | `0.95` | 破坏性操作，默认禁止展示 |
-| `quickRisks` | `['none', 'read_only', 'reversible']` | **默认仅无副作用或本地可逆意图可用 quick 分级**（WebUI 里单击即载入草稿）；`side_effect` 与 `irreversible` 永不进 quick |
-| `cooldownTurnsAfterDismiss` | `3` | 用户在 WebUI 关闭/标没用某意图后，接下来 3 轮内屏蔽该意图的学习键 |
-| `ignoredBackoff` | `{ streak: 3, raiseBy: 0.10, maxRaise: 0.25, nearMatchSimilarityThreshold: 0.75 }` | 仅当 `outcome === 'ignored'` 且 `similarity < 0.75` 时计入未命中连击；若 `similarity >= 0.75`（用户手打了高度相似的话），视为**近似命中（near-match）**，直接清零退避计数 |
-
-**门控与分级判定顺序**（使用胜出意图所属 `originScenario.policy` 覆盖后的策略，任一不满足即返回 `prediction: null` 并记录对应的 `suppressedReason`）：
-1. **计算有效风险 `effectiveRisk`**：若意图声明了 `dynamicRiskFromProposedAction: true`（如 `confirm`、`choose_option`），令 $\text{effectiveRisk} = \max(\text{intent.risk}, \text{lastAgentMessage.proposedRisk})$；否则为 $\text{intent.risk}$。
-2. 若首选是 `'none'` 或 $\text{final}(\text{none}) \ge \text{final}(i_{(1)})$ → `model_none`。
-3. 检查会话展示次数上限 `maxPerSession` → `max_per_session_reached`。
-4. 检查冷却表 `dismissedUntilTurn[<packId>/<scenarioId>#<intentId>] > session.turnCount` → `in_cooldown`（学习键无版本号，见 §7.3）。
-5. 检查有效阈值（含 `ignoredBackoff` 的 `backoffDelta`）：
-   - 若 $\text{final}(i_{(1)}) < \text{minConfidence} + \text{backoffDelta}$ → `below_min_confidence`
-   - 若 $\text{final}(i_{(1)}) < \text{riskMinConfidence}[\text{effectiveRisk}] + \text{backoffDelta}$ → `below_risk_confidence`
-6. 检查领先幅度 $\text{final}(i_{(1)}) - \text{final}(i_{(2)}) < \text{minMargin}$ → `below_min_margin`。
-7. **裁决摩擦分级 `displayChannel`**（独立 WebUI 内的呈现分级，不是宿主通道）：
-   - 计算该意图允许的分级集合：`allowed = intent.allowedChannels ?? (quickRisks.includes(effectiveRisk) ? ['quick', 'choice', 'confirm'] : effectiveRisk === 'side_effect' ? ['choice', 'confirm'] : ['confirm'])`，取其中摩擦最低者为最终分级。与默认集合交集为空的意图在 §7.3 目录合并时即被剔除，永远不会胜出——因此不再需要 `risk_disallowed_*` 这类抑制原因（已从枚举删除）。
-   - 如此设计后：
-     - **`confirm` / `choose_option`**（声明了 `allowedChannels: ['choice', 'confirm']`）与 **`side_effect` 意图**（如 `open_pr`）在 WebUI 里永远至少是「多选一」呈现、且发送前多一步确认，不会是单击即走的 `quick` 卡。摩擦分级提高的是可感知性与误触成本，不单独构成安全边界；安全性建立在「发送须显式点击 + 永不自动执行」之上（见 §10、§11.2）。
-     - `displayChannel` 只由本节裁决。WebUI 三种分级全支持，无需向宿主协商任何显示能力；WebUI 不得按 margin 或置信度自改分级，更不得降低摩擦。
-
-### 7.8 渲染、槽位校验、Action 载荷绑定与过滤规则
-
-- **语言**：以 `user.locale` 为准，它来自用户最近的消息，所以用户用中文提问时，建议也用中文。
-- **模板语言回退链**：`user.locale`（如 `zh-CN`）→ 语言主标签（`zh`）→ `en` → 第一个可用键。
-
-#### 7.8.1 槽位解析与校验（Slot Resolution）
-
-对意图声明的每个 `slotSpec`（键名为 `k`）：
-1. **确定性优先**：若声明了 `slotSpec.from`，从当前信号树中读取对应路径的值（支持点号路径与数组下标，如 `lastTurn.changedPaths.0`）。
-2. **模型回退**：若信号路径无值，取模型返回的 `slots[k]`，且**必须满足字面出现约束**（对于 `string | path` 类型，若值来自模型而非信号，该字符串必须是最近 3 轮对话文本的子串，防止模型幻觉捏造文件名或订单号）。
-3. **默认值兜底**：仍无值时使用 `slotSpec.default`。
-4. **严格校验**：
-   - 若 `required: true` 且值为 `undefined / null / ''` → 失败（`slot_validation_failed`）。
-   - `type === 'number'`：必须为有限数字（若为数字字符串则转为 `Number`）。
-   - `type === 'enum'`：必须在 `slotSpec.enum` 列表中。
-   - `type === 'path'`：长度 ≤ 120，禁止包含 `..`、控制字符、空白换行或 shell 元字符（`` ; | & $ ` > < ``）。
-   - `type === 'string'`：长度 ≤ `slotSpec.maxLength ?? 80`，禁止包含换行或控制字符。
-   - 若声明了 `slotSpec.pattern`，用 `new RegExp(pattern, 'u')` 校验字符串表示。
-   - 任一槽位校验不通过，**整条预测立即作废**，记录 `suppressedReason: 'slot_validation_failed'`。
-
-#### 7.8.2 模板与 Action 载荷渲染（Action Payload Interpolation）
-
-1. **文本模板渲染**：把通过校验的槽位填进 `render` 模板的 `{slotName}` 占位符。若模板中引用了未定义或值为空的槽位名，按 `slot_validation_failed` 作废。
-2. **Action 载荷插值与执行边界**：
-   - 若意图声明了 `action`（如 `{ type: 'command', command: '/review', args: '{path}' }` 或 `{ type: 'tool', name: 'track_shipment', input: { orderId: '{orderId}' } }`），SDK 会递归遍历 `action.args`、`action.input`、`action.payload` 中的字符串值，将 `{slotName}` 替换为已通过 §7.8.1 校验的槽位值。
-   - **严格原子性**：若 `action` 中引用的任何 `{slotName}` 未定义或未解析出有效值，**整条预测按 `slot_validation_failed` 作废**（绝不向宿主交付带未替换 `{slotName}` 字面量的半成品 `action`）。
-   - **使用与执行契约（独立 WebUI 内）**：
-     - 卡片被点中只意味着文本（或 `action.type === 'command'` 对应的命令串）被载入 **WebUI 自己的草稿编辑框**；再往前一步只有两条路：用户点「复制」（纯剪贴板，SDK 不感知宿主），或宿主声明了 `dispatchModes` 时点「发给 Agent」把草稿作为下一条用户消息/命令投递进会话（等价于用户亲手发送）。两条路都要用户明确点击，`confirm` 分级再加一步确认。
-     - `action.type === 'tool' | 'custom'` 在 A1 仅作为结构化元数据在检查面展示，不触发任何执行；到 A3 才允许经卡片确认后派发（见 §5.2）。
-
-#### 7.8.3 过滤规则（Filter Pipeline）
-
-无论文本来自模板还是模型生成，交付前都必须依次通过以下 9 条确定性过滤规则（扩展自 Qwen Code 的 12 条规则并加入中日韩文本 CJK 适配）：
-
-| # | 规则名（`SuppressedReason`） | 精确判定条件与正则 | 拦截示例 |
-|---|---|---|---|
-| 1 | `filter_empty_or_meta` | 去除首尾空白后为空，或匹配 `/^(?:none\|null\|n\/a\|nothing\|无\|没有建议\|无需回复\|\(.*\)\|\[.*\]\|<.*>)$/iu` | `none`、`（无建议）`、`[no suggestion]` |
-| 2 | `filter_label_prefix` | 匹配 `/^(?:suggestion\|next\s*step\|user\|prompt\|reply\|建议\|下一步\|用户输入\|回复)\s*[:：]/iu` | `建议：提交`、`Suggestion: commit` |
-| 3 | `filter_ai_voice` | 匹配助手口吻前缀：`/^(?:I\s+will\|I'll\|Let\s+me\|Here\s+is\|Here's\|Sure[,!]\|Certainly\|我来\|我将\|让我\|好的，我\|当然，\|需要我帮你)/iu` | `我来帮你跑测试`、`Let me run the tests` |
-| 4 | `filter_evaluative` | 当 `intent.id !== 'acknowledge'` 时，纯寒暄/评价文本：`/^(?:thanks\|thank\s+you\|looks\s+good\|lgtm\|great\|awesome\|nice\s+work\|谢谢\|多谢\|太好了\|不错\|辛苦了)[.!！。]?$/iu` | `谢谢`、`不错`、`looks good`、`thanks` |
-| 5 | `filter_multiple_sentences` | 剥离末尾标点后，内部仍包含句末终止符 `/(?:[。！？!?]\|\.\s+[A-Z])/`（路径/版本号中的点号如 `v0.1`、`a.ts` 不计入） | `跑测试。然后提交。` |
-| 6 | `filter_formatting` | 包含换行符 `\r` / `\n`、代码块围栏、Markdown 标题 `/^#+\s/` 或列表前缀 `/^[-*]\s/` | 换行、markdown、代码块 |
-| 7 | `filter_length` | 总字符数 > 100；若含 CJK 字符（`[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]`），有效字符数须在 `2..30` 之间；若为纯拉丁文本，按空白切分的词数须在 `1..12` 之间（单个斜杠命令如 `/review` 允许 1 个词） | 过长段落或单字 `好` |
-| 8 | `filter_error_text` | 匹配常见报错文本：`/(?:API\s+error\|rate\s+limit\|status\s+code\s+\d{3}\|ECONNREFUSED\|ETIMEDOUT\|UnhandledPromiseRejection\|Traceback\s+\(most\s+recent)/iu` | `API error: 500` |
-| 9 | `filter_dangerous` | 匹配高危破坏性指令：`/(?:\brm\s+-[rRf]+\b\|\bgit\s+push\s[^\n]*--force\b\|\bgit\s+reset\s+--hard\b\|\bdrop\s+(?:table\|database)\b\|\bformat\s+[a-z]:\|\bchmod\s+777\b\|\bcurl\b[^\n]*\|\s*(?:sh\|bash)\b)/iu`，除非意图在白名单里 | `rm -rf`、`git push --force`、`DROP TABLE` 等 |
-
-### 7.9 交付与失效
-
-- 结果通过 `onPrediction` 回调、`prediction/updated` 通知或 WebUI 内部数据面交付，最终呈现点只有 SDK 独立 WebUI 的建议流。
-- 过期校验全部在 SDK 侧（借鉴 Codex `expectedTurnId` 与 Qwen 的会话检查，但不要求宿主参与）：核心在交付前复查 `sourceTurnId` 仍是最近一个已结束的 turn；WebUI 渲染前再比对卡片的 `sessionId`/`sourceTurnId` 与流的头状态，不一致就静默标过期而不是画错。
-- 收到 §7.1 的失效事件后，核心发 `completed + null`；WebUI 把仍挂着的卡片标为已过期（留给检查面复盘，不再可点发送）。宿主输入框里此刻有什么，都不影响卡片存废——这是和宿主输入解耦后自然得到的好处。
-- WebUI 内部呈现时序（是否延迟 300ms 入场之类）是本地体验参数，不写进契约、实现可调。
-
-### 7.10 反馈、相似度计算与学习
-
-| 结果 | 含义 | 作为学习信号 |
-|---|---|---|
-| accepted | 用户在 WebUI 点发送、原文未改即发出（method=`send`）；或点了复制后下一条用户消息与建议一致（`similarity = 1.0`，推断） | 强正例，立即清零 `ignoredBackoff` 连击。纯 `copy` 未见后续发送时单独计数，不冒充 accepted |
-| edited | 用户在 WebUI 草稿框改字后发出（method=`edit_send`），或复制后改字发出（`similarity ∈ (0, 1)`，推断） | 意图大概率正确，文本需要改进；立即清零 `ignoredBackoff` 连击 |
-| ignored（near-match） | 用户没理 WebUI，但紧接着在宿主里发了高度相似的话（`similarity ≥ 0.75`，核心推断，无需宿主 UI 配合） | **弱正例（近似命中）**，不计入负例退避，并清零连击 |
-| ignored（mismatch） | 下一条用户消息与建议不相关（`similarity < 0.75`，推断） | 预测意图的负例，累加 `ignoredBackoff` 连击。如果开启了 `collectFinalText`，可以离线标注出真实意图作为正例 |
-| dismissed | 用户在 WebUI 显式关卡/标没用 | 强负例，触发该意图的学习键（无版本号形式）进入 `cooldownTurnsAfterDismiss` 轮冷却 |
-| expired | 卡片还没被处理，新的一轮就开始了（或源 turn 已不是最近已结束轮） | 中性，不计入负例退避 |
-| suppressed | 被门控或过滤器拦下（SDK 内部记录） | 用于分析阈值与覆盖率 |
-
-- **本地隐私安全的编辑相似度计算**：在核心内（核心本就经事件流看得到建议文本与下一条 `message.user`，无需宿主 UI 参与），先做空白归一化，再算字符级 Bigram Dice 系数：
-  $$\text{similarity}(A, B) = \frac{2 \cdot |\text{bigrams}(A) \cap \text{bigrams}(B)|}{|\text{bigrams}(A)| + |\text{bigrams}(B)|}$$
-  该标量值随 `Feedback.similarity` 上报，无需保存 `finalText` 原文。例外：归一化后任一方是另一方的子串时，近似命中判定按相似度 1.0 处理——例如建议「跑一下测试验证看看」而用户发了「跑一下测试」，Dice 仅约 0.67，低于默认近似命中线 0.75，但意图相同，不得计入退避（规范表述见 `SPEC.md` §6 第 5 项）。
-- 反馈默认写入本地 JSONL 文件（路径可由宿主指定，如 `$HERMES_HOME/logs/intent_predict_feedback.jsonl`），存储接口 `FeedbackStore` 可以替换。
-- 遥测字段参考 Qwen Code 的 `PromptSuggestionEvent`：
-  - outcome、method、selectedIntentId
-  - time_to_accept / ignore / first_keystroke
-  - 文本长度、Bigram Dice 相似度
-  - 呈现时 WebUI 页面是否可见（`wasFocusedWhenShown`，语义已改为 WebUI 前台而非宿主窗口）
-  - suppressed 的原因（标准化的 `SuppressedReason` 枚举）
-  - scenario/intent id、来源、延迟、token 用量（含缓存命中）
-- 各阶段的学习内容：Phase 1 只记录。Phase 2 开始用于先验、校准和阈值调优。
-
-## 8. 接入：对任意 agent 通用（零配置优先）
-
-### 8.1 零配置设计原则与四级接入
-
-**核心原则：绝不要求最终用户单独为 `intent-predict` 配置一套新的 API Key 或模型端点。** 任何 Agent 宿主本身都已经持有可用的模型客户端与会话上下文，因此 SDK 把"复用宿主自身模型"作为默认路径：
-
-| 级别 | 宿主需要提供 | 模型调用方式 | 上下文与成本 |
-|---|---|---|---|
-| **L2 分叉采样（Fork Sampler）** | 实现 `Sampler.sample({ mode: 'fork' })` | 复用宿主当前会话的缓存共享临时分叉（如 Codex `thread/sample`、Hermes 同前缀旁路请求） | 前缀 100% 命中 Prompt Cache，延迟最低、效果最好、零额外配置 |
-| **L1 宿主委托（Host-Delegated）** | 实时调用 `observe(event)`，并把 `Sampler.sample({ mode: 'compact' })` 桥接到宿主自己的模型客户端 | SDK 生成紧凑 prompt（约 2k tokens），交由宿主现成的模型通道完成一次无工具单轮调用 | **零配置**，具备完整的工具/产物/状态信号与自动触发，效果更好 |
-| **L0 消息数组** | 每轮结束时传一份 `SimpleMessage[]`，外加宿主的一个模型调用回调（或可选的独立 `ModelClient`） | SDK 从消息数组提取基础信号并构建紧凑上下文 | 单独调一次小模型。接入最简单（约 10 行代码） |
-| **L-Local 纯本地** | 仅传入事件或消息，不提供 `Sampler` 也未配置 `ModelClient` | 仅 `RuleSource` 的显式候选可独立产出建议；`PriorSource` 只参与备选排序，不单独产猜测（与 §7.4 一致） | 零网络请求、耗时小于 5ms，离线可用；覆盖率低是预期行为 |
-
-SDK 根据宿主声明的能力自动按 `L2 → L1 → L0 → L-Local` 降级。
-
-### 8.2 TypeScript API 草案
-
-```ts
-import { createPredictor } from '@intent-predict/core';
-import coding from '@intent-predict/pack-coding';
-
-// 典型接入：直接复用宿主自己的模型调用函数，无需用户额外配置任何 API Key
-const predictor = createPredictor({
-  packs: [coding],
-  sampler: {
-    // 宿主只需把已有的 LLM client 桥接进来（支持 fork 分叉或 compact 单次调用）
-    async sample(req) {
-      return hostAgent.sampleForPrediction(req);
-    },
-  },
-  policy: { minConfidence: 0.6, minMargin: 0.15 },
-  privacy: { redact: 'default', collectFinalText: false },
-});
-
-const session = predictor.session('thread-123', { interactive: true });
-
-// L0：每轮结束时调用一次（可传入 state 快照让守卫完整生效）
-const result = await session.predict({
-  sourceTurnId: 't7',
-  messages: history,        // SimpleMessage[]，也接受 fromOpenAIChat(history) 等转换结果
-  state: {                  // 可选：L0 下一次性传入宿主当前状态快照
-    'composer.dirty': false,
-    pendingApproval: false,
-    pendingInput: false,
-    mode: 'code',
-    incognito: false,
-  },
-  signal: abort.signal,
-});
-
-// L1/L2：实时上报事件，由 SDK 自动触发预测
-session.observe({ type: 'tool.result', turnId: 't7', callId: 'c1', status: 'error', exitCode: 1 });
-session.observe({ type: 'turn.completed', turnId: 't7', status: 'completed', at: Date.now() });
-session.onPrediction((r) => {
-  if (r.type === 'completed' && r.prediction) ui.suggest(r.prediction);
-  else ui.clearSuggestion();
-});
-
-// 反馈
-session.feedback({ predictionId, outcome: 'accepted', method: 'tab' });
-```
-
-`fromOpenAIChat`、`fromAnthropicMessages`、`fromAcpUpdates` 等转换函数负责把常见格式转成 `SimpleMessage[]` 或 `AgentEvent[]`。
-
-### 8.3 Sampler 接口与实现规范
-
-```ts
-export interface Sampler {
-  /**
-   * 声明宿主支持的采样模式：
-   * - 'fork'：在当前会话上开临时分叉，追加简短指令（≤ 4,000 字节），共享 prompt cache
-   * - 'compact'：接收 SDK 组装好的紧凑上下文 prompt，用宿主当前模型或辅助快模型跑一次单轮生成
-   */
-  modes?: Array<'fork' | 'compact'>;
-
-  sample(req: {
-    sessionId: string;
-    expectedTurnId: string;        // 源会话最近一次已结束的 turn。不一致时必须拒绝
-    mode: 'fork' | 'compact';
-    prompt: string;                // fork 模式下 ≤ 4,000 字节；compact 模式下 ≤ 8,000 字符
-    jsonSchema?: object;           // 宿主支持结构化输出时传入
-    effort?: 'none' | 'minimal' | 'low';
-    maxOutputTokens?: number;      // 默认 120
-    signal: AbortSignal;
-  }): Promise<{
-    text: string | null;           // 模型试图调用工具或没有输出文本时为 null
-    usage?: { inputTokens?: number; cachedInputTokens?: number; outputTokens?: number };
-  }>;
-}
-```
-
-宿主实现 Sampler 时要遵守以下规范。它们来自 Codex `thread/sample` 和 Qwen `runForkedQuery` 的实践（以及 Hermes Agent"绝不破坏 prompt caching"的缓存不变量）：
-
-1. **Fork 模式下前缀必须完全一致**：system prompt、工具声明、历史都不能改，**工具声明也不能删**。删掉工具会改变缓存前缀；Codex 专门加了 `prediction_preserve_parent_tools` 来保留工具声明。推理强度也不要通过修改请求参数来调整。Codex 的做法是在上下文末尾追加一条 `configuration_update`，请求级设置保持不变。
-2. **Compact 模式下直接复用宿主已有凭证**：在宿主内部调用其已配置的辅助模型（auxiliary / fast model，如未单独配置则用当前激活的主模型与凭证池），设置 `temperature: 0`、`max_tokens: 120`，不挂载任何工具。
-3. **使用临时分叉**：不持久化，不出现在会话记录里，不触发自动压缩，不在 UI 中显示。
-4. **只采样一次**：模型如果发起工具调用，这次结果作废，返回 `text: null`。工具不实际执行。
-5. **标记为内部调用**：使用专门的 prompt id，例如 `intent_prediction`，不进入用户可见的日志和统计。
-6. **可以取消**：收到 `signal` 后立即停止，并清理分叉。
-7. **只在空闲时运行**：源会话正在运行时直接拒绝。
-
-### 8.4 第一个深度落地宿主：Hermes Agent 设计
-
-本项目将 **Hermes Agent** 定为第一个要深度打通的宿主，但排期上先在 Phase 1 用回放评测（`eval/golden.jsonl` + 离线回放）把核心流水线正确性定住，Hermes 深度集成随 Phase 2 前后展开，避免在核心未验证时同时背 TS core、sidecar、Python 钩子与三端 UI 四条战线。下文对 Hermes 内部结构（`run_agent.py` 钩子、Prompt Caching 不变量、toolsets 映射）的描述**尚未钉版本实测核实**（与 `prior-art.md` 对 Codex/Qwen 的钉提交核查不同），展开前须以同样方式逐项验证并记录版本；未验证前不得以本节为据估工时。Hermes 拥有 Python 核心循环（`run_agent.py`）、Ink TUI（`hermes --tui`）、Electron 桌面端（`hermes desktop`）以及 ACP 服务，适合届时验证跨语言与多端架构：
-
-1. **零配置模型委托（Sampler 实现）**：
-   - **L2 Fork 路径**：Hermes 的核心不变量是"绝不破坏 Prompt Caching"（会话中固定 system prompt、toolsets 和历史消息前缀）。当一轮对话在 `run_agent.py` 结束（模型返回最终文本回复）时，Hermes 的消息数组 `[system, ...history, last_assistant_msg]` 已经在提供商侧建立了热缓存。Sampler 直接克隆该消息列表副本，在末尾追加一条 `role: 'user'` 的 4KB 意图分类 prompt（保留原 `tools` 声明以维持缓存前缀一致，`tool_choice: 'none'` 或在收到 `tool_calls` 时作废），直接命中 90%+ 的 `cachedInputTokens`。
-   - **L1 Compact 路径**：若当前提供商不支持分叉缓存，Hermes 直接复用内部已配置的辅助模型路由（或当前活动 profile 的主模型凭证池）响应 `sampler/sample (mode: 'compact')`，用户无需做任何额外配置。
-2. **事件映射（Hermes → `AgentEvent`）**：
-   - `AIAgent.run_conversation()` 开始一轮 → `turn.started` + `message.user`
-   - `handle_function_call()` 分发工具 → `tool.call`（按 `toolsets.py` 映射 `ToolKind`：`read_file`→`read`、`patch/write_file`→`edit`、`terminal/execute_code`→`execute`、`clarify`→`ask_user` 等）
-   - 工具返回 JSON → `tool.result`（从 `terminal` 结果提取 `exit_code`；从 `write_file`/`patch` 提取 `files_modified` 生成 `artifact(file_changed)`）
-   - 遇到 `clarify` 或危险命令审批挂起 → `state(pendingInput=true)` / `state(pendingApproval=true)`
-   - 一轮结束 → `message.agent(final=true)` + `turn.completed`
-3. **呈现：宿主零 UI 改动**：Ink TUI、Desktop、经典 CLI 三端都不改——用户在 SDK 独立 WebUI 里看卡片。Hermes 侧与「发回会话」有关的只有可选 dispatch 桥：把 WebUI 草稿框确认的文本当作下一条用户消息喂给对应会话（等价于该会话收到一次普通输入）；未实现 dispatch 时用户复制粘贴即可。Hermes 若将来想在自家界面镜像卡片，是宿主自选行为，不进本设计。
-
-### 8.5 其他宿主适配器（计划）
-
-| 宿主 | 事件来源 | Sampler（零配置模型来源） | 说明 |
-|---|---|---|---|
-| **Hermes Agent（第一个深度落地，Phase 2 前后展开）** | `run_agent.py` 钩子 / Gateway 事件流 | 同前缀 Fork 采样，或复用 Hermes 当前模型/辅助模型 | 通过 `@intent-predict/sidecar`（Python 侧）与 `@intent-predict/ui`（TUI/Desktop 侧）协同 |
-| Codex（app-server） | `turn/started`、`turn/completed`、`item/started`、`item/completed` | `thread/sample`（L2 Fork） | 实验接口，需要在 initialize 时声明 experimental API 能力。源线程必须空闲，且是持久化的根线程；prompt 不超过 4,000 字节 |
-| ACP 代理 | `session/prompt`、`session/update` | 委托代理内部模型 (L1) | 预测通过 `_` 开头的自定义通知下发：`_intent_predict/prediction`（下行）与 `_intent_predict/feedback`（上行），命名空间已定。需要客户端支持才能显示 |
-| Claude Agent SDK | 消息流和 hooks | 复用 Agent SDK 当前 client / session fork（待验证） | |
-| OpenAI Agents SDK | run items 和 hooks | 复用 Runner 当前 model | |
-| Vercel AI SDK | `onStepFinish`、`onFinish` | 复用传入的 `LanguageModelV1` | |
-| LangGraph | stream events | 复用图节点的 ChatModel | |
-| 自研 agent | 直接调用 SDK，或者通过 sidecar | 自己实现 | 按 §8.3 的规范实现 |
-
-## 9. Sidecar 协议（JSON-RPC 2.0）
-
-非 JS 宿主（如 Hermes 的 Python 后端、Rust、Go 等）通过 sidecar 接入：`intent-predict serve --stdio`。宿主协议的传输用换行分隔的 JSON（NDJSON），和 Codex app-server、MCP 的 stdio 传输方式一致。独立 WebUI 的本地回环 HTTP 是另一回事（§10.4），不属于本 RPC、不替代 stdio；其传输细节实现自定、不进 `rpc.schema.json`。方法名对应 Codex 的 `thread/prediction/request` 和 `thread/prediction/updated`。完整 Schema 见 [`spec/rpc.schema.json`](../spec/rpc.schema.json)。
-
-| 方向 | 方法 | 类型 | 说明 |
-|---|---|---|---|
-| 宿主 → SDK | `initialize` | 请求 | 声明客户端信息、能力（`samplerModes`、`dispatchModes`、`interactive`）、策略和要加载的场景包；不声明任何显示能力（渲染在 SDK WebUI 内） |
-| 宿主 → SDK | `session/observe` | 通知 | `{ sessionId, events: AgentEvent[] }` |
-| 宿主 → SDK | `prediction/request` | 请求 | `{ sessionId, sourceTurnId, messages?, state? }`。立即返回 `{}`，结果另行通知 |
-| 宿主 → SDK | `prediction/cancel` | 请求 | `{ sessionId, reason? }` |
-| 宿主 → SDK | `prediction/feedback` | 通知 | `Feedback` |
-| SDK → 宿主 | `prediction/updated` | 通知 | `{ sessionId, sourceTurnId, result: PredictionResult }` |
-| SDK → 宿主 | `sampler/sample` | 反向请求 | 只在宿主声明了 `samplerModes` 非空时使用。支持 `mode: 'fork' \| 'compact'`：fork 走宿主缓存分叉，compact 委托宿主已有模型完成推理 |
-| SDK → 宿主 | `sampler/cancel` | 反向通知 | `{ sampleRequestId, sessionId, reason? }`。通知宿主立即中止正在进行中的采样请求 |
-| SDK → 宿主 | `dispatch/message` | 反向请求 | `{ sessionId, text }`。仅当用户在独立 WebUI 里显式点下发送、且宿主声明 `dispatchModes` 含 `'message'` 时才发；宿主须把 `text` 当作一条普通用户输入处理（走其原生审批与回合流程）。结果 `{}` 表示已接受排队 |
-| SDK → 宿主 | `dispatch/command` | 反向请求 | `{ sessionId, command, args? }`。同上但对应 `action.type === 'command'`；宿主无此能力时 WebUI 退化为把命令串放进草稿走 message 或复制 |
-
-WebUI 与核心/sidecar 之间的数据面（卡片流、草稿动作、标注）是进程内或本地回环的自有通道（§10.4），不占用上表方法；`prediction/feedback` 仍保留给进程内直连集成与测试注入，WebUI 的动作由同进程核心直接记录，无需绕宿主转发。
-
-### 9.1 全双工并发、ID 命名空间与取消时序（Hermes 落地规范）
-
-由于 stdio 上“宿主 → SDK”与“SDK → 宿主”共享同一对管道，必须严格遵守以下多路复用与取消规范：
-
-1. **JSON-RPC 请求 ID 命名空间隔离**：
-   - **宿主发起的请求**（`initialize`、`prediction/request`、`prediction/cancel`）：`id` 使用正整数 `1, 2, 3, ...` 或以 `"h-"` 开头（如 `"h-42"`）。
-   - **SDK 发起的反向请求**（`sampler/sample`）：`id` 固定以 `"s-"` 开头加单调递增序号（如 `"s-1"`, `"s-2"`），绝对不会与宿主请求 ID 碰撞。
-2. **宿主侧非阻塞事件循环（防死锁）**：
-   - 宿主在处理 `turn.completed` 发送 `session/observe` 通知后，其 stdio 读取协程必须保持持续消费：在等待 `prediction/updated` 期间，随时可能收到 SDK 发来的 `sampler/sample` 反向请求并异步派发给 LLM 客户端，不得同步阻塞主读取循环。
-3. **单会话 In-Flight 上限**：
-   - 每个 `sessionId` 在同一时刻最多只允许有 **1 个** in-flight 的预测流水线与最多 **1 个** in-flight 的 `sampler/sample` 请求。
-4. **中断与取消传播时序（Abort Propagation）**：
-   - 当预测处于 `sampler/sample`（假设请求 ID 为 `"s-1"`）等待期间，若 SDK 收到以下任一事件：
-     - `session/observe` 携带 `turn.started`、`message.user` 或 `state(composer.dirty=true)`；
-     - 宿主显式调用 `prediction/cancel`；
-     - SDK 内部 4s 硬超时到期；
-   - SDK 会**立即**执行三步原子清理：
-     1. 触发内部 `AbortController.abort()`；
-     2. 向宿主发送 `sampler/cancel` 通知：`{"jsonrpc":"2.0","method":"sampler/cancel","params":{"sampleRequestId":"s-1","sessionId":"s1","reason":"user_typing"}}`；
-     3. 向宿主发送 `prediction/updated (prediction: null, suppressedReason: 'aborted' | 'stale_turn' | 'timeout')` 以确保 UI 撤下任何残留状态。
-   - 宿主收到 `sampler/cancel` 后立即 close/abort 底层模型 HTTP 流，并对 `"s-1"` 返回错误码 `-32003 (SAMPLER_ABORTED)`（SDK 收到迟到的 `"s-1"` 正常响应或错误响应时均直接静默忽略）。
-
-**标准 JSON-RPC 错误码约定**：
-- `-32001` `SESSION_BUSY`：源会话仍在运行中，拒绝采样
-- `-32002` `TURN_MISMATCH`：`expectedTurnId` 与源会话最新已结束的 turn 不一致
-- `-32003` `SAMPLER_ABORTED`：采样被取消或超时
+一次完整的交互（消息均可用 `spec/rpc.schema.json` 校验）：
 
 ```jsonc
-// 宿主 → SDK：初始化并声明支持 sampler 委托（零配置，无需传任何 API Key）
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"0.1","client":{"name":"hermes-agent","version":"3.3.0"},"capabilities":{"samplerModes":["fork","compact"],"dispatchModes":["message"],"interactive":true},"packs":["builtin/coding"]}}
-// 宿主 → SDK：上报事件流
+// 宿主 → 核心：声明能力。timeoutMs 调大是因为这个宿主靠起进程来借模型
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"0.5","client":{"name":"grok-cli-host","version":"0.5.0"},"capabilities":{"interactive":true,"samplerModes":["compact"],"dispatchModes":["message"]},"packs":["builtin/coding"],"options":{"timeoutMs":60000}}}
+// 宿主 → 核心：一轮的事件，以 turn.completed 收尾
 {"jsonrpc":"2.0","method":"session/observe","params":{"sessionId":"s1","events":[{"type":"artifact","turnId":"t7","kind":"file_changed","ref":"src/index.ts"},{"type":"turn.completed","turnId":"t7","status":"completed","at":1762675200000}]}}
-// SDK → 宿主（反向请求：让宿主用自己的分叉或当前模型采样）
-{"jsonrpc":"2.0","id":"s-1","method":"sampler/sample","params":{"sessionId":"s1","expectedTurnId":"t7","mode":"fork","prompt":"[INTENT PREDICTION ...]","maxOutputTokens":120}}
-// 宿主 → SDK（返回模型输出）
-{"jsonrpc":"2.0","id":"s-1","result":{"text":"{\"intent\":\"run_tests\",\"confidence\":0.84,\"slots\":{},\"text\":\"跑一下测试验证看看\"}","usage":{"inputTokens":4200,"cachedInputTokens":4050,"outputTokens":24}}}
-// SDK → 宿主（下发经过门控和过滤的最终预测）
-{"jsonrpc":"2.0","method":"prediction/updated","params":{"sessionId":"s1","sourceTurnId":"t7","result":{"type":"completed","prediction":{"id":"p1","sessionId":"s1","sourceTurnId":"t7","packId":"builtin/coding","packVersion":"0.1.0","scenarioId":"coding.after_edit","intent":{"id":"run_tests","confidence":0.82,"slots":{}},"text":"跑一下测试验证看看","locale":"zh-CN","risk":"reversible","alternatives":[{"intentId":"review_diff","confidence":0.24,"text":"检查一下刚才的改动","risk":"read_only"}],"sources":["model","prior"],"createdAt":1762675200450}}}}
+// 核心 → 宿主：借模型做一次受约束的分类
+{"jsonrpc":"2.0","id":"s-1","method":"sampler/sample","params":{"sessionId":"s1","expectedTurnId":"t7","mode":"compact","prompt":"[INTENT PREDICTION ...]","maxOutputTokens":120}}
+{"jsonrpc":"2.0","id":"s-1","result":{"text":"{\"intent\":\"run_tests\",\"confidence\":0.84,\"slots\":{}}","usage":{"inputTokens":700,"outputTokens":24}}}
+// 核心 → 界面：一条建议
+{"jsonrpc":"2.0","method":"prediction/updated","params":{"sessionId":"s1","sourceTurnId":"t7","result":{"type":"completed","prediction":{"id":"p-1","sessionId":"s1","sourceTurnId":"t7","packId":"builtin/coding","packVersion":"0.5.0","scenarioId":"coding.after_edit","qualifiedIntentId":"builtin/coding@0.5.0/coding.after_edit#run_tests","intent":{"id":"run_tests","confidence":0.84,"slots":{}},"text":"跑一下测试验证看看","locale":"zh-CN","risk":"reversible","passThrough":false,"confirmBeforeSend":false,"alternatives":[],"source":"model","createdAt":1762675200450}}}}
+// 界面 → 核心：用户点了发送
+{"jsonrpc":"2.0","id":7,"method":"prediction/act","params":{"predictionId":"p-1","action":"send","text":"跑一下测试验证看看"}}
+// 核心 → 宿主：钉在 t7 上的一次派发
+{"jsonrpc":"2.0","id":"s-2","method":"dispatch/message","params":{"sessionId":"s1","text":"跑一下测试验证看看","expectedTurnId":"t7","predictionId":"p-1"}}
+{"jsonrpc":"2.0","id":"s-2","result":{}}
 ```
 
-## 10. 独立 WebUI（与宿主输入框完全解耦）
+### 已接通：Grok CLI（1.0.77）
 
-**定版（决策 D10）**：SDK 不进宿主输入框。唯一人机界面是 SDK 自带的本地 Web 应用。宿主与 SDK 之间只剩数据面——事件与状态进来、Sampler 委托出去，外加一个可选的 dispatch（把用户在 WebUI 里点下发送的草稿当下一条用户消息喂回会话）。这意味着宿主接入时 UI 改动量恒为零；代价是用户要打开一个与 agent 并排的页面使用卡片，换来每个宿主同一套 UI、同一套可测试行为，且调阈值、看抑制原因、跑回放这些开发者要看的东西有了正屋可住。
+`packages/host-grok` 用 Grok 的无头模式做宿主，每个事实都来自实际运行：
 
-### 10.1 两个视图，一份数据
+- **事件**：`grok --prompt-file … --output-format streaming-json` 每行是一条 ACP 会话更新。`tool_call` 自带 `kind`（read / edit / search / execute），可以直接映射；终端命令在 `rawInput.command`，退出码在最后一条 `tool_call_update` 的 `rawOutput.exit_code`。Grok 把退出码非零的命令也标成 `completed`，所以判断失败必须看退出码。工具调用之前的文字是旁白，不是该轮的最终消息。
+- **采样**：再起一次 `grok`，关掉全部内置工具、覆盖系统提示词、推理强度调低、限 1 轮。单次 10–12 秒（不关工具、不调低推理时约 35 秒）。Grok 没有不落盘的模式，适配器在采样后删除它留下的会话。
+- **发送**：`grok --resume <会话>` 把文本作为下一条用户消息。适配器核对 `expectedTurnId`、在回合进行中拒绝、对 `predictionId` 去重。
+- **权限**：无头模式下没被允许的工具调用会被拒绝并使该轮以 `cancelled` 结束，映射为 `interrupted`，核心不出建议。
 
-| 视图 | 给谁 | 内容 |
-|---|---|---|
-| **用户面** | 正在用 agent 的人 | 按会话的实时建议卡片流（只留当前会话未过期卡置顶）、草稿编辑框、「发给 Agent / 复制 / 关闭 / 标没用」四个动作、`choice` 呈现时并列主候选与 alternatives |
-| **检查面** | 集成方与场景包作者 | 完整预测日志（交付与抑制各记一条）、单条点开看命中场景/门控数值/`SuppressedReason`、会话内阈值试调（仅内存、导出才落文件）、golden 与回放结果查看、标注导出 |
+### 尚未核实的宿主
 
-呈现摩擦由核心在 `displayChannel` 里定死，WebUI 只映射：`quick` = 单卡、点击即载入草稿；`choice` = 多卡并列供选一个载入；`confirm` = 发送前弹一步确认（文案写明将发生什么）。WebUI 不得自行降低摩擦（把 confirm 画成一键发送），可以升高。
+Codex app-server 的 `thread/sample`（[prior-art.md](prior-art.md) 钉过提交）天然对应 `fork` 采样。Hermes、ACP 代理、Claude Agent SDK 等没有做过任何实测，接入前需要像上面那样逐项核实，不能照旧文档的描述估工作量。
 
-### 10.2 卡片生命周期（WebUI 侧本地状态机）
+## 7. 评估方法
 
-```mermaid
-stateDiagram-v2
-  [*] --> Live: 收到 Prediction，渲染卡片
-  Live --> Draft: 点卡片，载入草稿编辑框
-  Draft --> Sent: 点发送（confirm 级加确认一步）→ accepted / edited
-  Draft --> Copied: 点复制（是否被用由核心推断）
-  Live --> Dismissed: 点关闭 / 标没用 → dismissed + 冷却
-  Live --> Expired: sourceTurnId 过期 / 新一轮开始（收到 completed + null）
-  Draft --> Expired: 草稿未发而源 turn 过期（草稿保留但发送前明示已过期）
-  Sent --> [*]
-  Copied --> [*]
-  Dismissed --> [*]
-  Expired --> [*]
-```
-
-失效完全由核心驱动（`completed + null` 与 `sourceTurnId` 比对在 SDK 侧两层都查，见 §7.9）；WebUI 不需要监听宿主按键或焦点，建议活多久与用户在宿主输入框里打字与否无关——没有了「开始打字建议就消失」这条耦合，用户想在宿主把自己的话打一半再回来看卡也行，被新 turn 淘汰的卡转去检查面留档。
-
-### 10.3 与宿主的全部接触面
-
-| 接触点 | 方向 | 必选？ | 说明 |
-|---|---|---|---|
-| 事件上报 `observe` | 宿主 → SDK | 必选 | 与从前相同 |
-| Sampler | SDK → 宿主 | 二选一（或 L-Local） | 与从前相同 |
-| dispatch `sendMessage` / `invokeCommand` | SDK（经 WebUI 按钮）→ 宿主 | 可选 | 对应 `capabilities.dispatchModes`。只做一件事：把草稿当用户的新输入投进指定会话。任何宿主审批/权限流照其原生逻辑触发，SDK 不绕。没有 dispatch 能力时 WebUI 只显示复制按钮 |
-| 宿主 UI / 按键 / 焦点 | — | **不存在** | 设计上没有这条边。宿主若想在自己的界面镜像卡片，那是它订 `prediction/updated` 自己画的自选行为，不在规范内 |
-
-### 10.4 安全与体验边界
-
-- 仅绑 `127.0.0.1`；每次启动生成随机 token（URL 片段或请求头二者取一并全程携带，包括内部数据面），未带 token 的请求一律拒绝；校验 `Origin`/`Host` 防 DNS rebinding。
-- 静态资源随包分发、断网可用、不引 CDN；页面显示文本默认已脱敏（与 compact 的口径一致），原始事件明细仅在检查面显式展开时出现且仍是本地数据。
-- WebUI 无「执行工具」按钮：`action` 在 A1 只是卡片旁标注的元信息。发送一条等价于用户自己敲那句话，其全部后续（含 agent 触发的工具调用与审批）走宿主正常回合。
-- 可访问性：卡片区域用 `aria-live="polite"` 播报新卡；所有动作键盘可达（WebUI 自己的快捷键，如 `Ctrl+Enter` 发送，属于本地约定、页面上标注即可，不构成跨宿主规范）。
-
-## 11. 安全与隐私
-
-### 11.1 按采样模式划分的隐私边界与内置脱敏管道
-
-SDK 严格区分 **`fork` 模式**与 **`compact` 模式**的隐私保证，绝不做虚假承诺：
-
-1. **Fork 模式（`mode: 'fork'`）的隐私边界 = 宿主会话边界**：
-   - 在 `fork` 模式下，采样直接在宿主已有的会话上下文上开临时分叉以复用 Prompt Cache。SDK **不会、也无法重写宿主已经发给过当前模型提供商的历史消息前缀**。
-   - 因此，`fork` 模式下的历史消息脱敏由宿主自身的隐私层（如 Hermes 的 secret redaction）负责；SDK 仅保证新追加的 4KB 预测指令与 `signals_json` 经过脱敏。由于 `fork` 请求发往的正是当前会话同一个模型与同一个提供商，**不会产生任何跨厂商或跨边界的数据外流**。
-2. **Compact 模式（`mode: 'compact'`）与独立 `ModelClient` 的全量脱敏保证**：
-   - 当使用 `compact` 模式（可能路由到辅助小模型或不同端点）时，所有进入 `transcript` 与 `signals_json` 的文本在拼入 prompt 前必须经过 SDK 内置脱敏管道（命中后替换为 `[REDACTED_<TYPE>]`）。需要说清边界：下表是基于模式匹配的尽力而为清单，能覆盖常见密钥形态但不保证发现任意格式的秘密（例如无前缀的高熵串）；因此它只是纵深防御的一层，真正的最小化措施是 §11.2 的数据最小化与 `SPEC.md` §6 第 3 项的 `signals_json` 白名单（命令原文、摘要、剪贴板预览等自由文本一律不进入 `signals_json`，只允许以枚举/计数形态出现；O3 每类观察器可由用户单独关闭，关闭即不产生事件）：
-
-| 类别 | 匹配规则摘要 | 替换标记 |
-|---|---|---|
-| PEM 私钥块 | `-----BEGIN ... PRIVATE KEY-----[\s\S]*?-----END ... PRIVATE KEY-----` | `[REDACTED_PRIVATE_KEY]` |
-| 主流云与 AI 密钥 | `sk-[A-Za-z0-9_-]{20,}`、`sk-ant-…`、`gh[pousr]_…`、`github_pat_…`、`xox[baprs]-…`、`AKIA[0-9A-Z]{16}`、`AIza[0-9A-Za-z_-]{35}`、`hf_…` | `[REDACTED_API_KEY]` |
-| Authorization / Bearer | `(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}` | `[REDACTED_TOKEN]` |
-| URL 内嵌凭证 | `(https?:\/\/)([^/\s:@]+):([^/\s:@]+)@` | `[REDACTED_AUTH]` |
-| 配置赋值 | `(?:api[_-]?key|secret|token|password|access[_-]?key)\s*[:=]\s*['"]?[A-Za-z0-9._~+/=-]{8,}['"]?` | `[REDACTED_SECRET]` |
-| 邮箱与手机号（strict 模式） | 标准邮箱正则与国际/国内手机号正则（`privacy.redact = 'strict'` 时启用） | `[REDACTED_PII]` |
-
-集成方可通过 `privacy.customRedactors`（`Array<{ pattern: RegExp; replacement: string }>`）追加自定义规则。所有来自场景包与集成的正则（含 `slot.pattern`）限长 256 字符，加载时预编译校验，运行时应使用非回溯引擎或匹配超时，避免 ReDoS。
-
-### 11.2 纵深防御机制
-
-- **数据最小化**：默认只使用当前会话的上下文，不读记忆，也不读外部数据源，这一点和 Codex 一致。`tool.result.output` 只供 `slot.from` 读取，不发给模型。
-- **本地优先**：规则、先验、向量近邻都可以完全在本地运行。ModelSource 也可以指向本地的 OpenAI 兼容服务（Ollama / vLLM）。
-- **fail-closed**：任何异常都不给建议（见 §7.7）。
-- **不自动发送、不自动执行**：接受建议只会填入输入框。带副作用的动作必须由用户确认，并且由宿主执行。
-- **防提示注入（Prompt Injection Defense）**：工具输出和网页内容可能诱导模型给出有害建议，例如"推到生产"或"rm -rf"。五层防线：
-  1. **封闭意图目录**：模型只能从当前场景的有限 `intent.id` 枚举中选择，无法凭空造出新意图（层 1）。
-  2. **确定性模板优先**：内置场景包全部采用多语言模板渲染，最终展示给用户的文本仅由模板和通过严格校验的槽位拼成，不直接使用模型自由生成的句子（层 2）。
-  3. **槽位字面约束与路径消毒**：来自模型的 `path` 类型槽位禁止 `..` 与 shell 元字符；模型给出的值必须字面出现在最近对话中，防止幻觉捏造文件名或订单号（层 3）。
-  4. **9 条后置过滤规则**：第 9 条 `filter_dangerous` 专门拦截高危破坏性指令（层 4）。
-  5. **人在回路与风险分级门控**：点卡只载入 WebUI 草稿、发送须再点；`side_effect` 要求 ≥ 0.80 置信度；`irreversible` 意图永不以 quick 分级出现（层 5）。
-- **反馈数据**：默认只写本地。`finalText` 默认不采集（本地只记录 `similarity` 相似度标量）。导出数据需要显式调用。
-- **内部调用隔离**：预测请求带有专门的标记（如 prompt id `intent_prediction`），不进入 agent 的会话记录和用户可见的日志。
-
-## 12. 性能与成本预算
-
-| 项目 | 目标或限制 |
-|---|---|
-| RuleSource 和 PriorSource | 少于 5ms，本地执行 |
-| 从 turn 结束到可以展示（compact 模式） | p50 不超过 800ms，p95 不超过 2s |
-| 从 turn 结束到可以展示（Sampler Fork 模式，命中缓存） | p50 不超过 1s |
-| 硬超时 | 默认 4s。Codex 的 30s 是服务端上限；用户一旦开始打字，建议就没有价值了，所以要更早放弃 |
-| compact 模式的输入 | 约 2k token（≤ 8,000 字符） |
-| 追加的 prompt（Fork Sampler 模式） | 不超过 4,000 字节 |
-| 输出 | 不超过约 120 token，关闭 thinking |
-| 缓存命中比例（Fork Sampler 模式） | 目标 90% 以上，通过 `usage.cachedInputTokens` 统计 |
-| 并发 | 每个会话最多一个进行中的预测，新的取代旧的，用户一打字就取消 |
-| 省钱的短路 | 规则命中 explicit 时跳过模型；没有场景命中时跳过模型；预算用完时跳过 |
-
-## 13. 评估
-
-**数据格式**：会话回放集使用 JSONL，每一行代表一个"turn 边界"：
-
-```jsonc
-{"sessionId":"s1","turnId":"t7","events":[/* 截至 t7 的 AgentEvent */],"next":{"text":"跑一下测试","intent":"run_tests","labelSource":"llm-judge"}}
-```
-
-- **标注**：把用户真实的下一句映射到意图 id，有两种来源：
-  - 场景包样例加上 LLM 评审
-  - 人工复核
-  
-  标注来源记录在 `labelSource` 字段里。
-- **离线回放**：对每个满足 `turnCount ≥ minTurns` 的边界，只用这个边界之前的事件做预测，然后和标注比对。
-- **指标**：
+离线回放是主要手段（工具待建，见 [ROADMAP.md](../ROADMAP.md) 1D）：对每个轮次边界，只用边界之前的事件做预测，与「真实下一句被标注到同一目录后的意图」比较。
 
 | 指标 | 定义 | 用途 |
 |---|---|---|
-| 覆盖率 coverage | 展示次数 ÷ 符合条件的轮数 | 衡量建议是否太频繁或太少 |
-| **展示精度 precision@shown** | 意图命中次数 ÷ 展示次数 | **第一指标** |
-| top-3 准确率 | 真实意图在前三名里的比例 | 评估 choice 形态 |
-| 风险-覆盖曲线 / AURC | 不同阈值下精度和覆盖率的取舍 | 选择阈值 |
-| ECE | 置信度的校准误差 | 判断置信度是否可信 |
-| 文本相似度 | 建议文本与真实消息的 chrF 或向量相似度 | 评估渲染质量 |
-| 接受率 | (accepted + edited) ÷ 展示次数 | 线上主指标 |
-| 编辑率 | edited ÷ (accepted + edited) | 衡量文本是否贴合用户 |
-| 延迟 p50/p95、每千轮成本、缓存命中比例 | — | 检查是否超出预算 |
+| 目录覆盖率上限 | 真实下一句能落进所在场景目录的比例 | 这个前提成不成立 |
+| 展示精度 | 展示的建议中意图命中的比例 | 第一指标 |
+| 覆盖率 | 有建议的轮次占比 | 与精度一起看曲线 |
+| 校准 | 自报置信度与实际命中率的差 | 门槛定在哪里 |
+| 延迟、调用次数 | 每千轮 | 成本 |
 
-- **CI**：每个场景包都带一组黄金样例。规则类样例必须确定性通过；模型类样例使用录制好的模型输出回放。
+线上遥测里的 `similarity` 是字面相似度，只适合作为粗粒度参考：用户敲 `/review` 与建议「检查一下刚才的改动」意图相同而相似度为 0（除非建议本身带同名命令）。
 
-## 14. 场景包示例
-
-### 14.1 内置 coding 包（`packages/pack-coding/pack.json`）
-
-单一来源是根目录 [`INTENTS.md`](../INTENTS.md)（YAML front matter 即场景定义，Markdown 正文即提示词）；[`packages/pack-coding/pack.json`](../packages/pack-coding/pack.json) 是由 `tools/build_pack.py` 从它生成的 JSON 产物，不得手改。结构：O1 采用“高特异度场景 + 高阈值保守兜底”的斜坡梯度，另加 O2 子任务场景 1 个与 O3 环境场景 2 个（共 10 个场景、33 个意图）。
-
-| 场景 ID | 优先级 | 识别信号（`match`） | 意图集合（`id (risk, prior, 特殊约束)`） |
-|---|---|---|---|
-| `coding.checks_failed` | 30 | `lastTurn.failedExecs > 0`（`triggerOnTurnStatuses: [completed, failed]`） | `fix_failures (reversible, 0.55)`、`show_details (none, 0.20)`、`rerun_checks (reversible, 0.15)`、`skip_for_now (none, 0.10)` |
-| `coding.awaiting_reply` | 25 | `endsWithQuestion == true` 或 `optionsCount > 1` | `confirm (reversible + dynamicRiskFromProposedAction, 0.45, 禁 quick)`、`choose_option{index} (reversible + dynamicRiskFromProposedAction, 0.35, 禁 quick)`、`ask_tradeoffs (none, 0.12)`、`decline (none, 0.08)` |
-| `coding.after_edit` | 20 | `filesChanged > 0` 且本轮未运行 `execute` 类工具 | `run_tests (reversible, 0.42)`、`review_diff (read_only, 0.22, action=/review)`、`explain_changes (none, 0.14)`、`continue_task (reversible, 0.14)`、`commit_changes (reversible, 0.08)` |
-| `coding.task_verified` | 18 | `filesChanged > 0` 且运行过 `execute` 且 `failedExecs == 0` | `commit_changes (reversible, 0.45)`、`review_diff (read_only, 0.25, action=/review)`、`open_pr (side_effect, 0.15, 仅 choice/button)`、`continue_task (reversible, 0.15)` |
-| `coding.exec_succeeded` | 14 | `filesChanged == 0` 且运行过 `execute` 且 `failedExecs == 0` | `continue_task (reversible, 0.50)`、`explain_output (none, 0.30)`、`apply_suggestion (reversible, 0.20)` |
-| `coding.explained` | 10 | `filesChanged == 0`、`failedExecs == 0`、`lastAgentMessage.length ≥ 200` 且用过 `read/search` | `apply_suggestion (reversible, 0.50)`、`write_plan (read_only, 0.25)`、`ask_example (none, 0.25)` |
-| `coding.general_followup` | 1 | `status == completed`、`failedExecs == 0`、`length ≥ 60`（保守兜底，`minConfidence: 0.75, minMargin: 0.25`） | `apply_suggestion (reversible, 0.45)`、`write_plan (read_only, 0.30)`、`ask_example (none, 0.25)` |
-| `coding.subagent_reported`（O2） | 22 | `agent.lastSubagent.status == completed` 或 `agent.lastBackgroundJob.status == completed`（新鲜度见 `SPEC.md` §2.4） | `apply_subagent_result (reversible, 0.50)`、`verify_subagent_work (read_only, 0.30)`、`review_pending_tasks (read_only, 0.20, when=pendingReviews>0)` |
-| `coding.ambient_terminal_failed`（O3） | 28 | `env.lastTerminalCommand.exitCode != 0` | `diagnose_terminal_error (reversible, 0.65)`、`explain_terminal_error (none, 0.35)` |
-| `coding.ambient_ide_diagnostics`（O3） | 16 | `env.ide.diagnosticsErrors > 0` 或 `env.ambient.clipboardKind == stacktrace` | `fix_ide_diagnostics (reversible, 0.65)`、`explain_stacktrace (none, 0.35)` |
-
-### 14.2 非编程场景：客服 agent
-
-这个例子说明 SDK 不局限于编程场景，也展示了如何从工具输出中确定性地提取槽位。可通过校验的正式示例文件见 [`examples/support.intents.md`](../examples/support.intents.md)（在下例基础上为 `request_refund` 补了同一 `orderId` 槽位与其 `tool` 动作，正文为对应提示词；`tools/validate.py` 会校验它）：
-
-```yaml
-id: example/support
-version: 0.1.0
-scenarios:
-  - id: support.order_shown
-    description: 客服 agent 刚查询并展示了一笔订单
-    match: { signal: lastTurn.toolNames, contains: get_order }
-    intents:
-      - id: track_shipment
-        description: 查物流进度
-        examples: [到哪了, where is my package]
-        render: { zh-CN: 帮我查下物流, en: where is my package? }
-        risk: read_only
-        slots:
-          orderId: { type: string, from: lastTurn.toolOutputs.get_order.id, required: true }
-        action: { type: tool, name: track_shipment, input: { orderId: "{orderId}" } }
-      - id: request_refund
-        description: 申请退款
-        render: { zh-CN: 我要退款, en: I'd like a refund }
-        risk: side_effect
-      - id: talk_to_human
-        description: 转人工客服
-        render: { zh-CN: 转人工, en: talk to a human }
-        risk: none
-```
-
-## 15. 包结构
-
-计划使用 TypeScript monorepo（pnpm workspaces，Node ≥ 20，ESM）。core 包保持零运行时第三方依赖。
+## 8. 代码结构
 
 ```text
-intent-predict/
-├─ docs/
-│  ├─ design.md                 总体与施工级设计规范
-│  └─ prior-art.md              现有实现调研笔记
-├─ spec/                        语言无关的权威 JSON Schema（Draft 2020-12），数据结构以它为准（权威划分见根目录 SPEC.md 卷首）
-│  ├─ events.schema.json        宿主事件与 SimpleMessage
-│  ├─ scenario-pack.schema.json 场景包、意图、谓词 DSL、槽位与动作
-│  ├─ prediction.schema.json    预测结果与标准化的 SuppressedReason
-│  ├─ feedback.schema.json      用户反馈与本地遥测记录格式
-│  └─ rpc.schema.json           JSON-RPC 2.0 Sidecar 协议定义
-├─ packages/
-│  ├─ core/                     会话状态、信号提取、谓词求值、流水线、门控、过滤、脱敏、反馈存储接口
-│  ├─ models/                   可选的独立 ModelClient（OpenAI、Anthropic、OpenAI 兼容服务、本地模型）
-│  ├─ webui/                     SDK 独立 WebUI（用户建议面 + 检查面；静态资源打包分发，可由 sidecar 内置服务)
-│  ├─ sidecar/                  JSON-RPC stdio 服务和 CLI
-│  ├─ adapters/                 hermes、codex、acp、claude-agent-sdk、openai-agents、vercel-ai、langgraph（只做事件/Sampler/dispatch 三件套，不含任何 UI)
-│  └─ pack-coding/              内置的 coding 场景包（pack.json + TS 导出）
-├─ eval/                        回放评测工具与黄金测试集
-└─ examples/
+packages/core        核心（零界面、零传输）：signals / packs / prompt / render / core
+packages/sidecar     stdio JSON-RPC 服务、回环界面服务、单文件网页
+packages/host-grok   Grok CLI 宿主：事件映射、采样、发送、命令行对话、端到端检查
+packages/pack-coding 由 INTENTS.md 生成的 pack.json
+tools/               reference.py（参考求值器）、validate.py、build_pack.py
+eval/                golden.jsonl 与测试用的场景包
 ```
 
-Python 等宿主（如 Hermes Agent 后端）通过 sidecar 接入或直接复用 `spec/` 生成的数据结构。权威划分只有一个口径：数据结构以 `spec/` 为准（各语言从它生成类型与校验），行为以根目录 `SPEC.md` 为准，本文只记录理由与示例。
+TypeScript 源码直接由 Node（≥ 22.18）运行，没有构建步骤；唯一的运行时依赖是解析 YAML 的 `yaml`。要发布成 npm 包还需要补一步编译。核心的用法：
 
-## 16. 关键决策
+```ts
+import { Core, loadPackFile } from './packages/core/src/index.ts';
 
-| # | 决策 | 考虑过的其他方案 | 理由 |
-|---|---|---|---|
-| D1 | 预测有限意图集合加 `none`；v1 不提供开放文本（无 `freeform` 意图，将来若加必须先进目录、过同一套门控） | 开放整句预测，即 Codex 的方式 | 可评估、可控制、成本低，也能挂动作（§3） |
-| D2 | 定义宿主无关的事件模型，再提供适配器和 sidecar | 绑定某一个 agent 框架 | 满足 G1 |
-| D3 | **默认零配置委托宿主自身模型**（通过 `Sampler` 支持 `fork` 缓存共享分叉与 `compact` 宿主模型调用），独立 `ModelClient` 仅作可选兜底 | 要求用户为 SDK 单独配一套 API Key 和模型端点 | 宿主本身已有配置好的模型与凭证池；复用宿主既省去用户配置负担，又能享受缓存命中和主模型质量（§8.1） |
-| D4 | v1 的置信度由模型自报加规则显式分，阈值通过离线回放调优；v2 改用 logprobs 并做校准 | 一开始就做校准 | 先保证能跑通，校准需要真实反馈数据 |
-| D5 | 发送永远是显式动作：WebUI 里载入草稿 ≠ 发送，发送须再点一次，`confirm` 分级再加一步确认 | Enter 即填入并发送（Qwen 做法）；卡片单击直发 | 满足 G5，和 Codex「接受后不自动发送」一致；在独立 WebUI 里这条由自己的交互保证，不再依赖宿主按键约定 |
-| D6 | 推测执行只定义策略接口，执行交给宿主，放到 Phase 4（A2） | 在 SDK 里实现 overlay 文件系统，即 Qwen 的方式 | SDK 不碰宿主的文件系统和工具，否则就不再宿主无关 |
-| D7 | 先用 TypeScript 实现，Python 等宿主通过 JSON-RPC sidecar 接入；第一个深度落地宿主为 **Hermes Agent** | Python 优先 / Codex 优先 | 主流 agent 宿主多数是 TS 生态；而 Hermes 同时具备 Python 核心、Ink TUI、Electron 桌面端和 CLI，能验证 Sidecar、L2 零配置分叉采样和三端 UI 控制器（§8.4）；排期见 D9 |
-| D8 | 没有场景命中时直接输出 `none` | 退回到通用的开放预测 | 遵守"有限场景"的边界，宁缺毋滥 |
-| D9 | 双轴按「一阶段一轴一格」单步推进，**Phase 1 只做 O1 × A1**（单会话观察 + 纯建议），O2/O3 与 A2/A3 的规范先行但不实现 | 一次把全场景观察与三阶段行动力做全；或行动力优先先升 A2 | 观察优先、行动力殿后，效果变化可归因、安全风险后置；Phase 3/4 顺序保留在 Phase 2 出口凭数据对调的权利（见根目录 `ROADMAP.md`） |
-| D10 | 交付面与宿主输入框**完全解耦**：唯一人机界面为 SDK 独立 WebUI（用户面+检查面），摩擦分级 `quick/choice/confirm` 取代 ghost/chips/button 命名；与宿主之间只留事件、Sampler、可选 dispatch 三组数据接口 | 进宿主 composer 做 ghost text（Codex/Qwen 做法）；SDK 开独立浮窗做宿主输入框的替身 | 宿主 UI 改动量恒为零，UI 行为只写一遍、可以无头测，调试与检查面板有正房；代价是用户在两个窗口之间切换、必须经草稿发送或复制完成闭环——先吃这口摩擦力，换 Phase 1 长打磨期不受各端 UI 拖累 |
-
-## 17. 路线图
-
-路线图的单一入口是根目录 [`ROADMAP.md`](../ROADMAP.md)：O×A 网格五阶段（观察优先、每阶段一轴一格），含 Phase 1 的分段 1A–1D、明确不做清单与出口标准，以及与旧 M0–M3 的对照映射。**当前处于 Phase 1（O1 × A1）**：规范件（`spec/`、`SPEC.md`、`INTENTS.md`/`pack-coding` v0.4、`eval/golden.jsonl`、`tools/validate.py`）已齐，待实现 core 并以 Phase 1 子集（20 条 golden 中的 17 条）与回放基线完成验收。此后 Phase 2（O2×A1）→ Phase 3（O3×A1）→ Phase 4（×A2）→ Phase 5（×A3）依次开启，未过本阶段出口不开下一格。
-
-## 18. 决议记录（原开放问题）
-
-1. ~~**许可证**~~：已定为 MIT（2026-11-10），见 [LICENSE](../LICENSE)。
-2. **实现语言**：先做 **TypeScript**（core 与 UI），数据结构以 [`spec/*.schema.json`](../spec) 为准、行为以根目录 `SPEC.md` 为准（见 `SPEC.md` 的 Authority & Precedence）；Python 宿主（如 Hermes Agent）通过 JSON-RPC stdio sidecar 接入，暂不做 Python 优先。
-3. **第一个深度落地的宿主**：**Hermes Agent**（见 §8.4）。排期按 `ROADMAP.md`：Phase 1 只要求一个 L0/L1 参考接入完成 dogfood，Hermes 三端深度适配随 Phase 2 前后展开。
-4. **compact 模式的默认模型**：**默认不需要用户额外配置**。SDK 通过 `Sampler` 接口（`mode: 'fork' | 'compact'`）直接委托宿主 Agent 使用其自身已配置的模型或辅助模型完成推理；仅当宿主不提供模型能力时，才允许可选注入独立 `ModelClient` 或自动退回纯本地规则模式。
-5. **是否采集 `finalText`**：默认关闭（`collectFinalText: false`）。核心只计算 Bigram Dice 相似度标量（`Feedback.similarity`）落盘，兼顾学习信号与隐私安全。
-6. **包名和 npm scope**：保持 `@intent-predict/*`。
-7. **ACP 自定义通知的命名空间**：定为 `_intent_predict/prediction`（下行通知）与 `_intent_predict/feedback`（上行通知）。
-
-## 附录：参考
-
-- 调研笔记：[prior-art.md](prior-art.md)
-- 形式化规范：[spec/events.schema.json](../spec/events.schema.json)、[spec/scenario-pack.schema.json](../spec/scenario-pack.schema.json)、[spec/prediction.schema.json](../spec/prediction.schema.json)、[spec/feedback.schema.json](../spec/feedback.schema.json)、[spec/rpc.schema.json](../spec/rpc.schema.json)
-- 内置编程场景包：[packages/pack-coding/pack.json](../packages/pack-coding/pack.json)
-- openai/codex @ `e54a5713`：`codex-rs/app-server-protocol/src/protocol/v2/thread_sample.rs`、`codex-rs/app-server/src/thread_sample.rs`、`codex-rs/app-server-protocol/src/protocol/v2/thread_prediction.rs`
-- QwenLM/qwen-code @ `a237758b`：`docs/design/prompt-suggestion/*.md`、`docs/design/2026-07-28-web-shell-composer-intent-suggestions.md`
-- ACP 扩展机制：<https://agentclientprotocol.com/protocol/extensibility>
+const core = new Core([loadPackFile('packages/pack-coding/pack.json')], {
+  samplerModes: ['compact'],
+  sample: async ({ prompt }, signal) => ({ text: await myModel(prompt, signal) }),
+  dispatchModes: ['message'],
+  dispatch: async (request) => { /* 核对 expectedTurnId 后，把 request.text 当作用户输入 */ },
+});
+core.on('updated', ({ result }) => { /* 有 prediction 就显示 */ });
+core.on('invalidated', ({ predictionId }) => { /* 不再可发送 */ });
+core.observe('session-1', eventsOfTheTurn);              // 以 turn.completed 结尾
+await core.act({ predictionId, action: 'send', text });  // 用户点了发送
+```

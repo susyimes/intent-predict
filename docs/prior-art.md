@@ -157,14 +157,15 @@
 
 ## 5. 借鉴清单
 
-| 来源 | 借鉴点 | 对应本项目设计文档的章节 |
+| 来源 | 借鉴点 | 现在落在哪里（v0.5） |
 |---|---|---|
-| Codex `thread/sample` | 前缀一致的临时分叉；`expectedTurnId`；模型调用工具即作废；prompt 上限 | Sampler 接口与实现规范（§8.3） |
-| Codex 产品行为 | Tab 接受但不发送；不保证每轮都有；只用当前会话的上下文 | UI 规范（§10）、门控（§7.7）、隐私（§11） |
-| Qwen NES | 守卫条件；先读最后几行；显式提示优先；过滤规则；关闭 thinking；内部 prompt id | §7.2、§7.4、§7.5、§7.8、§12 |
-| Qwen FollowupController | 不依赖 UI 框架的控制器；300ms 延迟；防抖；遥测字段 | §10、§7.10 |
-| Qwen speculation | overlay 和工具闸门 | M3：只读意图的推测执行策略接口（§17） |
-| Qwen 意图分类 | 封闭集合 + none + 阈值 + fail-closed + 失效校验 | 核心思路（§3）、门控（§7.7） |
+| Codex `thread/sample` | 前缀一致的临时分叉；`expectedTurnId`；模型调用工具即作废；prompt 上限 | 采样契约（SPEC §6）、提示词大小（§4.5） |
+| Codex 产品行为 | 接受后不自动发送；不保证每轮都有；只用当前会话的上下文 | 发送规则（SPEC §5.2）、门槛（§4.6）、数据最小化（§7.2） |
+| Qwen NES | 守卫条件；先读最后几行；显式提示优先；关闭 thinking | 守卫（SPEC §4.2）、规则 R1（§4.4）、提示词（§4.5） |
+| Qwen NES 的 12 条过滤 | 针对模型生成文字的过滤 | v0.5 的建议文字只来自模板，过滤改作场景包的写作检查（`tools/validate.py`）；见 [future.md](future.md) §8 |
+| Qwen FollowupController | 不依赖 UI 框架的控制器；遥测字段 | 界面作为协议角色（SPEC §1.1、§8）、遥测（§5.4） |
+| Qwen speculation | overlay 和工具闸门 | 未做，见 [future.md](future.md) §3 |
+| Qwen 意图分类 | 封闭集合 + none + 阈值 + fail-closed + 失效校验 | 核心思路（[design.md](design.md) §1）、SPEC §1.3 与 §5.1 |
 
 ## 6. 来源
 

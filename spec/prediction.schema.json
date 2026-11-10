@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://intent-predict.dev/spec/prediction.schema.json",
-  "title": "PredictionResult",
-  "description": "Structured intent prediction output and suppression reason codes.",
-  "$ref": "#/$defs/PredictionResult",
+  "title": "EvaluationResult",
+  "description": "Outcome of one pipeline evaluation: a delivered prediction, or null with exactly one suppression reason.",
+  "$ref": "#/$defs/EvaluationResult",
   "$defs": {
     "SuppressedReason": {
       "type": "string",
@@ -11,56 +11,79 @@
         "disabled",
         "non_interactive",
         "pending_interaction",
-        "failed_turn_unhandled",
         "interrupted_turn",
-        "min_turns_not_met",
-        "composer_dirty",
+        "failed_turn_unhandled",
         "mode_blocked",
-        "budget_exhausted_no_explicit_rule",
         "incognito",
+        "max_per_session_reached",
         "no_scenario_matched",
         "empty_catalog",
-        "no_rule_hit_in_local_mode",
-        "model_none",
-        "below_min_confidence",
-        "below_risk_confidence",
-        "below_min_margin",
-        "in_cooldown",
-        "max_per_session_reached",
-        "invalid_model_output",
-        "unknown_intent",
-        "slot_validation_failed",
-        "filter_empty_or_meta",
-        "filter_label_prefix",
-        "filter_ai_voice",
-        "filter_evaluative",
-        "filter_multiple_sentences",
-        "filter_formatting",
-        "filter_length",
-        "filter_error_text",
-        "filter_dangerous",
+        "no_sampler",
+        "budget_exhausted",
+        "prompt_too_large",
+        "sampler_error",
         "timeout",
         "aborted",
-        "stale_turn"
+        "invalid_model_output",
+        "unknown_intent",
+        "model_none",
+        "in_cooldown",
+        "below_min_confidence",
+        "slot_validation_failed",
+        "output_invalid",
+        "output_dangerous"
       ]
     },
-    "CandidateSourceId": {
-      "type": "string",
-      "enum": [
-        "rule",
-        "prior",
-        "model",
-        "embedding"
-      ]
+    "Context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "excerpt"
+      ],
+      "properties": {
+        "excerpt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 301,
+          "description": "Redacted end of the agent's final message (last 300 characters, prefixed with an ellipsis when truncated): the text a pass-through suggestion answers."
+        }
+      }
     },
-    "AlternativePrediction": {
+    "Choice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slots",
+        "text",
+        "label"
+      ],
+      "properties": {
+        "slots": {
+          "type": "object"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 81,
+          "description": "Redacted item text the choice stands for (e.g. the option the agent listed)."
+        }
+      }
+    },
+    "Alternative": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "intentId",
         "confidence",
+        "slots",
         "text",
-        "risk"
+        "risk",
+        "passThrough"
       ],
       "properties": {
         "intentId": {
@@ -77,17 +100,27 @@
         },
         "text": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 200
         },
         "risk": {
-          "$ref": "scenario-pack.schema.json#/$defs/Risk"
+          "type": "string",
+          "enum": [
+            "none",
+            "read_only",
+            "reversible"
+          ],
+          "description": "side_effect intents are never offered as alternatives."
+        },
+        "passThrough": {
+          "type": "boolean"
         },
         "action": {
           "$ref": "scenario-pack.schema.json#/$defs/ActionDescriptor"
         }
       }
     },
-    "PredictionUsage": {
+    "Usage": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -122,16 +155,16 @@
         "packId",
         "packVersion",
         "scenarioId",
+        "qualifiedIntentId",
         "intent",
         "text",
         "locale",
         "risk",
+        "passThrough",
+        "confirmBeforeSend",
         "alternatives",
-        "sources",
-        "createdAt",
-        "qualifiedIntentId",
-        "displayChannel",
-        "agencyStage"
+        "source",
+        "createdAt"
       ],
       "properties": {
         "id": {
@@ -144,7 +177,8 @@
         },
         "sourceTurnId": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "The completed turn this prediction answers. Dispatch is pinned to it."
         },
         "packId": {
           "type": "string",
@@ -161,17 +195,7 @@
         "qualifiedIntentId": {
           "type": "string",
           "minLength": 1,
-          "description": "Versioned telemetry archive key: '<packId>@<packVersion>/<scenarioId>#<intentId>'. Online learning keys (cooldown/backoff/priors) MUST use the unversioned '<packId>/<scenarioId>#<intentId>' form so pack upgrades do not reset learning state."
-        },
-        "displayChannel": {
-          "type": "string",
-          "enum": [
-            "quick",
-            "choice",
-            "confirm"
-          ],
-          "default": "quick",
-          "description": "Friction tier in the SDK's independent Web UI: 'quick' (single suggestion card, one explicit click to load/use; low risk only), 'choice' (user picks among the primary suggestion and alternatives), 'confirm' (explicit confirmation step required before use/dispatch). Host composer rendering is not part of the design."
+          "description": "Versioned telemetry key '<packId>@<packVersion>/<scenarioId>#<intentId>'. Session state such as cooldown is keyed by the unversioned '<packId>/<scenarioId>#<intentId>'."
         },
         "intent": {
           "type": "object",
@@ -187,9 +211,13 @@
               "minLength": 1
             },
             "confidence": {
-              "type": "number",
+              "type": [
+                "number",
+                "null"
+              ],
               "minimum": 0,
-              "maximum": 1
+              "maximum": 1,
+              "description": "The model's self-reported probability; null when source is 'rule'."
             },
             "slots": {
               "type": "object"
@@ -198,71 +226,107 @@
         },
         "text": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Template-rendered suggestion. For an enumerated prediction this is the text of the preferred choice, else of the first choice."
         },
         "locale": {
           "type": "string",
           "minLength": 2
         },
+        "risk": {
+          "$ref": "scenario-pack.schema.json#/$defs/Risk"
+        },
+        "passThrough": {
+          "type": "boolean"
+        },
+        "confirmBeforeSend": {
+          "type": "boolean",
+          "description": "True for side_effect intents: a surface must put a separate, explicit confirmation step between the user's choice and the send. There is no default; the core always sets it."
+        },
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
         "action": {
           "$ref": "scenario-pack.schema.json#/$defs/ActionDescriptor"
         },
-        "agencyStage": {
-          "type": "string",
-          "enum": [
-            "suggest_only",
-            "speculative_prep",
-            "propose_and_dispatch"
-          ],
-          "default": "suggest_only",
-          "description": "Stage 1: suggest_only (suggestion shown in the SDK Web UI; user may copy it, or edit-and-send / send it to the agent via the optional host dispatch capability); Stage 2: speculative_prep (pre-run read-only context/checks in background); Stage 3: propose_and_dispatch (dispatch to target agent upon explicit confirmation in the Web UI)."
-        },
-        "prepPlan": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "readOnlyTools": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "prefetchRefs": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
+        "choices": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 9,
+          "items": {
+            "$ref": "#/$defs/Choice"
           },
-          "description": "Optional read-only speculative preparation plan for Stage 2."
+          "description": "Present for enumerated predictions: one entry per listed item, in order."
         },
-        "risk": {
-          "$ref": "scenario-pack.schema.json#/$defs/Risk"
+        "preferredChoice": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8,
+          "description": "0-based index into choices that the agent marked as recommended. Surfaces must not preselect a choice when this is absent."
         },
         "alternatives": {
           "type": "array",
           "maxItems": 2,
           "items": {
-            "$ref": "#/$defs/AlternativePrediction"
+            "$ref": "#/$defs/Alternative"
           }
         },
-        "sources": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "#/$defs/CandidateSourceId"
-          }
+        "source": {
+          "type": "string",
+          "enum": [
+            "rule",
+            "model"
+          ]
         },
         "createdAt": {
           "type": "integer",
           "minimum": 0
         },
         "usage": {
-          "$ref": "#/$defs/PredictionUsage"
+          "$ref": "#/$defs/Usage"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "passThrough"
+            ],
+            "properties": {
+              "passThrough": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "context"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "risk"
+            ],
+            "properties": {
+              "risk": {
+                "const": "side_effect"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "confirmBeforeSend": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
     },
-    "PredictionResult": {
+    "EvaluationResult": {
       "oneOf": [
         {
           "type": "object",
@@ -276,14 +340,24 @@
               "const": "completed"
             },
             "prediction": {
-              "oneOf": [
-                {
-                  "$ref": "#/$defs/Prediction"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "$ref": "#/$defs/Prediction"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "prediction",
+            "suppressedReason"
+          ],
+          "properties": {
+            "type": {
+              "const": "completed"
+            },
+            "prediction": {
+              "type": "null"
             },
             "suppressedReason": {
               "$ref": "#/$defs/SuppressedReason"
@@ -305,7 +379,8 @@
               "type": "string",
               "minLength": 1
             }
-          }
+          },
+          "description": "Reserved for internal engine errors. Every expected non-delivery is 'completed' with prediction null."
         }
       ]
     }

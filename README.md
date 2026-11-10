@@ -1,131 +1,115 @@
 # intent-predict
 
-**intent-predict** 是一个让**任意 Agent 成为全场景意图预测 Agent（Intent Predict Agent）**的通用 SDK。它的观察范围不局限于对话气泡，还可以感知终端命令、Git 工作区、文件变动、IDE 焦点与桌面/剪贴板环境；在识别出的有限场景里从一个封闭集合中预测用户下一步最可能的意图，并支持从「纯建议输出」渐进升级到「推测预执行」与「委托执行」。没有把握时就不给建议（fail-closed）。
+**intent-predict** 在一轮 agent 回复结束后，预测用户下一条消息——不是续写一句自由文本，而是从当前场景的**封闭意图目录里选一项，或者什么都不给**。它与宿主无关：宿主只负责上报会话事件、借出自己的模型；建议显示在一个独立的界面上；不经用户亲手点发送，什么都不会发出去。
 
-> 当前状态：**设计规范 v0.4（审查修订版，尚无实现代码），当前位于 Phase 1（O1 × A1）**。第一阶段只做好单会话观察 + 纯建议输出这一格，实现顺序、明确不做清单与出口标准见 [ROADMAP.md](ROADMAP.md)；规范与机读契约可直接照着实现；效果指标待回放数据验证。
-> - 阶段路线图（O×A 五阶段）：[ROADMAP.md](ROADMAP.md)
-> - 语言无关实现规范（Spec-as-Prompt，含权威划分）：[SPEC.md](SPEC.md)
-> - 场景与提示词契约（内置包的单一来源）：[INTENTS.md](INTENTS.md)
-> - 非规范详细设计说明：[docs/design.md](docs/design.md)
-> - 形式化 JSON Schema：[spec/](spec/)（`events`、`scenario-pack`、`prediction`、`feedback`、`rpc`）
-> - 内置编程场景包（由 `tools/build_pack.py` 从 INTENTS.md 生成）：[packages/pack-coding/pack.json](packages/pack-coding/pack.json)
-> - 确定性黄金用例：[eval/golden.jsonl](eval/golden.jsonl)；非编程示例包：[examples/support.intents.md](examples/support.intents.md)
-> - 仓库一致性校验：`python tools/validate.py`（需 `pip install jsonschema pyyaml`）
-> - 调研笔记：[docs/prior-art.md](docs/prior-art.md)；审查问题与处理记录：[docs/review-issues.md](docs/review-issues.md)
-
-## 如何用一句话让你的 Agent 实现或接入它（Symphony 模式）
-
-你可以像使用 [OpenAI Symphony](https://github.com/openai/symphony) 一样，直接让你的 Coding Agent（Hermes、Codex、Claude Code 等）根据本仓库的规范自行实现或接入：
-
-> Implement `intent-predict` according to https://github.com/susyimes/intent-predict/blob/main/SPEC.md, load scenarios from https://github.com/susyimes/intent-predict/blob/main/INTENTS.md, and verify against https://github.com/susyimes/intent-predict/blob/main/eval/golden.jsonl
+> **当前状态：v0.5**——规范重写为只覆盖第一阶段（单会话观察 × 纯建议），并附带 Phase 1 参考实现。
+>
+> - 已验证：99 条黄金用例在两套独立实现（Python 参考求值器、TypeScript 核心）上全部通过；sidecar 协议测试；自带网页在无头 Chrome 里实际操作通过；对本机 Grok CLI 1.0.77 的端到端跑通（事件、信号、借模型采样、从界面发送）。
+> - **没验证**：预测得准不准。还没有任何回放数据，默认阈值都是占位值。这是进入下一阶段前必须补的一项，见 [ROADMAP.md](ROADMAP.md)。
 
 ## 一个例子
 
-agent 改完代码（或子任务完成）后，SDK 的独立 WebUI 里会多出一张卡片「跑一下测试验证看看」；点卡片就把这句话载入 WebUI 的草稿框，改不改字都行，再点发送喂回会话（宿主不支持发送桥时一键复制）。若是确认类或有外部副作用的意图（如创建 PR），卡片会强制走 `confirm` 分级多确认一步。宿主输入框从头到尾不被触碰。同时引擎返回一份结构化结果：
+agent 改完代码没跑测试。核心识别出场景 `coding.after_edit`，请宿主的模型在 5 个意图里选一个；模型选了 `run_tests`、置信度过线，于是界面上出现一张卡片「跑一下测试验证看看」。用户可以改字，点「发给 Agent」才会作为自己的下一条消息发出，且只对这一轮有效——agent 已经进入下一轮时，这次发送会被拒绝。
 
+<!-- validate: prediction.schema.json#/$defs/Prediction -->
 ```json
 {
+  "id": "p-1",
+  "sessionId": "s1",
+  "sourceTurnId": "t7",
+  "packId": "builtin/coding",
+  "packVersion": "0.5.0",
   "scenarioId": "coding.after_edit",
-  "qualifiedIntentId": "builtin/coding@0.4.0/coding.after_edit#run_tests",
-  "displayChannel": "quick",
-  "agencyStage": "suggest_only",
+  "qualifiedIntentId": "builtin/coding@0.5.0/coding.after_edit#run_tests",
   "intent": { "id": "run_tests", "confidence": 0.82, "slots": {} },
   "text": "跑一下测试验证看看",
-  "risk": "reversible"
+  "locale": "zh-CN",
+  "risk": "reversible",
+  "passThrough": false,
+  "confirmBeforeSend": false,
+  "alternatives": [],
+  "source": "model",
+  "createdAt": 1762675200450
 }
 ```
 
-宿主可以根据这份结果绑定确定性的动作，比如 `/review`、后台只读预备任务（Stage A2）或快捷按钮，不需要从文本里猜用户的意思。
-
-## 架构图（当前 Phase 1：O1 × A1）
-
-双轴五阶段怎么走见 [ROADMAP.md](ROADMAP.md)；每阶段单独的说明图（含全景总图与后续增量图）见 [docs/diagrams.md](docs/diagrams.md)。下面只画当前阶段这一格：输入只有当前会话，输出只进 SDK 独立 WebUI 的卡片流（与宿主输入框完全解耦，见 [docs/design.md](docs/design.md) 决策 D10），流水线任一级不过就静默（红框）。
+## 三个角色，一套协议
 
 ```mermaid
-flowchart TB
-  classDef now fill:#e8f3ff,stroke:#2b6cb0,color:#1a365d
-  classDef future fill:#f7f7f7,stroke:#9aa0a6,color:#5f6368,stroke-dasharray: 5 5
-  classDef stop fill:#fdecec,stroke:#b03a2e,color:#7b241c
+flowchart LR
   classDef host fill:#eafaf1,stroke:#1e8449,color:#145a32
+  classDef core fill:#e8f3ff,stroke:#2b6cb0,color:#1a365d
+  classDef surf fill:#fef5e7,stroke:#b9770e,color:#7e5109
 
-  EV["宿主 · O1 事件流（唯一输入）<br/>turn / message / tool / artifact / state"]:::host
-  XB["O2/O3 事件 agent.* / env.*<br/>Phase 1 接收即忽略"]:::future
+  H["宿主 Host<br/>上报事件 · 借出模型 · 可选地接收发送"]:::host
+  C["核心 Core<br/>信号 → 场景 → 规则或模型 → 门控 → 模板渲染<br/>管理建议的有效期与发送规则"]:::core
+  S["界面 Surface<br/>显示当前建议 · 转达用户的发送 / 复制 / 关闭"]:::surf
 
-  subgraph Core["intent-predict 核心（Phase 1）"]
-    direction TB
-    SS["会话存储 + 信号提取 + 守卫<br/>proposedRisk 提议风险扫描"]:::now
-    RT["有限场景路由（INTENTS.md）<br/>仅 stage=O1 场景 · 专用 → 兜底"]:::now
-    CD{"显式规则命中？"}:::now
-    MD["模型约束分类<br/>封闭目录选一或 none"]:::now
-    GT["Per-Intent 门控<br/>阈值 / 分差 / 风险 / 冷却 → 通道裁决"]:::now
-    RD["槽位校验 → 模板与 Action 插值 → 9 条过滤"]:::now
-    PD["Prediction<br/>意图 + 槽位 + 建议文本"]:::now
-    NX["completed + null（fail-closed 静默）<br/>SuppressedReason 记录原因"]:::stop
-    SS --> RT --> CD
-    CD -->|"是，短路跳过模型"| GT
-    CD -->|"否"| MD --> GT
-    CD -.->|"无模型且未命中"| NX
-    GT --> RD --> PD
-    SS -.-> NX
-    RT -.-> NX
-    MD -.-> NX
-    GT -.-> NX
-    RD -.-> NX
-  end
-
-  SM["宿主零配置 Sampler<br/>compact 必备 · fork 可选 · 可取消"]:::host
-  UI["SDK 独立 WebUI（唯一人机界面）<br/>建议卡片 + 草稿框<br/>点发送才发 · 不碰宿主输入框"]:::now
-  FB[("本地反馈 JSONL<br/>驱动冷却与退避")]:::now
-  AG["A2 推测预执行 · A3 委托执行<br/>不在 Phase 1"]:::future
-
-  EV --> SS
-  XB -.-> SS
-  MD <--> SM
-  PD --> UI
-  NX -.->|"卡片标过期"| UI
-  UI -->|"Feedback + similarity"| FB
-  FB -.-> GT
+  H -->|"session/observe"| C
+  C -->|"sampler/sample"| H
+  C -->|"prediction/updated · invalidated"| S
+  S -->|"prediction/act"| C
+  C -->|"dispatch/message（钉在所属轮次，只发一次）"| H
 ```
 
-Phase 1 的时序图与 UI 状态图见 [docs/diagrams.md](docs/diagrams.md#1-phase-1o1--a1当前精修范围)。
+本仓库自带一个界面（本机回环地址上的一个网页，零宿主 UI 改动）。界面是协议里的一个角色，不是限制：宿主想在自己的输入框里呈现建议，用同一套消息即可。
 
-## 和 Codex composer predictions 有什么不同
+## 跑起来
 
-本项目借鉴了 OpenAI Codex 的 [composer predictions](docs/prior-art.md#1-openai-codexcomposer-predictions)，两者的主要区别如下：
+需要 Node ≥ 22.18（直接运行 TypeScript 源码，无构建步骤）和 Python 3（仅校验工具）。
 
-| | Codex composer predictions | intent-predict |
-|---|---|---|
-| 预测什么 | 一句开放文本 | 场景内有限意图集合中的一项（或 `none`），附带槽位、置信度、文本和动作 |
-| 能在哪里用 | 只能在 Codex 桌面版里用 | 任意 agent（第一个深度落地 Hermes Agent，见路线图），通过适配器或 JSON-RPC sidecar 接入 |
-| 模型配置 | 绑定 Codex 自身后端 | **零配置优先**：通过 `Sampler` 直接复用宿主 Agent 已有的模型或缓存分叉 |
-| 什么时候出现 | 策略未公开 | 显式门控：阈值、领先幅度、冷却、风险等级 |
-| 怎么评估 | 看接受率 | 分类指标 + 接受率 + 校准 |
+```bash
+npm install                     # 唯一的运行时依赖是 yaml
+npm test                        # 黄金用例一致性 + sidecar 协议 + Grok 事件映射
+npm run typecheck
+pip install jsonschema pyyaml && python tools/validate.py   # 规范、契约、用例、文档互相一致
+```
+
+用 Grok CLI 当宿主试用（需已登录的 `grok`）：
+
+```bash
+node packages/host-grok/src/main.ts --cwd <你的项目> -- --allow search_replace
+# 终端里和 Grok 对话；启动时打印的网页地址里看「下一步建议」
+npm run e2e:grok                # 在一次性目录里对真实 Grok 跑一遍端到端检查（花费几美分）
+npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自带网页
+```
+
+其他宿主通过 sidecar 接入：`node packages/sidecar/src/main.ts serve --stdio`，协议见 [SPEC.md](SPEC.md) §8。
 
 ## 设计要点
 
-- **零配置复用宿主模型**：不需要用户单独为 SDK 配 API Key。SDK 通过 `Sampler`（`fork` 缓存共享分叉或 `compact` 紧凑上下文委托）直接调用宿主 Agent 自己的模型。
-- **数据流向**：宿主传入事件，SDK 返回预测，宿主再回传用户反馈。UI 和动作执行都由宿主负责。
-- **四级接入与自动降级**：
-  - L2（Fork Sampler）：宿主在缓存共享的分叉上采样（如 Hermes 同前缀分叉、Codex `thread/sample`）
-  - L1（Host-Delegated）：宿主传入实时事件流，并委托宿主自身模型执行紧凑分类
-  - L0（Simple Messages）：每轮结束时传入消息数组
-  - L-Local（纯本地）：无模型时只有 `RuleSource` 的显式候选能产出建议（转移先验只排备选，不单独猜测）
-- **宁缺毋滥**：识别不出场景就不预测，出现任何异常都不给建议（fail-closed，标准化 34 种 `SuppressedReason`）。
-- **不自动发送、不碰宿主输入框**：建议只出现在 SDK 独立 WebUI 里；发送永远是用户在 WebUI 里点下的显式动作（或复制粘贴），SDK 从不自动发送、从不自动执行，也永不向宿主输入控件写字。
-- **可评估与隐私安全**：内置脱敏管道、本地 Bigram Dice 相似度计算和离线回放评测。
+- **封闭目录**：模型只能选一个意图 id 或 `none`，造不出新意图；可以按分类问题离线评测。
+- **文字只来自模板**：界面上的每个字都出自场景包的模板和通过校验的槽位值，模型的输出从不直接上屏。
+- **宁缺毋滥**：任何守卫命中、未识别场景、模型异常、校验失败、超时，结果都是不给建议，并记录 24 种 `SuppressedReason` 之一。
+- **发送必须是用户的显式动作，且钉在所属轮次**：过期的「可以，继续」到不了另一个提问；同一条建议最多发一次；有外部副作用的意图多一步确认。
+- **「照你说的办」类意图特殊对待**：agent 的提议看起来涉及推送、发布、删除时，这类一键同意不会被提供；提供时必须连同 agent 的原话一起显示。
+- **零配置借用宿主模型**：不需要为它单独配 API Key。
+- **场景包只能收紧阈值**：仓库里带来的 `INTENTS.md` 不能把门槛调得比宿主更松，且必须显式启用。
 
-## 计划中的包
+## 和 Codex composer predictions 的区别
 
-| 包 | 作用 |
+| | Codex composer predictions | intent-predict |
+|---|---|---|
+| 预测什么 | 一句开放文本 | 封闭目录中的一项或 `none`，附槽位与可选动作 |
+| 在哪用 | Codex 桌面版 | 任意宿主（已接通 Grok CLI），经 sidecar 的 JSON-RPC 接入 |
+| 何时出现 | 策略未公开 | 写在规范里：守卫、场景路由、置信度门槛、冷却 |
+| 如何评估 | 接受率 | 可回放的分类指标；接受率只是其中之一 |
+
+调研细节见 [docs/prior-art.md](docs/prior-art.md)。
+
+## 仓库地图
+
+| 路径 | 内容 |
 |---|---|
-| `@intent-predict/core` | 事件和信号、谓词引擎、场景路由、候选来源、融合、门控、渲染、过滤、脱敏 |
-| `@intent-predict/webui` | SDK 独立 WebUI（用户建议面 + 检查面），与任何宿主输入框零耦合；静态资源随包分发，由 sidecar 或独立小服务本地回环提供 |
-| `@intent-predict/sidecar` | JSON-RPC stdio 服务，支持 `sampler/sample` 反向调用，供 Python（如 Hermes）、Rust、Go 等宿主使用；也可同进程托管 WebUI |
-| `@intent-predict/adapters/*` | 适配 Hermes Agent（首个深度落地宿主，见路线图）、Codex、ACP、Claude Agent SDK、OpenAI Agents、Vercel AI、LangGraph |
-| `@intent-predict/pack-coding` | 内置的编程场景包（[`pack.json`](packages/pack-coding/pack.json)） |
-| `@intent-predict/models` | 可选的独立模型客户端（当宿主不提供 Sampler 时的兜底） |
-
-路线图见 [ROADMAP.md](ROADMAP.md)（当前：Phase 1，仅 O1 × A1）。
+| [SPEC.md](SPEC.md) | 行为规范（本阶段唯一的规范性文本） |
+| [spec/](spec/) | 数据结构的 JSON Schema：事件、场景包、预测、遥测、RPC |
+| [INTENTS.md](INTENTS.md) | 内置编程场景包的唯一来源；`packages/pack-coding/pack.json` 由它生成 |
+| [eval/golden.jsonl](eval/golden.jsonl) | 黄金用例，覆盖全部抑制原因，含录制的模型输出 |
+| [tools/](tools/) | `reference.py` 参考求值器（测试基准，不是产品）、`validate.py` 一致性校验、`build_pack.py` |
+| [packages/core](packages/core) | 核心：信号、路由、规则、模型分类、门控、渲染、发送与结果规则 |
+| [packages/sidecar](packages/sidecar) | stdio JSON-RPC 服务 + 自带界面（单个网页，HTTP + SSE，仅回环地址） |
+| [packages/host-grok](packages/host-grok) | Grok CLI 宿主适配：事件映射、采样、发送 |
+| [ROADMAP.md](ROADMAP.md) · [docs/design.md](docs/design.md) · [docs/future.md](docs/future.md) | 阶段计划 · 设计理由与决策 · 后续阶段的非规范草案 |
 
 ## 许可证
 

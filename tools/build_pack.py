@@ -33,7 +33,7 @@ def build() -> dict:
     pack = dict(fm)
     pack["promptTemplate"] = body
     # canonical top-level key order mirrors spec/scenario-pack.schema.json
-    order = ["id", "version", "description", "observationStages", "policy", "promptTemplate", "scenarios"]
+    order = ["id", "version", "description", "policy", "promptTemplate", "scenarios"]
     return {k: pack[k] for k in order if k in pack}
 
 

@@ -1,340 +1,506 @@
 # Intent-Predict Specification (SPEC.md)
 
-Status: Draft v1.0 (Language-Agnostic, Symphony-Style Implementation Contract)
+Status: Draft v0.5 — the Phase 1 contract (single-session observation, suggest-only)
 
-Purpose: Define a deterministic-outer-shell + prompt-contract system that upgrades any host coding or general agent into an **Intent Predict Agent**, evolving across three observation stages (**O1 Single-Session → O2 Agent-Wide → O3 Global Environment**) and three agency stages (**A1 Suggest-Only → A2 Speculative-Prep → A3 Propose-and-Dispatch**).
+Purpose: define a deterministic shell around one constrained model call that, after an agent turn ends, predicts the user's next message as **one intent from a closed catalog, or nothing**. The shell is host-agnostic: a host feeds events and lends its model; a surface shows the suggestion; nothing is sent unless the user explicitly sends it.
 
-> **Current implementation phase: Phase 1 (O1 × A1)** — see [ROADMAP.md](ROADMAP.md). Implementations claim conformance per phase. The O2/O3 (§2.2–§2.4) and A2/A3 (§3) material is forward-compatible specification: a Phase 1 implementation MUST accept-and-ignore `agent.*`/`env.*` events and MUST NOT execute `prepPlan` or dispatch actions, but is NOT required to implement those sections. On the delivery axis the design is **permanently decoupled from the host composer**: suggestions live only in the SDK's independent Web UI (§6 item 6) across all phases; there is no host-input ghost text, host key binding, or composer injection anywhere in this specification.
-
-> **How to use this specification with a coding agent:**
+> **Using this specification with a coding agent**
 >
-> `"Implement intent-predict for <target host/language> according to https://github.com/susyimes/intent-predict/blob/main/SPEC.md and verify conformance against eval/golden.jsonl."`
+> `"Implement intent-predict for <host/language> according to SPEC.md, load scenarios from INTENTS.md, and make every case in eval/golden.jsonl pass."`
 
----
+This document contains only what the current phase builds. Wider observation (agent-wide, ambient), speculative preparation, delegated execution, score fusion, online learning and model-written text are **not** part of this contract; their sketches live in the non-normative [docs/future.md](docs/future.md). Phasing is in [ROADMAP.md](ROADMAP.md).
 
-## Normative Language
+## Normative language
 
-The key words `MUST`, `MUST NOT`, `REQUIRED`, `SHOULD`, `SHOULD NOT`, `RECOMMENDED`, `MAY`, and `OPTIONAL` in this document are to be interpreted as described in RFC 2119.
+`MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT`, `MAY` are used as in RFC 2119. Lengths and cuts of text are counted in Unicode code points; only the `fork` prompt budget is in UTF-8 bytes. *Implementation-defined* means the behaviour is part of the contract but this document does not fix one policy; implementations MUST document what they chose.
 
-`Implementation-defined` means the behavior is part of the implementation contract, but this specification does not prescribe one universal policy. Implementations MUST document the selected behavior.
-
-## Authority & Precedence
+## Authority and precedence
 
 There is exactly one normative source per concern:
 
-1. **Data shapes** (events, scenario packs, predictions, feedback, RPC envelopes): `spec/*.schema.json` (Draft 2020-12) govern. Cross-file `$ref`s MUST be resolved offline against the `spec/` directory (a schema's `$id` is a canonical identifier, not a URL to fetch).
-2. **Behavior** (pipeline, gates, safety rules): this `SPEC.md` governs.
-3. **Built-in coding pack content**: `INTENTS.md` is the source; `packages/pack-coding/pack.json` is a generated artifact (`tools/build_pack.py`) and MUST NOT be hand-edited.
-4. `docs/design.md` is **non-normative**: it records rationale, examples, and host-integration notes. Where it disagrees with items 1–3, items 1–3 prevail.
+1. **Data shapes** — `spec/*.schema.json` (JSON Schema 2020-12). Cross-file `$ref`s are resolved offline against `spec/`; a schema `$id` is an identifier, not a URL to fetch.
+2. **Behaviour** — this file.
+3. **Built-in pack** — `INTENTS.md`. `packages/pack-coding/pack.json` is generated from it (`tools/build_pack.py`) and MUST NOT be hand-edited.
+4. Everything under `docs/` is non-normative rationale.
 
-Run `python tools/validate.py` to check that the documents above agree.
+`tools/reference.py` is an executable reading of this file used to check `eval/golden.jsonl`. It is a test oracle, not the product; where it disagrees with this file, this file governs and the difference is a bug. `python tools/validate.py` checks that all of the above agree.
 
 ---
 
-## 1. Problem Statement & Core Architecture
+## 1. Model
 
-Open-ended next-message prediction (generating an arbitrary sentence after every turn) suffers from four structural problems: it cannot be offline-evaluated as classification, it cannot bind deterministic actions or per-intent risk policies, it is tightly coupled to a single host UI, and it wastes model calls when no meaningful next step exists.
+### 1.1 Three roles
 
-`intent-predict` solves this by combining:
+| Role | Does | Never does |
+|---|---|---|
+| **Host** | Reports session events; lends its model through the sampler; optionally accepts a user-approved send (dispatch). | Decide what is suggested. |
+| **Core** | Runs the pipeline of §4; tracks which prediction is live; enforces the action rules of §5; writes telemetry. | Send anything on its own; execute tools. |
+| **Surface** | Shows the live prediction; forwards the user's explicit action (`send`, `copy`, `dismiss`). | Decide friction, re-rank, or act without a user action. |
 
-1. **Bounded Scenarios (`INTENTS.md`)**: Repository-versioned or bundled Markdown contracts with YAML front matter (declaring trigger predicates, a closed catalog of 3–15 intents + `none`, risk levels, slots, and gate overrides) and a Markdown prompt body (the classification instructions).
-2. **Deterministic Safety Shell**: Strict signal extraction, proposed-action risk scanning (`proposedRisk`), per-intent gating, atomic slot/action interpolation, and a 9-rule post-filter pipeline that fails closed on any anomaly.
-3. **Zero-Config Host Sampler Delegation**: Implementations reuse the host agent's own model connection (`fork` mode sharing the prompt cache prefix, or `compact` mode using the host's active/auxiliary model after SDK redaction).
+All three speak the single protocol of §8. A reference implementation ships one bundled surface (a local web page); a host MAY act as its own surface by declaring `capabilities.surface`. Which surface is used does not change any rule in this document.
 
-### 1.1 Two Orthogonal Evolution Axes
+### 1.2 Scope
 
-Implementations MUST structure capabilities along two orthogonal 3-stage axes so hosts can adopt incrementally without re-architecting:
+This version covers **O1 × A1**: observation is one session's own events; the only output is a suggestion a user may send. An `event` whose `type` this version does not define MUST be accepted and ignored: it is not an error, produces no signal, and triggers no evaluation.
 
-```mermaid
-flowchart TB
-  subgraph ObsAxis["观察范围演进（Observation Stages: O1 → O2 → O3）"]
-    direction LR
-    O1["Stage O1：观察单一会话<br/>(Single-Session)<br/>仅当前 thread 的消息、工具调用与文件产物"]
-    O2["Stage O2：观察整个 Agent<br/>(Agent-Wide)<br/>跨会话/子 Agent/后台任务/Kanban/审批与运行时状态"]
-    O3["Stage O3：观察全局环境<br/>(Global / Ambient)<br/>外部终端命令、Git 工作区、IDE 焦点/报错、桌面剪贴板"]
-    O1 -->|"扩展信号源"| O2 -->|"扩展信号源"| O3
-  end
+### 1.3 Invariants
 
-  subgraph Core["确定性外壳 + INTENTS.md 契约内核（本规范核心）"]
-    direction LR
-    L["1. Intent Loader<br/>解析 INTENTS.md<br/>(YAML Front Matter + Prompt Body)"]
-    S["2. Signal & Risk Engine<br/>提取 O1/O2/O3 信号<br/>+ proposedRisk 扫描"]
-    R["3. Scenario Router<br/>谓词求值 + 特异度排序<br/>未命中 → 立即返回 none"]
-    C["4. Candidate & Sampler<br/>explicit 规则短路<br/>或零配置委托宿主 Sampler"]
-    G["5. Fusion & Gate & Filter<br/>Per-Intent 阈值 + 通道裁决<br/>+ 9 条安全过滤"]
-    L --> S --> R --> C --> G
-  end
+- **I1 Fail closed.** Any guard, miss, model anomaly, validation failure or timeout yields no suggestion and exactly one `SuppressedReason`.
+- **I2 Closed catalog.** A prediction's intent is declared in a loaded pack. The model chooses an id; it cannot create one.
+- **I3 Template-only text.** Every character of a suggestion comes from a pack template or from a slot value that passed §4.7. Model output is never shown.
+- **I4 Explicit send.** Text leaves the core only through §5.2, in response to a user action on a surface. Nothing is sent automatically; no tool is executed.
+- **I5 Turn-pinned send.** A send is valid only for the turn the prediction answers (§5.3), and at most once per prediction.
+- **I6 Tighten-only packs.** A pack can make the confidence thresholds stricter than the host's, never looser (§3.3).
 
-  subgraph AgencyAxis["行动力演进（Agency Stages: A1 → A2 → A3）"]
-    direction LR
-    A1["Stage A1：纯建议输出<br/>(Suggest-Only，默认)<br/>独立 WebUI 卡片<br/>quick / choice / confirm"]
-    A2["Stage A2：推测预执行<br/>(Speculative-Prep)<br/>后台静默预跑只读检查/预取上下文"]
-    A3["Stage A3：建议 + 委托执行<br/>(Propose-and-Dispatch)<br/>用户确认后派发给目标 Agent 执行"]
-    A1 -.->|"升级行动力"| A2 -.->|"升级行动力"| A3
-  end
+---
 
-  ObsAxis -->|"规范化 AgentEvent 流"| S
-  G -->|"结构化 Prediction"| AgencyAxis
+## 2. Events and signals
+
+### 2.1 Events
+
+`spec/events.schema.json` defines `turn.started`, `message.user`, `message.agent`, `tool.call`, `tool.result`, `artifact`, `state`, `turn.completed`. Within a session the host sends `turn.started` before that turn's `message.user`. Hosts SHOULD send `command` on execute-kind `tool.call` events; without it the core cannot tell a test run from any other command (§2.2).
+
+### 2.2 Signal extraction
+
+Signals are computed when a turn completes, from the events carrying that `turnId`. Regular expressions below are ECMA-262 with the `u` flag; `i` is added where noted.
+
+**Tool calls.** Join `tool.call` and `tool.result` by `callId`; calls without a result are ignored except where stated. `kind` is `tool.call.kind` when present, else inferred from the lower-cased tool name:
+
+| kind | names |
+|---|---|
+| `read` | `read_file` `read` `view` `cat` `head` `tail` `open_file` |
+| `search` | `search_files` `grep` `rg` `find` `glob` `ls` `list_files` `web_search` `websearch` `session_search` |
+| `edit` | `patch` `write_file` `write` `edit` `multiedit` `apply_patch` `create_file` `str_replace_editor` `str_replace_based_edit_tool` `notebook_edit` `notebookedit` |
+| `delete` | `remove_file` `delete_file` `rm` |
+| `execute` | `terminal` `bash` `shell` `powershell` `exec_command` `execute_code` `run_command` `run_terminal_cmd` |
+| `fetch` | `web_extract` `web_fetch` `webfetch` `fetch` `curl` `browser_exec` |
+| `ask_user` | `clarify` `ask_user` `askuserquestion` `request_user_input` |
+| `other` | anything else |
+
+A call *failed* when its result has `status === "error"` or a non-zero `exitCode`. An execute call is a *check* when `tool.call.check` is `true`, or when `check` is absent and `command` matches (flag `i`):
+
+```text
+(?:^|[\s;&|(/])(?:pytest|py\.test|unittest|tox|nox|jest|vitest|mocha|ava|playwright\s+test|cypress\s+run|node\s+--test|deno\s+(?:test|check|lint)|go\s+(?:test|vet|build)|cargo\s+(?:test|check|clippy|build)|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|build|lint|typecheck|check)|tsc|eslint|ruff|mypy|pyright|flake8|make\s+(?:test|check|build|lint)|(?:\./)?gradlew?\s+(?:test|build|check)|mvn\s+(?:test|verify|package|compile)|dotnet\s+(?:test|build)|ctest|phpunit|rspec|rake\s+test|swift\s+(?:test|build)|bazel\s+(?:test|build))\b
 ```
 
-This is the full-vision overview. Implementations are phased one grid cell at a time ([ROADMAP.md](ROADMAP.md)); the per-phase diagrams — including the detailed Phase 1 (O1 × A1) architecture, sequence, and UI-state diagrams — live in [docs/diagrams.md](docs/diagrams.md). A Phase 1 diagram shows only the O1 inputs and A1 outputs of the picture above.
+| Signal | Rule |
+|---|---|
+| `session.turnCount` | Number of distinct turns recorded as completed, including this one. |
+| `lastTurn.status` | `turn.completed.status`. |
+| `lastTurn.toolKinds`, `lastTurn.toolNames` | De-duplicated, first-seen order, over all `tool.call` events of the turn. |
+| `lastTurn.filesChanged` | Number of distinct `artifact.ref` with kind `file_changed`/`file_created`/`file_deleted`. If the turn has no such artifact: number of `edit`/`delete` calls whose result is `ok`. |
+| `lastTurn.changedPaths` | Those artifact refs, first-seen order (empty when the count came from tool calls). |
+| `lastTurn.failedExecs` | Number of failed execute calls. Informational: it counts failures that were later fixed. |
+| `lastTurn.lastExecFailed` | Whether the last execute call (with a result) failed. Absent when there is none. |
+| `lastTurn.checkRuns` | Number of check calls (with a result). `0` when there is none. |
+| `lastTurn.lastCheckFailed` | Whether the last check call failed. Absent when `checkRuns` is `0`. |
+| `lastTurn.toolOutputs.<name>` | `output` of the last result of tool `<name>`. Readable only by `slot.from`; values larger than 64 KiB serialized behave as absent. |
+| `lastAgentMessage.length`, `.tail` | Of the turn's *final agent message* — its last `message.agent` with `final !== false`, else its last `message.agent`, else the empty string: character length, and the last 1,500 characters. |
+| `lastAgentMessage.endsWithQuestion` | `Q(last prose line)`. |
+| `lastAgentMessage.options`, `.optionsCount`, `.optionsPrompted`, `.preferredOptionIndex` | Numbered-options rule below. |
+| `lastAgentMessage.hints` | Hints rule below. |
+| `lastAgentMessage.proposedRisk` | Proposed-risk rule below. |
+| `user.locale` | Locale rule below. |
+| `state.<key>` | Latest value the host sent for `<key>`, verbatim. |
+
+**Prose lines.** Split `tail` into lines; drop lines inside fenced code blocks (a line whose first non-blank characters are three backticks toggles a block; if `tail` contains an odd number of fence lines, the cut removed an opening fence, so everything before the first one is inside a block) and the fence lines themselves; trim; drop empty lines.
+
+**Question test `Q(line)`.** Strip trailing whitespace and any trailing `"` `'` `”` `’` `)` `）` `]` `】` `」` `』`. True when the remainder ends with `?` or `？`, or matches `(?:吗|呢|好吗|可以吗|对吗|是吗|如何|怎样|哪一个|哪个)\s*[。！!.]?$`.
+
+**Numbered options.** Let `N` be `^\s*(?:(\d{1,2})[.)、]|[(（](\d{1,2})[)）])\s+(.+)$`. Let `q = 1` if the last prose line satisfies `Q` and does not match `N`, else `0`. Skipping the last `q` lines, collect the maximal run of trailing consecutive prose lines that match `N`. The run is valid when its numbers are `1, 2, …, n` in order with `2 ≤ n ≤ 9`; then `options` is the list of captured texts and `optionsCount = n`, otherwise `options` is absent and `optionsCount = 0`. `preferredOptionIndex` is the 1-based position of the first option matching `[(（]\s*(?:recommended|推荐)\s*[)）]` (flag `i`), and is absent when none does. `optionsPrompted` is true when the run is valid and at least one holds: `q = 1`; the prose line immediately above the run satisfies `Q`; `preferredOptionIndex` is present. (A trailing numbered list is often a summary, not a question; only a prompted list is treated as a choice.)
+
+**Hints.** Over the last 5 prose lines, ordered by position in the text:
+- *slash*: every match of ``(?:^|[`"'“「『])(/[a-z][a-z0-9_-]{1,30})(?=$|[`"'”」』\s])`` (flag `i`), lower-cased. A command must open the line or follow an opening quote/backtick, which excludes paths such as `/usr/bin`.
+- *type literal*: every match of `(?:type|run|enter|reply with|输入|发送|回复)\s*["'“「『]([^"'”」』\n]{1,40})["'”」』]` (flag `i`), trimmed.
+
+**Proposed risk.** Scan the last 8,000 characters of the final agent message, code blocks included (flag `i`):
+- `irreversible` when it matches the *destructive pattern*
+  `(?:\brm\s+-[a-z]*[rf][a-z]*\b|\bgit\s+push\b[^\n]*\s(?:--force\S*|-f)\b|\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-[a-z]*[fd]|\bdrop\s+(?:table|database|schema)\b|\btruncate\s+table\b|\bdelete\s+from\b|\bkubectl\s+delete\b|\bterraform\s+destroy\b|\bformat\s+[a-z]:|\bchmod\s+(?:-R\s+)?777\b|\bcurl\b[^\n]*\|\s*(?:sh|bash)\b|删库|强制推送|清空数据|不可恢复|永久删除)`;
+- else `side_effect` when it matches
+  `(?:\bgit\s+push\b|\bgh\s+pr\s+(?:create|merge)\b|\b(?:npm|cargo)\s+publish\b|\bdeploy\b|\b(?:kubectl|terraform)\s+apply\b|\bdocker\s+push\b|推送到远端|推到生产|发布到|部署到|合并\s*PR|发送邮件)`;
+- else `reversible`.
+
+These patterns are a coarse net, not a proof: they miss paraphrases. They are one of several layers (§7.4).
+
+**Locale.** Concatenate the session's last ≤ 3 `message.user` texts with fenced code blocks and URLs removed; count over non-whitespace characters. Kana (`぀-ヿ`) > 5 % → `ja`; Hangul (`가-힯`) > 5 % → `ko`; CJK ideographs (`一-鿿`) ≥ 10 %, or ≥ 2 ideographs with fewer than 5 Latin words → `zh-CN`; else `en`.
+
+### 2.3 Predicates
+
+A predicate is `{all: […]}`, `{any: […]}`, `{not: …}` or a leaf `{signal, <operators>}`. A path is resolved segment by segment through objects and arrays (`lastTurn.changedPaths.0`); everything after `state.` is one key (`state.ui.mode` reads the key `ui.mode`).
+
+- All operators in one leaf must hold.
+- **Missing signal** (`undefined` or `null`): `{exists: false}` is true; every other operator is false, including `ne`. A missing signal never passes a comparison.
+- `eq`/`ne`: strict equality. `gt`/`gte`/`lt`/`lte`: only on finite numbers. `in`: the operand is an array containing the value. `contains`: array membership, or substring when the value is a string. `matches`: only on strings, `RegExp(pattern, "u").test(value)`. `exists: true`: the signal is present.
 
 ---
 
-## 2. Three Observation Stages (O1 / O2 / O3)
+## 3. Scenario packs (`INTENTS.md`)
 
-An implementation MUST declare which Observation Stage(s) it supports (`["O1"]`, `["O1", "O2"]`, or `["O1", "O2", "O3"]`). Each stage is a strict superset of the previous stage's events and signals.
+### 3.1 Structure
 
-| Stage | Scope | Observed Events | Key Derived Signals | Typical Trigger |
-|---|---|---|---|---|
-| **Stage O1: Single-Session** (`single_session`) | Inside one conversation thread | `turn.started`, `message.user`, `message.agent`, `tool.call`, `tool.result`, `artifact`, `state`, `turn.completed` | `session.*`, `lastTurn.*`, `lastAgentMessage.*`, `user.locale`, `state.*` | `turn.completed` |
-| **Stage O2: Agent-Wide** (`agent_wide`) | Across the host agent runtime (all sessions, subagents, background jobs, kanban/tasks) | All O1 events + `agent.subagent_completed`, `agent.background_job`, `agent.task_updated`, `agent.session_switched` | `agent.lastSubagent.{subagentId,status,summary}`, `agent.lastBackgroundJob.{jobId,command,status,exitCode,summary}`, `agent.pendingReviews`, `agent.openTasksCount` | `agent.subagent_completed`, `agent.background_job`, `agent.task_updated` |
-| **Stage O3: Global Environment** (`global_ambient`) | Across the user's workstation (shell, git worktree, filesystem, IDE, window/clipboard) | All O1+O2 events + `env.terminal_command`, `env.git_status`, `env.file_changed`, `env.ide_context`, `env.ambient_context` | `env.lastTerminalCommand.*`, `env.git.*`, `env.ide.*`, `env.ambient.*` | Any O1/O2 trigger or debounced `env.*` event |
+A pack is a `ScenarioPack` object (`spec/scenario-pack.schema.json`), authored as JSON or as a Markdown file `INTENTS.md` / `*.intents.md` with YAML front matter delimited by `---`:
 
-### 2.1 Stage O1 Requirements (Single-Session — Baseline REQUIRED)
+- The front matter is the `ScenarioPack` exactly as the schema defines it, same camelCase keys.
+- The Markdown body, with leading and trailing blank lines stripped, becomes `promptTemplate` verbatim (Markdown markup is sent as-is). An empty body means "use the default prompt of §4.5".
 
-Every conformant implementation MUST implement Stage O1:
-- Track per-session turn count (`session.turnCount`), last accepted/edited intent (`session.lastIntent`), current turn tool calls/results, and file artifacts.
-- Extract `lastAgentMessage.tail` (last 1,500 chars), `endsWithQuestion`, `options` (numbered lists `1..9`), `preferredOptionIndex`, `hints` (explicit `/slash` commands or `"type X"` prompts), and `proposedRisk`.
-- Infer `user.locale` (`zh-CN` | `ja` | `ko` | `en`) from the user's last 3 messages.
+A scenario has a `match` predicate, a `priority`, an optional `fallback` flag and 1–15 intents. An intent declares `id`, `description`, `render` (required), `risk`, and optionally `examples`, `when`, `slots`, `enumerate`, `passThrough`, `action`.
 
-### 2.2 Stage O2 Requirements (Agent-Wide — OPTIONAL)
+- `risk` is one of `none`, `read_only`, `reversible`, `side_effect`.
+- `passThrough: true` marks a message that approves or continues **whatever the agent just proposed** ("yes", "option 2", "go ahead", "continue"). Its real effect is the agent's proposal, not its own words, so it gets the special handling of §4.3 and §4.8.
+- `enumerate` turns one intent into one choice per item of a signal array (§4.4).
 
-When Stage O2 is enabled, the predictor observes the entire agent instance beyond a single chat tab:
-- **Subagent & Delegation Tracking (`agent.subagent_completed`)**: When a background subagent or delegated task finishes, derive `agent.lastSubagent.{subagentId, status, summary}` (field names mirror the event in `spec/events.schema.json`) so scenarios can suggest reviewing or merging the subagent's findings.
-- **Background Process Tracking (`agent.background_job`)**: When a background terminal job, build, or test watcher exits or emits a readiness match, derive `agent.lastBackgroundJob.{jobId, command, status, exitCode, summary}`.
-- **Task / Kanban Board Tracking (`agent.task_updated`)**: `agent.pendingReviews` and `agent.openTasksCount` are **host-authoritative counts**: the SDK copies them from the event fields and MUST NOT count tasks itself. If an event omits a count, the corresponding signal keeps its previous value; before any count is reported the signal is absent (fail-closed, §5.2).
+### 3.2 Load-time rules and trust
 
-### 2.3 Stage O3 Requirements (Global Environment — OPTIONAL)
+A pack MUST be rejected as a whole (engine error, not a suppression) when any of these fails:
 
-When Stage O3 is enabled, external lightweight observers (shell hooks, git watchers, IDE extensions, clipboard monitors) feed `env.*` events into the engine:
-- Events arriving outside an active turn MUST be debounced (`envSettleMs`, default `300ms`) before evaluating scenarios whose `triggers` array includes the corresponding `env.*` event type.
-- If a scenario is triggered by an `env.*` event while the agent is idle, `sourceTurnId` MUST be set to the latest completed turn ID (or `"env-0"` if no turn has occurred yet in the session).
+1. It validates against the schema; scenario ids are unique in the pack; intent ids are unique in their scenario.
+2. Every `passThrough` intent declares `risk` `reversible` or `side_effect`.
+3. Every `enumerate.slot` names a declared slot of type `number`; an intent with `enumerate` is not `side_effect` and declares no `action`.
+4. Every `{placeholder}` in a `render` template or `action` names a declared slot.
+5. Every regex (`matches`, `slot.pattern`) is at most 256 characters and compiles. Implementations MUST bound regex execution (a non-backtracking engine or a match timeout).
 
-### 2.4 Freshness, Consumption & Session Attribution (O2/O3)
+A pack's risk labels and prompt are **author claims**. A pack found in a workspace (for example an `INTENTS.md` in a freshly cloned repository) MUST NOT be loaded unless the host or user opted in to that pack explicitly; naming its path in `initialize.packs` is such an opt-in.
 
-"Latest-value" signals (`agent.last*`, `env.last*`, `env.ambient.*`) would otherwise match forever. Implementations MUST apply all three rules:
+### 3.3 Thresholds: packs can only tighten
 
-1. **Freshness window**: each O2/O3 latest-value signal carries its event timestamp `at`. A scenario `match`/`when` predicate that reads such a signal evaluates as missing once `now - at > signalTtlMs` (default `60000` ms). O1 turn-scoped signals are exempt (they reset every turn).
-2. **Single consumption**: an O2/O3 trigger event is consumed by the first pipeline evaluation it triggers (whether the outcome is shown, suppressed, or aborted). The same event MUST NOT trigger again; a later `turn.completed` does not resurrect it (its signals may still be read while inside the freshness window if another trigger fires).
-3. **Session attribution**: the delivery session is `event.sessionId` when present, else the session on whose observe channel the event arrived, else the host's active session. For O2 triggers, `sourceTurnId` follows the same rule as O3 (latest completed turn of the delivery session, else `"env-0"`). When `sourceTurnId === "env-0"`, `fork` sampling is impossible (no real turn to fork from): implementations MUST use `compact` mode or local rules only, and MUST NOT emit a `sampler/sample` with `expectedTurnId: "env-0"`. If an O2/O3 trigger arrives while a turn is running, it is queued and evaluated once when the agent becomes idle, subject to the freshness window.
+The host policy is `initialize.policy` over the defaults `minConfidence = 0.60`, `sideEffectMinConfidence = 0.80`. The effective value of each threshold for an intent is the **maximum** of the host value, its pack's `policy` value and its scenario's `policy` value. These defaults are placeholders until replay data exists (ROADMAP Phase 0); they are deliberately few.
 
 ---
 
-## 3. Three Agency Stages (A1 / A2 / A3)
+## 4. Pipeline
 
-| Stage | Identifier | Behavior | Safety Invariant |
-|---|---|---|---|
-| **Stage A1: Suggest-Only** (`suggest_only`) | Default in v1 | Deliver structured `Prediction` (`text`, `intent`, `displayChannel`, `alternatives`, `action`) to the SDK's independent Web UI. The user loads it into the Web UI's own draft editor, may edit it, then explicitly sends it (via the optional host dispatch capability) or copies it. | **Never auto-sends a message; never auto-executes a tool; never writes to the host composer.** |
-| **Stage A2: Speculative Preparation** (`speculative_prep`) | Opt-in | While the suggestion is visible, the host MAY execute `prediction.prepPlan` in the background (strictly read-only tools or file prefetches). | **Zero side effects**: no file writes outside disposable memory, no network mutations, immediately aborted if user types something else. |
-| **Stage A3: Propose & Dispatch** (`propose_and_dispatch`) | Opt-in | Renders an actionable intent card; once the user explicitly clicks or confirms the card, the host dispatches `prediction.action` to the target agent or tool runner. | **Human-in-the-loop required** on every dispatch; `side_effect` and `irreversible` intents NEVER trigger via single-keystroke `Tab`. |
+### 4.1 Trigger and lifecycle
 
----
+- An evaluation is triggered by `turn.completed`. A second `turn.completed` for an already recorded `turnId` is ignored. No other event triggers an evaluation.
+- After the trigger the core waits `settleMs` (default 150) for trailing `artifact`/`state` events, then runs §4.2–§4.8.
+- Every evaluation ends with exactly one `prediction/updated` carrying an `EvaluationResult`: a prediction, or `prediction: null` with one `suppressedReason`. `type: "failed"` is reserved for internal errors.
+- At most one evaluation and one `sampler/sample` are in flight per session. When an event carrying a different `turnId` (the next turn has begun) or a `prediction/cancel` arrives for the session during an evaluation, the core MUST abort it, send `sampler/cancel` if a sample is in flight, and report `aborted`. A sample that outlives `timeoutMs` (default 4000) is cancelled the same way and reported as `timeout`. Late sampler replies are discarded.
 
-## 4. Repository-Owned `INTENTS.md` Contract Format
+### 4.2 Guards
 
-Inspired by Symphony's `WORKFLOW.md`, scenario packs MAY be authored either as JSON (`packages/pack-coding/pack.json`, validated by `spec/scenario-pack.schema.json`) or as a self-contained Markdown file **`INTENTS.md`** (or `*.intents.md`) with YAML front matter and a Markdown prompt body.
+Checked in this order; the first that holds ends the evaluation without calling a model:
 
-### 4.1 `INTENTS.md` Structure
+| # | Condition | Reason |
+|---|---|---|
+| 1 | `options.enabled === false` | `disabled` |
+| 2 | `capabilities.interactive === false` | `non_interactive` |
+| 3 | `state.pendingApproval === true`, or `state.pendingInput === true`, or the turn's last `tool.call` has kind `ask_user` and no result | `pending_interaction` |
+| 4 | `lastTurn.status === "interrupted"` | `interrupted_turn` |
+| 5 | `lastTurn.status === "failed"` and no loaded scenario lists `failed` in `triggerOnTurnStatuses` | `failed_turn_unhandled` |
+| 6 | `state.mode` is in `options.blockedModes` (default `["plan"]`) | `mode_blocked` |
+| 7 | `state.incognito === true` | `incognito` |
+| 8 | `options.maxPerSession` is set and that many predictions were already delivered in the session | `max_per_session_reached` |
 
-An `INTENTS.md` file consists of:
-1. **YAML Front Matter** delimited by `---`. The front matter is a `ScenarioPack` exactly as defined by `spec/scenario-pack.schema.json`, written in YAML with the **same camelCase key names** (no renaming):
-   - `id`: Pack identifier (e.g. `builtin/coding`).
-   - `version`: SemVer string (e.g. `0.3.0`). Quote it (`version: "0.3.0"` is unnecessary but always safe from YAML number coercion).
-   - `observationStages`: Stages this pack's scenarios may use (`[O1]`, `[O1, O2]`, or `[O1, O2, O3]`). A scenario's `stage` MUST be listed here; loading a pack whose `observationStages` exceed the implementation's declared stages is NOT an error — out-of-stage scenarios are skipped (§5.3 step 1).
-   - `policy`: Optional pack-level `GatePolicy` overrides. Precedence: global policy < pack `policy` < origin-scenario `policy`.
-   - `scenarios`: List of `ScenarioSpec` objects.
-2. **Markdown Body**:
-   - The prompt template and domain-specific classification rules sent to the model when `ModelSource` is invoked. It maps **verbatim** (only leading/trailing blank lines are stripped) to the schema field `promptTemplate`; Markdown markup such as backticks is sent as-is, so authors should write the body as literal prompt text.
-   - Supported template syntax (Mustache subset): `{{scenario.id}}`, `{{scenario.stage}}`, `{{scenario.description}}`, `{{#each intents}}…{{id}}…{{description}}…{{#if slots}}{{slots_spec}}{{/if}}{{#if examples}}{{examples}}{{/if}}…{{/each}}`, `{{user.locale}}`, `{{signals_json}}`, and `{{#if compact}}{{transcript}}{{/if}}`. Unknown variables MUST render as empty strings and MUST NOT abort the prediction.
-   - If the Markdown body is empty, the engine MUST use the default classification prompt defined in §5.5.
+### 4.3 Routing and catalog
 
-### 4.2 Trust Model for Repository-Owned Packs
+1. A scenario is *eligible* when `lastTurn.status` is in its `triggerOnTurnStatuses` (default `["completed"]`) and its `match` holds.
+2. Pick **one** scenario: among eligible scenarios without `fallback`, the highest `priority` (ties: earliest in load order, then declaration order); if there is none, the same choice among eligible `fallback` scenarios; if there is none → `no_scenario_matched`.
+3. The *catalog* is that scenario's intents in declaration order, minus:
+   - intents whose `when` is false;
+   - `passThrough` intents when `lastAgentMessage.proposedRisk` is `side_effect` or `irreversible` — a one-click "yes" to an external or destructive proposal is never offered — or when the final agent message is empty (there is nothing to approve);
+   - `enumerate` intents whose `over` does not resolve to an array of 2–9 strings.
+4. Empty catalog → `empty_catalog`.
 
-A pack's `risk` labels and prompt body are **author claims, not proofs**. Loading a repository-owned `INTENTS.md` (e.g. discovered at a workspace root after `git clone`) requires explicit host/user opt-in per pack `id`; implementations MUST NOT silently auto-load them. Hosts SHOULD additionally apply a risk floor based on action type (e.g. an intent whose `action.type` is `tool` or `command` is treated as at least `reversible` regardless of the label). The deterministic shell (closed catalog, slot validation, filters, human-in-the-loop) always applies.
+Scenarios are never merged: one evaluation has one scenario, one description, one policy.
 
----
+### 4.4 Deterministic rules
 
-## 5. Deterministic Pipeline Specification
+Rules run before any model call. A rule can only select an intent whose `risk` is not `side_effect`. If a rule selects an intent, the model is not called, `source` is `"rule"` and `intent.confidence` is `null`.
 
-### 5.0 Signal Extraction (normative summary)
+- **R1 Explicit hint.** Walk `lastAgentMessage.hints` from last to first. A *slash* hint selects the first catalog intent whose `action` is `{type: "command"}` with that `command`, or one of whose `examples` equals it. A *type literal* hint selects the first catalog intent one of whose `examples` equals it. Comparison is on trimmed, lower-cased strings. The intent must have no `enumerate` and all its `required` slots must resolve from `from` or `default`. The first hint that selects an intent wins.
+- **R2 Enumerate.** Otherwise, the first catalog intent with `enumerate` is selected. For each item `k` (1-based) of the `over` array it yields a choice `{slots: {<slot>: k}, text: render with that slot, label: redacted item text, truncated to 80 characters}`; each choice goes through §4.7. `preferredChoice` is `preferred − 1` when `enumerate.preferred` resolves to a position in range. The prediction's `text` and `intent.slots` are those of the preferred choice, else of the first.
 
-Implementations MUST derive at least these signals with these rules (`docs/design.md` §6.3 has the full rationale; on conflict this section governs):
+### 4.5 Model classification
 
-- **Turn scope**: `session.turnCount` = completed turns so far; `session.lastIntent` = last accepted/edited intent id. `lastTurn.toolKinds`/`toolNames` are de-duplicated lists for the just-ended turn; when the host omits `tool.call.kind`, infer from the tool name with this table: `read_file|view|cat|head|tail`→`read`; `search_files|grep|rg|find|glob|web_search|session_search`→`search`; `patch|write_file|edit|apply_patch|notebook_edit`→`edit`; `remove_file|delete_file|rm`→`delete`; `terminal|bash|exec_command|execute_code|run_command`→`execute`; `web_extract|fetch|curl|browser_exec`→`fetch`; `clarify|ask_user|request_user_input`→`ask_user`; anything else→`other`.
-- **File changes**: `lastTurn.filesChanged` counts de-duplicated `artifact` file refs this turn; if the host emits no artifacts, count successful (`status === 'ok'`) `edit`/`delete` tool calls. `lastTurn.changedPaths` lists the paths (`slot.from` may index it as `lastTurn.changedPaths.0`). `lastTurn.failedExecs` counts `execute` calls with `status === 'error'` or a non-zero `exitCode`.
-- **Agent tail**: `lastAgentMessage.tail` = last 1,500 chars of the final agent message; `.length` = full length. `endsWithQuestion` is true when the last non-empty, non-code-block line, after trimming trailing quotes/brackets, ends with `?`/`？` or matches `/(?:吗|呢|好吗|可以吗|对吗|是吗|如何|怎样|哪一个|哪个)\s*[。！!.]?$/u`.
-- **Numbered options**: scan trailing consecutive non-code lines matching `/^\s*(?:(\d{1,2})[.)、]|[(（](\d{1,2})[)）])\s+(.+)$/u`; valid only if numbering starts at 1, is consecutive, and totals 2–9. `preferredOptionIndex` is the 1-based index of an option containing `(Recommended)`/`（推荐）`, else 1.
-- **Hints** (last 5 non-code lines): slash commands `` /[a-z][a-z0-9_-]{1,30} `` in backticks/quotes or at line start (single `/` only, paths excluded); and type-literals `/(?:type|run|enter|reply with|输入|发送|回复)\s+["'「『]([^"'」』\n]{1,40})["'」』]/iu`.
-- **proposedRisk**: §5.4 step 1.
-- **Locale**: from the user's last ≤3 messages (code blocks and URLs stripped): kana >5%→`ja`; Hangul >5%→`ko`; CJK ideographs ≥10% (or ≥2 CJK chars with <5 Latin words)→`zh-CN`; else `en`.
-- **O2/O3 signals**: copied from the corresponding events (field names in §2), subject to §2.4 freshness. `state.<key>` passes host state through verbatim.
+Reached only when no rule selected an intent.
 
-### 5.1 Guards (`SuppressedReason`)
-
-Before evaluating any scenario, the engine MUST check the following guards in order. If any guard trips, the engine MUST immediately return `{ type: "completed", prediction: null, suppressedReason }` without calling any model:
-
-1. Predictor disabled → `disabled`
-2. Host `interactive === false` → `non_interactive`
-3. `state.pendingApproval === true` or `state.pendingInput === true` or last tool kind was `ask_user` → `pending_interaction`
-4. `lastTurn.status === "interrupted"` → `interrupted_turn`
-5. `lastTurn.status === "failed"` and no loaded scenario declares `"failed"` in `triggerOnTurnStatuses` → `failed_turn_unhandled`
-6. `session.turnCount < minTurns` (default `1` for `turn.completed` triggers; `0` for O3 `env.*` triggers) → `min_turns_not_met`
-7. `state["composer.dirty"] === true` → `composer_dirty`
-8. `state.mode` is in `blockedModes` (default `["plan"]`) → `mode_blocked`
-9. `state.incognito === true` → `incognito`
-
-*(Note: Model budget exhaustion is checked at §5.4 after `RuleSource`, not here, so zero-cost `explicit` rules still work when model budget is exhausted. For O2/O3 cold-start triggers with no completed turn yet (`sourceTurnId === "env-0"`, §2.4), guards 4–5 are skipped because there is no `lastTurn`.)*
-
-### 5.2 Signal Predicate Evaluation & Specificity
-
-1. **Missing Signals (Fail-Closed)**: When `signal` resolves to `undefined` or `null`:
-   - `{ exists: false }` evaluates to `true`.
-   - `{ exists: true }` evaluates to `false`.
-   - `{ ne: x }` (where `x !== null`) evaluates to `false` (a missing signal MUST NOT pass a `ne` check unless paired with `exists: false`).
-   - All other operators (`eq`, `gt`, `gte`, `lt`, `lte`, `in`, `contains`, `matches`) evaluate to `false`.
-2. **Specificity Score `specificity(pred)`**:
-   - Evaluates to `0` if the predicate returns `false`.
-   - Matched leaf predicate: `1.0`.
-   - `{ all: [...] }`: sum of children's specificity scores.
-   - `{ any: [...] }`: maximum of matched children's specificity scores.
-   - `{ not: child }`: `0.5`.
-
-### 5.3 Scenario Routing & Origin-Scoped Merging
-
-1. **Stage gate**: drop scenarios whose `stage` (default `O1`) is not declared by the implementation (§2) or not listed in their pack's `observationStages`. Then filter scenarios whose `triggers` include the triggering event type and whose `match` predicate evaluates to `true` (O2/O3 latest-value signals already expire under §2.4).
-2. Sort matched scenarios descending by:
-   1. `scenario.priority ?? 0`
-   2. `specificity(scenario.match)`
-   3. Declaration order
-3. **Hard Boundary**: If zero scenarios match, return `suppressedReason: "no_scenario_matched"` immediately. MUST NOT call the model.
-4. **Slope Fallback Exclusion**: If at least one matched scenario has `priority >= 10`, exclude any fallback scenario with `priority <= 1` from the merge set.
-5. Take the top `k = 2` scenarios. Collect their intents (filtering out `enabledByDefault === false` and intents whose `when` predicate evaluates to `false`), deduplicating by `intent.id` (keeping the higher-priority scenario's definition) and capping at 15 intents.
-6. **Origin Policy & Qualified ID Binding**: Every candidate intent retains its `originScenario` reference. When an intent wins, `prediction.scenarioId`, `prediction.qualifiedIntentId` (`<packId>@<packVersion>/<originScenarioId>#<intentId>`), and the active `GatePolicy` overrides MUST come from that intent's `originScenario`.
-
-### 5.4 Candidate Generation & Short-Circuit Rules
-
-1. **Proposed-Action Risk Scanner (`lastAgentMessage.proposedRisk`)**:
-   - Scan `lastAgentMessage.tail`:
-     - Matches destructive patterns (`rm -rf`, `git push --force`, `git reset --hard`, `git clean -f`, `DROP TABLE/DATABASE`, `TRUNCATE TABLE`, `DELETE FROM`, `kubectl delete`, `terraform destroy`, or CJK equivalents `删库|强制推送|清空数据|不可恢复|永久删除`) → `'irreversible'`.
-     - Matches external side-effect patterns (`git push`, `gh pr create/merge`, `npm/cargo publish`, `deploy`, `kubectl/terraform apply`, `docker push`, or CJK equivalents `推送到远端|推到生产|发布到|部署到|合并 PR|发送邮件`) → `'side_effect'`.
-     - Otherwise → `'reversible'`.
-   - For any intent with `dynamicRiskFromProposedAction: true` (such as `confirm` and `choose_option`), its runtime effective risk is:
-     $$\text{effectiveRisk} = \max(\text{intent.risk}, \text{lastAgentMessage.proposedRisk})$$
-2. **`RuleSource`**:
-   - **Explicit Hints (`explicit: true`)**: If `lastAgentMessage.hints` contains a slash command matching `intent.action.command` or `intent.examples`, or a `"type X"` literal matching `intent.examples`, emit `{ intentId, score: 0.92, explicit: true }`.
-   - **Structural Bonuses (`explicit: false`)**: If `optionsCount > 1`, prefill `choose_option.slots.index = preferredOptionIndex` and set bonus $b_{\text{rule}} = 0.20$; if `endsWithQuestion === true`, set bonus $b_{\text{rule}}(\text{confirm}) = 0.15$.
-3. **Short-Circuit Invariant**:
-   - If `RuleSource` emits an `explicit: true` candidate whose `effectiveRisk` is in `{'none', 'read_only', 'reversible'}` and whose required slots are all resolved deterministically, the engine MUST short-circuit and skip `ModelSource`.
-   - Otherwise, if model budget is exhausted (`budget_exhausted_no_explicit_rule`) or no `Sampler`/`ModelClient` is configured (`no_rule_hit_in_local_mode`), return `prediction: null` immediately.
-
-### 5.5 Default Model Prompt & Output Contract
-
-When `ModelSource` runs, it sends the prompt from `INTENTS.md` (or the default below) via `Sampler.sample`:
+1. **Availability.** No sampler mode offered by the host → `no_sampler`. `options.modelBudget.maxCallsPerHour` set and that many model calls were made for the session in the trailing hour (measured on the `at` of the triggering events) → `budget_exhausted`. Rules (§4.4) are unaffected by both.
+2. **Mode.** `options.samplerMode` (default `compact`) if the host offers it, else the mode the host offers.
+3. **Prompt.** Render the pack's `promptTemplate`, or this default:
 
 ```text
 [INTENT PREDICTION — do not continue the task. Do not call tools.]
-Predict the user's NEXT message in this session, choosing from a fixed catalog.
+Predict the user's NEXT message in this session by choosing from a fixed catalog.
 
 Scenario: {{scenario.description}}
-Catalog (pick from these ids):
-{{#each intents}}- {{id}}: {{description}}{{#if slots}} (slots: {{slots_spec}}){{/if}}{{#if examples}} e.g. {{examples}}{{/if}}
-{{/each}}- none: nothing above fits, or you are not confident.
+Catalog (pick one id):
+{{#each intents}}
+- {{id}}: {{description}}{{#if slots}} (slots: {{slots_spec}}){{/if}}{{#if examples}} e.g. {{examples}}{{/if}}
+{{/each}}
+- none: nothing above fits, or you are not confident.
 
 Rules:
 1. Predict what THE USER would type next, not what you think they should do.
-   THE TEST: Would the user think "I was just about to type that"?
-2. Read the last few lines of the assistant's message carefully: if it explicitly
-   offers a next step (a slash command, a direct question, or numbered options),
-   prefer the matching intent. If the assistant asks to confirm a destructive or
-   external side-effect action, return "none".
+2. Read the last lines of the assistant's message first; if it explicitly offers a next step, prefer the matching intent.
 3. Prefer "none" over a guess. A wrong suggestion costs more than no suggestion.
-4. "text" is what the user would type in locale "{{user.locale}}": one short
-   sentence matching the user's tone, no quotes, no markdown, never in the
-   assistant's voice. Leave "text" empty if intent is "none".
-5. Fill "slots" ONLY with values that literally appear in the conversation.
-6. Optionally list up to 2 plausible runner-up intents in "runnerUps" with their
-   probabilities; keep confidence + sum(runnerUps) <= 1.
+4. Fill "slots" only with values that literally appear in the conversation.
+5. "confidence" is your probability that the user's next message has this intent. You may list up to 2 runner-ups; all probabilities together must not exceed 1.
 
-{{#if compact}}Recent conversation (oldest first):
+{{#if compact}}
+Recent conversation (oldest first):
 {{transcript}}
-{{/if}}Signals: {{signals_json}}
+{{/if}}
+Signals: {{signals_json}}
 
 Reply with a single JSON object only:
-{"intent":"<id>","confidence":0.0,"slots":{},"text":"","runnerUps":[{"intent":"<id2>","confidence":0.0}]}
+{"intent":"<id>","confidence":0.0,"slots":{},"runnerUps":[{"intent":"<id2>","confidence":0.0}]}
 ```
 
-#### 5.5.1 Prompt size budgets & overflow behavior
+   Template syntax (a Mustache subset; blocks do not nest inside a block of the same kind):
+   - Scalars `{{scenario.id}}`, `{{scenario.description}}`, `{{user.locale}}`, `{{signals_json}}`, `{{transcript}}`.
+   - `{{#each intents}}…{{/each}}` repeats its body per catalog intent with `{{id}}`, `{{description}}`, `{{#if slots}}…{{slots_spec}}…{{/if}}` and `{{#if examples}}…{{examples}}…{{/if}}`. `slots_spec` lists the slots that have no `from`, as `name:type` joined by `, ` (the block is omitted when there are none); `examples` is the first two examples joined by ` | `.
+   - `{{#if compact}}…{{/if}}` is kept only in `compact` mode.
+   - A line holding only a block tag is removed together with its line break. Any other `{{…}}` renders as the empty string.
+4. **Size.** `fork`: the rendered prompt MUST be ≤ 4,000 bytes of UTF-8. `compact`: ≤ 8,000 characters. If it is too large, render again without `examples`; in `compact` mode then drop whole turns from the transcript, oldest first. Still too large → `prompt_too_large`, without calling the model.
+5. **`signals_json`.** A single-line JSON object with exactly these keys, in this order, omitting absent ones: `session.turnCount`, `lastTurn.status`, `lastTurn.toolKinds`, `lastTurn.filesChanged`, `lastTurn.failedExecs`, `lastTurn.lastExecFailed`, `lastTurn.checkRuns`, `lastTurn.lastCheckFailed`, `lastAgentMessage.endsWithQuestion`, `lastAgentMessage.optionsCount`, `lastAgentMessage.optionsPrompted`, `lastAgentMessage.proposedRisk`, `user.locale`. No free text ever enters it.
+6. **Compact transcript.** Take the last 3 completed turns, oldest first. Redact first (§7.1), truncate second. Per turn, one line each:
+   - `User: <text>` — first 500 characters, then `…`.
+   - `Tool: <name>(<command, first 60 characters>) -> <status>[ exit=<code>][: <summary>]`, at most 200 characters. With more than 6 calls keep the first 2 and the last 4 and put `Tool: … (<n> more)` between them.
+   - `Assistant: <text>` — of the final message, the **last** 1,500 characters, prefixed with `…` when cut.
 
-- `fork` mode: the appended prompt MUST be ≤ 4,000 bytes in UTF-8 (CJK text costs 3 bytes/char; measure bytes, not characters). Capping the merged catalog at 15 intents (§5.3 step 5) does **not** by itself guarantee this. If the rendered prompt exceeds the budget, shrink it in this exact order, re-measuring after each step: (1) drop per-intent `examples`; (2) drop `runnerUps` from the reply contract line; (3) drop trailing catalog intents in merge order until it fits, keeping at least the top-5. If it still does not fit, return `suppressedReason: "invalid_model_output"` without calling the model.
-- `compact` mode: the whole prompt MUST be ≤ 8,000 characters.
+   Non-final agent messages, reasoning, and `tool.result.output` are never included.
+7. **Call.** `sampler/sample` with `expectedTurnId` = the evaluated turn (§6). A host error → `sampler_error`. A result with `text` null or empty → `invalid_model_output`.
+8. **Parse.** Strip at most one enclosing ` ```json ` fence, then parse as JSON; no salvage of partial output. Not an object, or `confidence` not a finite number in [0, 1], or `slots` present and not an object → `invalid_model_output`. `intent` not a string in catalog ∪ `{"none"}` → `unknown_intent`. `runnerUps`, when an array, keeps its first two valid entries (intent in the catalog, different from `intent` and from each other, confidence finite in [0, 1]); invalid entries are ignored.
+9. `intent === "none"` → `model_none`.
 
-#### 5.5.2 Compact transcript construction
+### 4.6 Gate
 
-When `{{#if compact}}` applies, build `{{transcript}}` deterministically:
-1. Take the last 3 completed turns, oldest first. Redact first (§6), truncate second.
-2. User lines: first 500 chars (overflow → `…`). Tool lines: one line each, `<name>(<keyArg>) -> <status>[ exit=<code>]: <summary>`, ≤ 200 chars; if a turn has >6 tool calls keep the first 2 and last 4, preferring errored ones. Assistant final message: **last** 1,500 chars (overflow prefixed with `…`). Thinking/reasoning blocks and raw `tool.result.output` MUST be excluded.
-3. If the total prompt still exceeds §5.5.1, drop whole turns starting from the oldest.
+For the selected intent, in this order:
 
-#### 5.5.3 Output parsing
+1. Its session key `<packId>/<scenarioId>#<intentId>` is in cooldown (§5.2) → `in_cooldown`.
+2. Model path only: `confidence` below the effective threshold (§3.3: `sideEffectMinConfidence` for `side_effect`, else `minConfidence`) → `below_min_confidence`.
 
-`text === null`/empty → `invalid_model_output`. One enclosing ` ```json ` fence MAY be stripped, then `JSON.parse` (no regex salvage of partial JSON). Validate: `intent` ∈ catalog ∪ `{"none"}` (else `unknown_intent`); `confidence` finite in [0,1] (else `invalid_model_output`); `slots`, when present, a plain object; `runnerUps`, when present, an array whose first ≤2 valid items (intent in catalog, ≠ main intent, confidence in [0,1]) are kept and invalid items ignored.
+The model's self-reported confidence is used as is. It is not calibrated and no margin, prior or bonus is applied in this version; that is a deliberate baseline (see docs/future.md).
 
-### 5.6 Fusion, Gating, Channel Resolution & 9-Rule Filter
+### 4.7 Slots, rendering, output checks
 
-1. **Model `none` Veto**: If `ModelSource` returns `intent === "none"`, the engine MUST immediately return `suppressedReason: "model_none"`. Non-explicit structural bonuses MUST NOT override a model `none`.
-2. **Log-Linear Fusion** (all constants below are *defaults pending calibration* on replay data; implementations MAY tune them and MUST document deviations. A conforming implementation MAY instead use the **baseline profile** — `final(i) = P_model(i)` with gates applied to the raw model confidence — which is easier to attribute before calibration data exists):
-   - Given model top-1 $(i_1, c_1)$ and optional `runnerUps` $(i_2, c_2), (i_3, c_3)$, let $S = \min(0.98, c_1 + c_2 + c_3)$, $P_{\text{model}}(\text{none}) = \max(1 - c_1, 1 - S)$, and $\epsilon_0 = 0.02 / m$ for unlisted intents.
-   - $P_{\text{prior}}$ is defined over catalog ∪ `{none}`: `none` takes fixed mass 0.25 and the pack's per-intent `prior` values (which sum to 1 over the catalog) are rescaled by 0.75. Intents without a declared `prior` share the rescaled mass uniformly.
-   - Compute $\tilde{S}(i) = (P_{\text{model}}(i) + 0.15 \cdot b_{\text{rule}}(i))^{\alpha} \cdot P_{\text{prior}}(i)^{1 - \alpha}$ with $\alpha = 0.85$, normalized over $\mathcal{I} = \text{catalog} \cup \{\text{none}\}$.
-   - Compute `alternatives` (up to 2 items) using $\text{altScore}(j) = 0.65 \cdot P_{\text{model}}(j) + 0.35 \cdot P_{\text{prior}}(j) + 0.15 \cdot b_{\text{rule}}(j) \ge 0.18$.
-3. **Gate Thresholds & Channel Resolution**:
-   - Check `model_none` ($\text{final}(\text{none}) \ge \text{final}(i_{(1)})$), `max_per_session_reached`, `in_cooldown` (3 turns after a Web UI dismiss on the unversioned learning key, §6 item 5), `below_min_confidence` (default `0.60` + `backoffDelta`), `below_risk_confidence` (`none: 0.55`, `read_only: 0.60`, `reversible: 0.65`, `side_effect: 0.80`, `irreversible: 0.95`), and `below_min_margin` (default `0.15`).
-   - `displayChannel` is a **friction tier inside the SDK Web UI**, not a host channel: `quick` = single card, one explicit click loads the draft; `choice` = primary plus alternatives to pick from; `confirm` = one extra confirmation step before send/dispatch. `quickRisks` defaults to `['none', 'read_only', 'reversible']`. Intents with `effectiveRisk === 'side_effect'` or `confirm`/`choose_option` (`allowedChannels: ['choice', 'confirm']`) MUST NOT be delivered as `quick`. The core is the only place this tier is decided; the Web UI MUST NOT lower friction (e.g. render a `confirm` card as one-click send).
-4. **Atomic Slot & Action Interpolation**:
-   - Resolve slots in order: `slot.from` signal path → model `slots[k]` (must literally appear in recent conversation for `string`/`path`) → `slot.default`.
-   - Validate `required`, `type`, `enum`, `maxLength`, `pattern`, and path traversal/metacharacter bans.
-   - Interpolate `{slotName}` placeholders in both `render` templates and `action` payloads (`args`, `input`, `payload`). Any unresolved placeholder aborts the entire prediction with `slot_validation_failed`.
-5. **9-Rule Post-Filter Pipeline**: every rendered `text` (template- or model-produced) MUST pass all of these, in order; the first failing rule is the `suppressedReason`:
-   1. `filter_empty_or_meta`: trimmed text is empty, or matches `/^(?:none|null|n\/a|nothing|无|没有建议|无需回复|\(.*\)|\[.*\]|<.*>)$/iu`.
-   2. `filter_label_prefix`: matches `/^(?:suggestion|next\s*step|user|prompt|reply|建议|下一步|用户输入|回复)\s*[:：]/iu`.
-   3. `filter_ai_voice`: matches `/^(?:I\s+will|I'll|Let\s+me|Here\s+is|Here's|Sure[,!]|Certainly|我来|我将|让我|好的，我|当然，|需要我帮你)/iu`.
-   4. `filter_evaluative`: when `intent.id !== 'acknowledge'`, matches `/^(?:thanks|thank\s+you|looks\s+good|lgtm|great|awesome|nice\s+work|谢谢|多谢|太好了|不错|辛苦了)[.!！。]?$/iu`. (`acknowledge` is a reserved intent-id convention: packs MAY define such an intent for pure acknowledgements.)
-   5. `filter_multiple_sentences`: after stripping trailing terminal punctuation, the text still contains `/(?:[。！？!?]|\.\s+[A-Z])/` (dots inside paths/versions such as `v0.1`/`a.ts` do not count).
-   6. `filter_formatting`: contains `\r`/`\n`, a code fence, a Markdown heading `/^#+\s/`, or a list prefix `/^[-*]\s/`.
-   7. `filter_length`: >100 chars overall; with CJK chars (`[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]`) the effective length must be 2–30; pure Latin text must be 1–12 words (a single `/command` counts as 1).
-   8. `filter_error_text`: matches `/(?:API\s+error|rate\s+limit|status\s+code\s+\d{3}|ECONNREFUSED|ETIMEDOUT|UnhandledPromiseRejection|Traceback\s+\(most\s+recent)/iu`.
-   9. `filter_dangerous`: matches `/(?:\brm\s+-[rRf]+\b|\bgit\s+push[^\n]*--force\b|\bgit\s+reset\s+--hard\b|\bdrop\s+(?:table|database)\b|\bformat\s+[a-z]:|\bchmod\s+777\b|\bcurl\b[^\n]*\|\s*(?:sh|bash)\b)/iu` unless the intent is on a host allowlist.
-   These regexes are one layer of defense-in-depth (§6), not a proof of safety; they MUST be applied with bounded execution (patterns from packs, including `slot.pattern`, are limited to 256 chars and SHOULD be evaluated by a non-backtracking engine or with a match timeout).
+**Slots.** For each declared slot, take the first that yields a value: the `from` signal path; the model's `slots[name]`; `default`. A model-provided `string` or `path` value must occur literally in the text of the last 3 completed turns (user messages, agent messages, tool summaries). Then validate:
 
----
+- `required` and empty (`undefined`, `null`, `""`) → fail. An unresolved optional slot is simply omitted.
+- `number`: finite number; a string of digits with an optional leading `-` and an optional fraction is converted. `enum`: a string member of `enum`.
+- `path`: ≤ 120 characters, no `..`, no whitespace or control characters, none of `` ; | & $ ` > < ``.
+- `string`: ≤ `maxLength` (default 80), no line breaks or control characters.
+- `pattern`: `RegExp(pattern, "u").test(String(value))`.
 
-## 6. Privacy & Full-Duplex RPC Invariants
+**Rendering.** Pick the template for `user.locale`: exact key, then primary subtag (`zh-CN` → `zh`), then `en`, then the first key. Replace `{slot}` placeholders; do the same recursively for strings in `action.args`, `action.input`, `action.payload`. A placeholder without a resolved value fails.
 
-1. **Split Privacy Guarantee**:
-   - **Fork Mode (`mode: 'fork'`)**: Shares the host session's exact prompt prefix to hit Prompt Cache; historical message redaction is governed by the host session's own boundary, while SDK redacts the appended prompt and `signals_json`.
-   - **Compact Mode (`mode: 'compact'`)**: SDK MUST run the full redaction pipeline (PEM keys, cloud/AI API keys, Bearer tokens, URL credentials, secret assignments, and optional strict PII) on all transcript and signal strings before invoking the model.
-2. **Full-Duplex Sidecar Multiplexing**:
-   - Host-to-SDK requests use integer or `"h-*"` IDs; SDK-to-host reverse `sampler/sample` requests use `"s-*"` IDs.
-   - At most 1 in-flight prediction and 1 in-flight `sampler/sample` per session.
-   - On `turn.started`, `message.user`, `state(composer.dirty=true)`, `prediction/cancel`, or 4s timeout, SDK MUST immediately emit `sampler/cancel` (`{ sampleRequestId, sessionId }`) and `prediction/updated` (`prediction: null`).
-   - Capability negotiation happens in `initialize`: `capabilities.samplerModes` (subset of `["fork", "compact"]`; empty = no sampler) and `capabilities.dispatchModes` (subset of `["message", "command"]`; ways the host accepts user-approved input from the Web UI into a session; empty = copy-only). No display capability is negotiated: rendering happens in the SDK Web UI, which supports all friction tiers. `displayChannel` is decided **only** by the core gate (§5.6 step 3); the Web UI MUST NOT re-decide it from margin or confidence.
-3. **`signals_json` Content (allowlist, both modes)**: only these redacted scalars may appear — `session.turnCount`, `lastTurn.{status,toolKinds,failedTools,failedExecs,filesChanged}`, `lastAgentMessage.{endsWithQuestion,optionsCount,proposedRisk}`, `user.locale`, and (when fresh per §2.4) `agent.lastSubagent.status`, `agent.lastBackgroundJob.{status,exitCode}`, `agent.{pendingReviews,openTasksCount}`, `env.lastTerminalCommand.exitCode`, `env.git.{branch,dirtyCount,hasConflicts}`, `env.ide.{activeFile,diagnosticsErrors}`, `env.ambient.clipboardKind`. Free text such as terminal command lines, summaries, and clipboard previews MUST NOT be included in `signals_json` (summaries may appear, redacted and truncated, only inside the compact `transcript`). `signals_json` MUST be ≤ 1,000 chars. Each O3 observer class (terminal, git, filesystem, IDE, clipboard/window) MUST be individually disable-able by the user; disabled observers emit no events and no signals.
-4. **Runtime bounds (implementation-defined, MUST document)**: retained events per session (RECOMMENDED default: last 50 turns or 500 events, whichever is smaller); a single `tool.result.output` value retained for `slot.from` MUST be capped (RECOMMENDED 64 KiB serialized; larger values behave as absent). Duplicate `turn.completed` for an already-recorded `turnId` MUST NOT re-trigger. Cooldown/backoff state is in-memory per session by default; persistence across restarts is implementation-defined. The model budget is counted in **ModelSource calls per rolling hour** (`modelBudget.maxCallsPerHour`, default unlimited); exhaustion only skips `ModelSource` (§5.4). `PredictionResult` type `failed` is reserved for internal engine errors (exceptions, unloadable pack); every expected non-delivery is `completed` with `prediction: null` and a `suppressedReason`.
-5. **Feedback similarity & derivation**: feedback has two sources. (a) *Explicit Web UI actions*: send (`accepted`, method `send`), edit-then-send (`edited`, `edit_send`), copy (`accepted` is NOT assumed — recorded with method `copy` and counted separately from sends), dismiss (`dismissed`). (b) *Inferred by the core* (no host UI cooperation needed): when the session's next `message.user` arrives while a prediction is pending, the core computes `similarity` — the character-bigram Dice coefficient over whitespace-normalized texts, **except** that when one normalized text contains the other as a substring, similarity is 1.0 for near-match purposes (a truncated version of the suggestion is the same intent, e.g. Dice("跑一下测试验证看看", "跑一下测试") ≈ 0.67 would otherwise fall below the default 0.75 near-match threshold) — and records `ignored` (or a near-match when similarity ≥ threshold). If a new turn starts first, the outcome is `expired`. Online learning keys (cooldown, backoff, priors) use the unversioned `<packId>/<scenarioId>#<intentId>` form; the versioned `qualifiedIntentId` is telemetry-only.
-6. **Independent Web UI (the only user surface)**: the SDK ships a local Web application with two views over the same data — a *user view* (per-session suggestion cards by friction tier, its own draft editor, send/copy/dismiss actions) and an *inspector view* (suppressed records with reasons, gate values, session-scoped threshold tuning, replay/golden viewer, annotation export). Normative bounds: it MUST bind to a loopback address only, MUST require a per-launch random token, MUST ship its static assets inside the package (no CDN/network dependency), MUST display only redacted text by default, MUST NOT write to any host input/composer or listen to host keystrokes, and "send" MUST go through the host's declared `dispatchModes` as an explicit user click (with an added confirmation step for `confirm`-tier cards). Threshold tuning is session-scoped and in-memory unless the user explicitly exports a config; the inspector MUST NOT silently rewrite scenario packs. The transport between core/sidecar and the Web UI is implementation-defined, is not part of `spec/rpc.schema.json`, and MUST carry the same token. Pipeline conformance (§7) does not depend on the Web UI's visual design.
+Any failure above → `slot_validation_failed`.
+
+**Output checks**, on the rendered text and on `command` + `args` of a command action:
+
+- `output_invalid`: empty after trimming, contains a line break, or longer than 200 characters.
+- `output_dangerous`: matches the destructive pattern of §2.2.
+
+### 4.8 Prediction assembly
+
+- `risk` is the intent's declared risk. `confirmBeforeSend` is `true` exactly when `risk` is `side_effect`.
+- `alternatives` (model path only): for each kept runner-up, in order, include it when its confidence ≥ `options.altMinConfidence` (default 0.15), its risk is not `side_effect`, it is not in cooldown, and it passes §4.7. A runner-up that fails is dropped silently; it never suppresses the prediction.
+- `passThrough` mirrors the intent, on the prediction and on each alternative. When it is true on any of them, `context.excerpt` MUST be set: the redacted final agent message, cut to its last 300 characters and prefixed with `…` when cut.
+- `qualifiedIntentId` is `<packId>@<packVersion>/<scenarioId>#<intentId>`.
 
 ---
 
-## 7. Conformance Verification
+## 5. Delivery, actions and dispatch
 
-An implementation is conformant at observation stage O*n* if:
-1. All emitted payloads validate against `spec/*.schema.json` (Draft 2020-12), resolved offline (see Authority & Precedence).
-2. It loads `INTENTS.md` (equivalently `packages/pack-coding/pack.json`) and passes every `eval/golden.jsonl` case whose `config.observationStages` are within its declared stages. For **Phase 1 (O1 × A1)** that subset is 17 of the 20 current cases — all except `o2-subagent-fresh`, `o2-subagent-stale`, and `o3-env-cold-start` (the `o1-only-stage-gate` case is required: it proves out-of-phase events are ignored).
-3. Repository-level consistency passes: `python tools/validate.py`.
+### 5.1 Live predictions
 
-**`eval/golden.jsonl` format** — one JSON object per line, deterministic (no live model):
+A delivered prediction is *live* until the core sends `prediction/invalidated` for it. A session has at most one live prediction.
 
-- Pipeline case: `{"id", "kind": "pipeline", "now"?: epochMs, "config"?: {"observationStages"?: ["O1","O2","O3"], "sampler"?: "none"}, "sessionId"?, "events": [AgentEvent…], "state"?: {<key>: <value>}, "expect": {…}}`. `state` entries are applied as `state` events just before the final triggering event. `now` (default: last event's `at`, else 0) drives §2.4 freshness. With `"sampler": "none"` the pipeline runs rules only (L-Local): only explicit-rule short-circuits may produce a prediction.
-- `expect` asserts a subset: `{"type": "completed", "prediction": null, "suppressedReason": "<reason>"}` for suppressions; `{"intentId", "scenarioId", "displayChannel", "sources"}` (any subset) for predictions; or `{"scenarioId", "catalogIncludes": […], "catalogExcludes": […]}` for routing/catalog assertions (after §5.3 merging and `when` filtering, before model calls).
-- Filter case: `{"id", "kind": "filter", "text": "…", "intentId"?: "…", "expect": {"pass": true} | {"suppressedReason": "filter_…"}}` — exercises §5.6 step 5 in isolation.
+| Event | Reason |
+|---|---|
+| Any event of the session carrying a `turnId` other than the prediction's `sourceTurnId` (in practice the next turn's `turn.started`) | `turn_started` |
+| `prediction/cancel` | `cancelled` |
+| Successful send, or dismiss | `resolved` |
+
+Nothing else invalidates a prediction. In particular an evaluation that ends with `prediction: null` MUST NOT, and neither does an ignored (unknown) event. A surface shows a prediction as actionable only while it is live; it MAY keep invalidated ones visible as history.
+
+### 5.2 Surface actions
+
+A surface reports a user action with `prediction/act`; the result carries `status`.
+
+- **`copy`** → `recorded`, also for a prediction that is no longer live. A live prediction stays live.
+- **`dismiss`** → `stale` if the prediction is not live. Otherwise `recorded`; invalidated (`resolved`); the intent's session key enters cooldown: it is suppressed (`in_cooldown`) in the next `options.cooldownTurnsAfterDismiss` (default 3) evaluated turns of the session.
+- **`send`**, checked in this order:
+  1. The prediction is not live → `stale`.
+  2. `choice` / `alternative`, when present, must name an existing choice / alternative (otherwise JSON-RPC error `-32602`); the *selected item* is that one, else the primary.
+  3. The selected item is the primary or one of its choices, `confirmBeforeSend` is true and `confirmed !== true` → `confirmation_required`. (Alternatives are never `side_effect`, so they never need it.)
+  4. The host declared no usable dispatch mode → `unsupported` (the surface falls back to copy). Another send for the session is still being dispatched → `busy`.
+  5. Dispatch (§5.3). If `text` equals the selected item's rendered text, the item has a command action and the host accepts `command`, use `dispatch/command`; otherwise `dispatch/message` with `text`.
+  6. Host reply: success → `dispatched`, invalidated (`resolved`). `TURN_MISMATCH` → `stale`, invalidated (`turn_started`). `SESSION_BUSY` → `busy`, still live. Any other error → `failed`, still live.
+
+`action.type` `tool` and `custom` are metadata in this version: surfaces MAY display them; nothing executes them.
+
+A surface MUST:
+- show the full text that will be sent, and let the user edit it, before the send action;
+- for `passThrough` predictions, show `context.excerpt` (and each choice's `label`) next to the suggestion and inside any confirmation step;
+- set `confirmed: true` only after a separate confirmation step that states what will be sent to which session;
+- not preselect a choice unless `preferredChoice` is present;
+- display only what the core gives it (which is already redacted).
+
+### 5.3 Dispatch contract (host)
+
+`dispatch/message` and `dispatch/command` carry `expectedTurnId` (the prediction's `sourceTurnId`) and `predictionId`. A host that declares a dispatch mode MUST:
+
+1. Treat the input exactly as if the user had typed it: its normal approval and permission flow applies. The core adds no authority.
+2. Refuse with `SESSION_BUSY` while a turn is running. It MUST NOT queue the input.
+3. Refuse with `TURN_MISMATCH` unless `expectedTurnId` is the session's latest completed turn.
+4. Be idempotent on `predictionId`: never create a second message for one prediction.
+
+Together with §5.1 this is I5: a "yes" can only reach the question it was predicted for.
+
+### 5.4 Outcomes and telemetry
+
+The core writes telemetry (`spec/feedback.schema.json`) to a local log: one evaluation record per evaluation, and **exactly one** outcome record per delivered prediction, finalized by whichever comes first:
+
+| Outcome | Finalized when |
+|---|---|
+| `sent` | A send was dispatched. `edited` tells whether the text differed from the rendered text. |
+| `dismissed` | The user dismissed it. |
+| `passed` | The session's next `message.user` arrives. It does not matter that `turn.started` came first and already invalidated the prediction. `similarity` is recorded. |
+| `expired` | A later turn of the session completes without any `message.user`, or the prediction is cancelled, or the session is dropped. |
+
+Because the record is finalized once, the `message.user` echo of a dispatched send changes nothing. A host may start the turn before it answers the dispatch request: events that arrive while a prediction's send is still being dispatched are that send's own echo and MUST NOT finalize its outcome as `passed` or `expired`.
+
+`similarity(a, b)`: collapse whitespace and trim both strings. If both have at least 2 characters and one contains the other, it is 1. Otherwise it is the Dice coefficient over character bigrams, `2·|A ∩ B| / (|A| + |B|)` with multiset intersection. The recorded value is the maximum over the suggestion's candidate strings: the primary text, each choice text, each alternative text, and the command string of any command action.
+
+`similarity` measures wording, not intent: a user who types `/review`, or "测一下", after the suggestion "跑一下测试验证看看" scores near 0. It is therefore **recorded only**. In this version the only user feedback that changes behaviour is an explicit dismiss (§5.2). Telemetry never contains message text.
+
+---
+
+## 6. Sampler contract (host)
+
+The core borrows the host's model through `sampler/sample {sessionId, expectedTurnId, mode, prompt, maxOutputTokens?, jsonSchema?}`; no separate API key is involved. A host that declares a sampler mode MUST:
+
+1. Refuse with `SESSION_BUSY` while a turn is running, and with `TURN_MISMATCH` unless `expectedTurnId` is the session's latest completed turn.
+2. Sample once, on an ephemeral branch: nothing is persisted, shown, or added to the session's history or usage shown to the user.
+3. Execute no tool. If the model asks for one, return `text: null`.
+4. Stop when `sampler/cancel` names the request, and answer it with `SAMPLER_ABORTED`.
+5. **`compact`**: send exactly `prompt` as a single user message on the host's own model connection, with no tools, deterministic settings where the provider allows, and reasoning off or minimal.
+6. **`fork`**: append `prompt` as the next user message to an exact copy of the session's request — same system prompt, tool declarations, history and request-level settings — so the provider's prompt cache is hit. Do not change reasoning or other request settings if that would change the cache key; `maxOutputTokens` then applies to visible output only.
+
+`compact` is the baseline every sampler-capable host is expected to offer; `fork` is optional.
+
+---
+
+## 7. Privacy, security and bounds
+
+### 7.1 Redaction
+
+Before any text enters a `compact` prompt, a `context.excerpt`, a choice `label`, or anything else a surface or log receives, the core MUST replace:
+
+| Kind | Pattern (summary) | Replacement |
+|---|---|---|
+| PEM private key blocks | `-----BEGIN … PRIVATE KEY-----` … `-----END … PRIVATE KEY-----` | `[REDACTED_PRIVATE_KEY]` |
+| Provider keys | `sk-…`, `gh[pousr]_…`, `github_pat_…`, `xox[baprs]-…`, `AKIA…`, `AIza…`, `hf_…` (≥ 16 further characters) | `[REDACTED_API_KEY]` |
+| Authorization values | `Bearer`/`Basic` followed by ≥ 16 token characters | `[REDACTED_TOKEN]` |
+| URL credentials | `scheme://user:password@` | `[REDACTED_AUTH]` |
+| Secret assignments | `api_key`/`secret`/`token`/`password`/`access_key` `=` or `:` a value of ≥ 8 characters | `[REDACTED_SECRET]` |
+| E-mail addresses and phone numbers | only with `options.redact = "strict"` | `[REDACTED_PII]` |
+
+This is pattern matching and misses unprefixed secrets. In `fork` mode the session's history is already at the same provider under the host's own privacy boundary; the core redacts only what it appends.
+
+### 7.2 Data minimisation
+
+Only the current session's events are used. `tool.result.output` is read only by `slot.from` and is never sent to a model. `signals_json` contains only the enumerated keys of §4.5. Telemetry contains no message text.
+
+### 7.3 Surfaces on a network transport
+
+A surface reached over anything but the host's own connection MUST be served on a loopback address only, MUST require a per-launch random token on every request and on `surface/attach`, MUST validate `Origin`/`Host`, and MUST ship its assets with the package (no network dependency). The bundled surface MUST NOT write to, or read keystrokes from, any host input control.
+
+### 7.4 Layers against a hostile transcript
+
+Tool output and fetched pages can steer a model. What stands between that and the user's send button: the closed catalog (I2), template-only text (I3), slot validation with the literal-occurrence rule (§4.7), the proposed-risk exclusion of pass-through intents (§4.3), the output checks (§4.7), the confirmation step for `side_effect` (§5.2), and turn-pinned explicit send (§5.3). None of them alone is a guarantee.
+
+### 7.5 Bounds
+
+Implementation-defined, MUST be documented: events retained per session (RECOMMENDED: the last 50 turns or 500 events, whichever is smaller) and the number of sessions kept (least-recently-used eviction; an evicted session's open outcome is `expired`). Cooldown and delivery counts are in-memory per session. When the core shuts down, every open outcome is finalized as `expired`.
+
+---
+
+## 8. Protocol
+
+JSON-RPC 2.0. Between a host and an out-of-process core the transport is newline-delimited JSON over stdio. A surface uses any transport that carries the same messages in both directions. The bundled one is plain HTTP on loopback (§7.3): requests are `POST`ed as JSON-RPC, notifications arrive as a Server-Sent Events stream. Message shapes are in `spec/rpc.schema.json`.
+
+| From → to | Method | Kind | Purpose |
+|---|---|---|---|
+| Host → Core | `initialize` | request | Capabilities (`interactive`, `samplerModes`, `dispatchModes`, `surface`), packs, `policy`, `options`. The result MAY carry `surfaceUrl`, which the host SHOULD show to the user. |
+| Host → Core | `session/observe` | notification | `{sessionId, events}`. |
+| Host or Surface → Core | `prediction/cancel` | notification | Abort the evaluation and invalidate the live prediction of a session. |
+| Core → Host | `sampler/sample` | request | §6. |
+| Core → Host | `sampler/cancel` | notification | `{sampleRequestId, sessionId}`. |
+| Core → Host | `dispatch/message`, `dispatch/command` | request | §5.3. |
+| Surface → Core | `surface/attach` | request | Start receiving predictions; returns the sessions and their live predictions. |
+| Core → Surface | `prediction/updated` | notification | One evaluation result (§4.1). Plain surfaces receive delivered predictions; surfaces attached with `inspector: true` also receive suppressed results and `trace`. |
+| Core → Surface | `prediction/invalidated` | notification | §5.1. |
+| Surface → Core | `prediction/act` | request | §5.2. |
+
+A host that declares `capabilities.surface` is treated as an attached surface on its own connection.
+
+Ids of core-originated requests start with `s-`. Error codes beyond the JSON-RPC standard ones: `-32001 SESSION_BUSY`, `-32002 TURN_MISMATCH`, `-32003 SAMPLER_ABORTED`, `-32004 UNAUTHORIZED`. A host MUST keep reading its input while it waits: reverse requests arrive at any time.
+
+---
+
+## 9. Conformance
+
+An implementation conforms to v0.5 when:
+
+1. Every message it emits validates against `spec/*.schema.json`.
+2. It loads `INTENTS.md` and the packs under `examples/` and `eval/fixtures/`, and passes every case in `eval/golden.jsonl`.
+3. `python tools/validate.py` passes on the repository.
+
+### 9.1 `eval/golden.jsonl`
+
+One JSON object per line; no live model is involved. Common fields: `id`, `kind`, optional `pack` (path of a `*.intents.md` relative to the repository root; default `INTENTS.md`), optional `sessionId`, optional `config`:
+
+| `config` key | Meaning |
+|---|---|
+| `sampler` | `"none"` (default): the host offers no sampler. Otherwise an object: `mode` (`compact` default, or `fork`) plus one of `reply` (the raw model text returned for every call), `replies` (a list consumed one per call), `replyNull: true`, `error: <code>`, `timeout: true`, `pending: true` (the call never returns). |
+| `interactive`, `dispatchModes` | Host capabilities. Defaults `true`, `[]`. |
+| `policy`, `options` | As in `initialize`. |
+
+Timing is logical: the settle delay is skipped and `timeout: true` stands for the timeout elapsing.
+
+**`kind: "pipeline"`** — `events` are observed in order; `state` entries, if any, are applied as `state` events just before the last event. `expect` describes the evaluation triggered by the last event and may combine:
+
+- `suppressedReason` — the evaluation ends with `prediction: null` and this reason;
+- `prediction` — a prediction is delivered and matches this subset (objects match recursively by subset; scalars and arrays by equality; a top-level key given as `null` asserts that the prediction does not have it). The shorthands `intentId`, `alternativeIds`, `choiceTexts`, `choiceLabels` and `contextIncludes` stand for `intent.id`, the alternatives' ids, the choices' texts and labels, and a substring of `context.excerpt`;
+- `signals` — these signal paths have these values (`null` asserts absence);
+- `catalog` — `{scenarioId, includes, excludes}` after §4.3;
+- `prompt` — `{includes, excludes, maxBytes}` on the rendered prompt.
+
+**`kind: "session"`** — `steps` run in order. A step holds one of `observe` (events), `cancel: true` (a `prediction/cancel`), or `act` (`prediction/act` params without `predictionId`; it addresses the session's most recently delivered prediction; `hostReply: {"error": <code>}` makes the host refuse the dispatch), plus an optional `expect` about what that step produced:
+
+- `suppressedReason`, `prediction` — as above, for the evaluation completed in this step; `noEvaluation: true` asserts none completed;
+- `invalidated` — a `prediction/invalidated` with this reason was sent; `noInvalidation: true` asserts none was;
+- `samplerCancelled: true` — a `sampler/cancel` was sent;
+- `status` — the result status of `act`; `error` — `act` failed with this JSON-RPC error code instead;
+- `dispatch` — `null` asserts nothing was dispatched; an object is a subset of the dispatch request (`method` plus its params; the string `$predictionId` stands for the id of the addressed prediction);
+- `outcome` — an outcome record matching this subset was finalized; `noOutcome: true` asserts none was.
+
+---
+
+## Appendix A — Suppression reasons
+
+| Stage | Reasons |
+|---|---|
+| Guards (§4.2) | `disabled`, `non_interactive`, `pending_interaction`, `interrupted_turn`, `failed_turn_unhandled`, `mode_blocked`, `incognito`, `max_per_session_reached` |
+| Routing (§4.3) | `no_scenario_matched`, `empty_catalog` |
+| Model availability and call (§4.1, §4.5) | `no_sampler`, `budget_exhausted`, `prompt_too_large`, `sampler_error`, `timeout`, `aborted` |
+| Model output (§4.5) | `invalid_model_output`, `unknown_intent`, `model_none` |
+| Gate (§4.6) | `in_cooldown`, `below_min_confidence` |
+| Rendering (§4.7) | `slot_validation_failed`, `output_invalid`, `output_dangerous` |
+
+## Appendix B — Defaults
+
+| Name | Default | Set in |
+|---|---|---|
+| `minConfidence` | 0.60 | `policy` (host, pack, scenario) |
+| `sideEffectMinConfidence` | 0.80 | `policy` (host, pack, scenario) |
+| `altMinConfidence` | 0.15 | `options` |
+| `cooldownTurnsAfterDismiss` | 3 | `options` |
+| `maxPerSession` | unlimited | `options` |
+| `modelBudget.maxCallsPerHour` | unlimited | `options` |
+| `blockedModes` | `["plan"]` | `options` |
+| `samplerMode` | `compact` | `options` |
+| `settleMs` / `timeoutMs` | 150 / 4000 | `options` |
+| `redact` | `default` | `options` |
