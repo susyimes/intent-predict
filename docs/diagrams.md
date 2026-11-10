@@ -21,9 +21,13 @@ O1 单会话  Phase 1（当前，只做这一格）
 
 ## 1. Phase 1（O1 × A1）：当前精修范围
 
+独立 WebUI 界面示意图（概念图，非规范；信息架构以本文与 [design.md](design.md) §10 为准，视觉随实现迭代）：
+
+![intent-predict 独立 WebUI 界面示意图（Phase 1）](images/webui-phase1-mockup.png)
+
 ### 1.1 架构主图：一条建议从哪来、在哪被挡下
 
-读图顺序：左边是宿主边界（进来只有 O1 事件，出去只有「填入式」建议）；中间核心从上到下是一条单向流水线，每一级都有虚线通向最下方红框——任何一级不通过都不给建议。
+读图顺序：进来只有 O1 事件，出去只有 SDK 独立 WebUI 里的卡片——宿主输入框整张图里不存在。中间核心从上到下是一条单向流水线，每一级都有虚线通向最下方红框——任何一级不通过都不给建议。
 
 ```mermaid
 flowchart TB
@@ -39,12 +43,12 @@ flowchart TB
     direction TB
     LD["契约加载 INTENTS.md<br/>仅启用 stage=O1 场景"]:::now
     SS["会话存储 + 信号提取<br/>文件数 / 失败数<br/>尾部问句 / 选项<br/>hints / locale"]:::now
-    GD["守卫 + 风险扫描<br/>输入框非空、待确认<br/>plan、incognito 直接退出<br/>proposedRisk 评提议风险"]:::now
+    GD["守卫 + 风险扫描<br/>待确认交互、plan<br/>incognito 直接退出<br/>proposedRisk 评提议风险"]:::now
     RT["有限场景路由<br/>match 谓词 + 优先级<br/>+ 特异度排序<br/>专用场景 → 兜底场景"]:::now
     CD{"候选从哪来？"}:::now
     RL["规则短路<br/>仅 explicit 提示<br/>斜杠命令<br/>输入引导"]:::now
     MD["模型约束分类<br/>目录内选一<br/>或 none<br/>top-1 + runnerUps"]:::now
-    GT["Per-Intent 门控<br/>来源场景策略<br/>阈值 / 分差<br/>风险 / 冷却<br/>通道三选一裁决"]:::now
+    GT["Per-Intent 门控<br/>来源场景策略<br/>阈值 / 分差<br/>风险 / 冷却<br/>摩擦三选一裁决"]:::now
     RD["渲染交付<br/>槽位严格校验<br/>模板 · Action 插值<br/>9 条后置过滤"]:::now
     PD["Prediction<br/>意图 + 槽位<br/>+ 建议文本"]:::now
     NX["completed + null<br/>SuppressedReason<br/>fail-closed<br/>宁可没有"]:::stop
@@ -62,7 +66,7 @@ flowchart TB
   end
 
   SM["宿主零配置 Sampler<br/>sampler/sample<br/>单轮无工具 · 温度 0<br/>cancel 一到立停"]:::host
-  UI["宿主输入框 UI（唯一输出面）<br/>Ghost Text / Chips / 确认按钮<br/>Tab 只填入 · 绝不发送"]:::host
+  UI["SDK 独立 WebUI（唯一人机界面）<br/>建议卡片流 + 草稿编辑框<br/>点发送才发 · 永不碰宿主输入框"]:::now
   FB[("本地反馈 JSONL<br/>接受 / 编辑<br/>忽略 / 关闭<br/>+ similarity<br/>在线先验 → Phase 2")]:::now
   AG["A2 推测预执行<br/>A3 委托执行<br/>不在 Phase 1"]:::future
 
@@ -70,7 +74,7 @@ flowchart TB
   XB -.->|"stage 门控"| SS
   MD <-->|"sample / cancel"| SM
   PD -->|"prediction/updated"| UI
-  NX -.->|"撤下残留建议"| UI
+  NX -.->|"卡片标过期"| UI
   UI -->|"Feedback"| FB
   FB -.->|"冷却 / 退避"| GT
 ```
@@ -79,7 +83,7 @@ flowchart TB
 
 1. **输入只有一扇门**：O1 事件进来，O2/O3 事件在门上就被 stage 门控挡下，不产生任何信号。
 2. **每条路都有红框出口**：守卫、路由、模型、门控、渲染五级里任何一级出问题，都归入同一个抑制汇点并附标准 `SuppressedReason`，便于回放时逐条计数。
-3. **输出只有一个面**：`Prediction` 只能落到输入框的三种低摩擦形态；A2/A3 在图上是虚线孤岛，Phase 1 没有任何边连过去。
+3. **输出只有一个面、且是自家面**：`Prediction` 只能落到独立 WebUI 的卡片流里，图上没有一条边通向宿主输入框；A2/A3 是虚线孤岛，Phase 1 没有任何边连过去。
 
 ### 1.2 时序图：一次完整的建议（含取消）
 
@@ -89,55 +93,56 @@ sequenceDiagram
   participant H as 宿主 Agent
   participant P as intent-predict（Phase 1）
   participant M as 宿主 Sampler
-  participant UI as 输入框
+  participant W as 独立 WebUI
 
   H->>P: session/observe（本轮 O1 事件 + turn.completed）
   P->>P: settle 150ms 收齐尾部事件 → 守卫 → 场景路由
   alt 规则 explicit 命中（低风险、槽位已齐）
-    P-->>H: prediction/updated（短路，不调模型）
+    P-->>W: prediction/updated（短路，不调模型）
   else 需要模型分类
     P->>M: sampler/sample（id=s-1，封闭目录提示词）
-    alt 采样期间用户开始打字 / 新一轮开始
-      U->>UI: 输入字符
-      H->>P: session/observe（composer.dirty=true）
+    alt 采样期间用户已发新消息 / 新一轮开始
+      H->>P: session/observe（message.user / turn.started）
       P->>M: sampler/cancel（s-1）
-      P-->>H: prediction/updated（null，aborted）
-      H->>UI: 立即撤下建议
+      P-->>W: prediction/updated（null，aborted）
     else 采样正常返回
       M-->>P: intent + confidence + runnerUps + slots
-      P->>P: 门控与通道裁决 → 槽位校验 → 9 条过滤
-      P-->>H: prediction/updated（ghost_text / chips / action_button）
+      P->>P: 门控与摩擦裁决 → 槽位校验 → 9 条过滤
+      P-->>W: prediction/updated（quick / choice / confirm）
     end
   end
-  H->>H: 展示前复查 sourceTurnId 未过期、输入框仍为空
-  H->>UI: 300ms 后按通道渲染
-  alt 用户按 Tab
-    UI-->>P: Feedback accepted（或发送前修改记 edited）
-  else 用户直接打自己的话并发送
-    UI-->>P: Feedback ignored + 本地计算的 similarity
-  else 用户按 Esc
-    UI-->>P: Feedback dismissed → 该意图进入冷却
+  W->>W: 渲染前比对 sourceTurnId，过期不画
+  W->>U: 会话卡片流入（不打扰宿主界面）
+  alt 用户点卡片改进草稿发送（或原样发送）
+    U->>W: 编辑草稿 → 点发送（confirm 级再确认）
+    W->>H: dispatch 把草稿作下一条用户消息
+    W-->>P: Feedback send / edit_send
+  else 用户复制卡片文本或关闭卡片
+    W-->>P: Feedback copy / dismissed（dismissed 进冷却）
+  else 用户不理卡片，自行在宿主发下一句
+    H->>P: message.user，核心推断 ignored + similarity
   end
 ```
 
-### 1.3 UI 控制器状态图（A1 的全部交互）
+### 1.3 WebUI 卡片生命周期图（A1 的全部交互）
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Idle
-  Idle --> PendingShow: 收到 Prediction，起 300ms 计时
-  PendingShow --> Idle: 计时内打字/新一轮<br/>未展示，不记反馈
-  PendingShow --> Visible: 300ms 到且输入框仍为空
-  Visible --> AcceptedLock: Tab / 点 Chip<br/>只填入，100ms 防重
-  AcceptedLock --> PostAcceptTracking: 解锁编辑
-  PostAcceptTracking --> Idle: 用户发送<br/>未改 accepted / 改过 edited
-  Visible --> Idle: Esc → dismissed + 冷却
-  Visible --> IgnoredTracking: 直接打字，建议立刻隐藏
-  IgnoredTracking --> Idle: 用户发送 → ignored + similarity
-  Visible --> Idle: 新一轮开始 → expired
+  [*] --> Live: 收到 Prediction 渲染卡片
+  Live --> Draft: 点卡片载入草稿框
+  Draft --> Sent: 点发送（confirm 级加一步确认）<br/>accepted / edited
+  Draft --> Copied: 点复制
+  Live --> Dismissed: 关卡 / 标没用 → 冷却
+  Live --> Expired: 收到 completed + null<br/>或新一轮开始
+  Draft --> Expired: 草稿未发而源 turn 过期<br/>保留草稿但发送前明示
+  Sent --> [*]
+  Copied --> [*]
+  Dismissed --> [*]
+  Expired --> [*]
 ```
 
-状态机只管「显与隐、何时记什么反馈」；通道已由核心在 `displayChannel` 里定好，UI 不重新裁决（[SPEC.md](../SPEC.md) §6 第 2 项）。
+生命周期只活在 WebUI 与核心之间：过期由核心的 `completed + null` 和 `sourceTurnId` 比对驱动，与用户此刻在宿主输入框打什么字无关（顶多是他真发了消息后，核心据此推断一条 ignored 反馈）。摩擦分级已由核心在 `displayChannel` 里定好，WebUI 不重新裁决、更不许降低摩擦（[SPEC.md](../SPEC.md) §5.6）。
+
 
 ---
 
@@ -176,7 +181,7 @@ flowchart LR
   classDef prev fill:#f7f7f7,stroke:#9aa0a6,color:#5f6368
   CORE["Phase 1–3 核心（不变）<br/>Prediction 开始附带<br/>只读 prepPlan"]:::prev
   NEW["新增后台动作（宿主执行）<br/>建议可见期间预跑只读检查<br/>预取文件与上下文<br/>用户一打字立刻全停"]:::now
-  OUT["用户体验变化<br/>按 Tab 后接近秒回<br/>仍不自动发送"]:::prev
+  OUT["用户体验变化<br/>在 WebUI 点发送后<br/>接近秒回 · 仍不自动发送"]:::prev
   CORE --> NEW --> OUT
 ```
 

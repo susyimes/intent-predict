@@ -153,7 +153,7 @@ flowchart TB
 
   subgraph Agency["3. 行动力三阶段演进（Agency Stages: A1 → A2 → A3）"]
     direction LR
-    A1["Stage A1：纯建议输出（默认）<br/>Ghost Text / 多候选 Chips / 确认按钮"]
+    A1["Stage A1：纯建议输出（默认）<br/>独立 WebUI 建议卡<br/>quick / choice / confirm 三级摩擦"]
     A2["Stage A2：推测预执行（可选）<br/>后台静默预跑只读检查/预取上下文 (prepPlan)"]
     A3["Stage A3：建议 + 委托执行（可选）<br/>用户一键确认 → 派发给目标 Agent 执行"]
     A1 -.->|"渐进升级"| A2 -.->|"渐进升级"| A3
@@ -169,15 +169,15 @@ flowchart TB
 
 | 阶段 | 观察边界 | 采集事件 | 典型场景示例 |
 |---|---|---|---|
-| **Stage O1：观察单一会话**（`single_session`，基线必选） | 当前对话 thread 内部 | `turn.*`、`message.*`、`tool.*`、`artifact`、`state` | Agent 改完代码未跑测试 → 建议「跑一下测试验证看看」；Agent 提问 → Chips 建议确认或比较利弊 |
+| **Stage O1：观察单一会话**（`single_session`，基线必选） | 当前对话 thread 内部 | `turn.*`、`message.*`、`tool.*`、`artifact`、`state` | Agent 改完代码未跑测试 → WebUI 出卡「跑一下测试验证看看」；Agent 提问 → choice 卡建议确认或比较利弊 |
 | **Stage O2：观察整个 Agent**（`agent_wide`，跨会话/子任务） | 宿主 Agent 全局运行时（子 Agent、后台进程、任务看板、多会话切换） | O1 全部 + `agent.subagent_completed`、`agent.background_job`、`agent.task_updated`、`agent.session_switched` | 派发的子 Agent 刚跑完研究任务返回 → 建议「结合子任务的结果继续处理」；后台长耗时构建结束 → 建议验证产出 |
 | **Stage O3：观察全局环境**（`global_ambient`，跨工具/桌面） | 宿主之外的终端、Git 工作区、文件系统、IDE 焦点与桌面剪贴板 | O1+O2 全部 + `env.terminal_command`、`env.git_status`、`env.file_changed`、`env.ide_context`、`env.ambient_context` | 用户自己在终端跑命令挂了或复制了一段报错栈 → 建议「帮我看看刚才终端命令为什么报错并修一下」 |
 
 ### 5.2 行动力三阶段（Agency Stages：A1 → A2 → A3）
 
-- **Stage A1（`suggest_only`，默认）**：只输出结构化预测与建议文本，按安全等级投递到宿主 UI（低风险走 `ghost_text`，确认类与外部副作用强制走 `chips` 或 `action_button`），绝不自动执行。
-- **Stage A2（`speculative_prep`，第二阶段）**：预测产出的同时附带只读预备计划 `prepPlan`（如预取报错文件、静默跑 `git diff` 或 AST 检查），等用户按 Tab 确认时直接秒回。
-- **Stage A3（`propose_and_dispatch`，第三阶段）**：用户在浮现的意图卡片上点击确认后，直接触发 `action` 派发给目标 Agent 或工具链完成闭环。
+- **Stage A1（`suggest_only`，默认）**：只输出结构化预测与建议文本，在 SDK 独立 WebUI 里按摩擦分级呈现（低风险 `quick` 一键载入草稿，确认类与外部副作用强制 `choice` 挑选或 `confirm` 确认一步），用户明确点「发给 Agent」或复制才离开 SDK，绝不自动发送或执行。
+- **Stage A2（`speculative_prep`，第二阶段）**：预测产出的同时附带只读预备计划 `prepPlan`（如预取报错文件、静默跑 `git diff` 或 AST 检查），卡片还挂在 WebUI 时就把结果备好，用户点发送后近乎秒回；用户关卡或自己开始下一轮立即中止预备。
+- **Stage A3（`propose_and_dispatch`，第三阶段）**：用户在 WebUI 意图卡片上显式确认后，触发 `action` 派发给目标 Agent 或工具链完成闭环。三阶段共用同一个独立 WebUI，宿主输入框自始至终不参与（决策 D10）。
 
 ### 5.3 Symphony 式的交付与定制契约（`SPEC.md` + `INTENTS.md`）
 
@@ -208,7 +208,7 @@ sequenceDiagram
     else 采样正常返回
       M-->>P: {intent, confidence, runnerUps, slots, text}
       P->>P: 融合 → Per-Intent 门控与通道裁决 → 槽位/Action 原子插值 → 9 条过滤
-      P-->>H: prediction/updated (displayChannel="ghost_text"|"chips"|"action_button")
+      P-->>H: prediction/updated (displayChannel="quick"|"choice"|"confirm")
     end
   end
   H->>UI: 校验 sourceTurnId 未过期且输入框为空，300ms 后按通道渲染
@@ -372,7 +372,7 @@ export interface IntentSpec {
   render?: RenderSpec;           // 文本的生成方式
   risk: Risk;                    // 基础风险等级
   dynamicRiskFromProposedAction?: boolean; // 为 true 时（如 confirm/choose_option），有效风险取 max(risk, lastAgentMessage.proposedRisk)
-  allowedChannels?: Array<'ghost_text' | 'chips' | 'action_button'>; // 显式限定允许展示的 UI 通道
+  allowedChannels?: Array<'quick' | 'choice' | 'confirm'>; // 显式限定允许展示的 UI 通道
   action?: ActionDescriptor;     // 宿主可以执行的确定性动作
   prior?: number;                // 场景内的默认先验 [0, 1]。不填时平均分配
   enabledByDefault?: boolean;    // 默认 true；为 false 的意图需宿主在加载时按 id 显式开启才进入目录
@@ -513,7 +513,7 @@ v0.1 内置的信号：
      - **命中 `irreversible`**：匹配 `/(?:\brm\s+-[rRf]+\b|\bgit\s+push\s+[^\n]*--force\b|\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-[fd]+|\bdrop\s+(?:table|database|schema)\b|\btruncate\s+table\b|\bdelete\s+from\b|\bkubectl\s+delete\b|\bterraform\s+destroy\b|删库|强制推送|清空数据|不可恢复|永久删除)/iu`。
      - **命中 `side_effect`**：匹配 `/(?:\bgit\s+push\b|\bgh\s+pr\s+(?:create|merge)\b|\bnpm\s+publish\b|\bcargo\s+publish\b|\bdeploy\b|\bkubectl\s+apply\b|\bterraform\s+apply\b|\bdocker\s+push\b|推送到远端|推到生产|发布到|部署到|合并\s*PR|发送邮件)/iu`。
      - **默认**：未命中上述模式时返回 `'reversible'`。
-   - 任何声明了 `dynamicRiskFromProposedAction: true` 的意图（如 `confirm`、`choose_option`），其运行时的**有效风险等级**强制升级为 `effectiveRisk = max(intent.risk, lastAgentMessage.proposedRisk)`，且在内置 coding 包中默认通过 `when` 谓词直接排除 `proposedRisk ∈ {'side_effect', 'irreversible'}` 的自动确认候选，并限定 `allowedChannels: ['chips', 'action_button']`（禁止进入单键 Tab 接受的 ghost text）。
+   - 任何声明了 `dynamicRiskFromProposedAction: true` 的意图（如 `confirm`、`choose_option`），其运行时的**有效风险等级**强制升级为 `effectiveRisk = max(intent.risk, lastAgentMessage.proposedRisk)`，且在内置 coding 包中默认通过 `when` 谓词直接排除 `proposedRisk ∈ {'side_effect', 'irreversible'}` 的自动确认候选，并限定 `allowedChannels: ['choice', 'confirm']`（禁止进入单击即用的 quick 分级）。
 6. **用户语言推断 `user.locale`**：
    - 拼接当前会话最近最多 3 条 `message.user.text`（剥离代码块与 URL）。
    - 统计 Unicode 字符占比：假名 `[\u3040-\u30ff]` > 5% → `'ja'`；谚文 `[\uac00-\ud7af]` > 5% → `'ko'`；CJK 表意文字 `[\u4e00-\u9fff]` ≥ 10%（或 CJK 字符数 ≥ 2 且拉丁字母词数 < 5）→ `'zh-CN'`；其余默认 → `'en'`。
@@ -531,7 +531,7 @@ export interface Prediction {
   packVersion: string;
   scenarioId: string;
   qualifiedIntentId: string;     // 全局唯一归档键：'<packId>@<packVersion>/<scenarioId>#<intentId>'
-  displayChannel: 'ghost_text' | 'chips' | 'action_button'; // 经门控裁定后的推荐展示通道
+  displayChannel: 'quick' | 'choice' | 'confirm'; // 经门控裁定后的推荐展示通道
   intent: { id: string; confidence: number; slots: Record<string, unknown> };
   text: string;                  // 渲染好的建议，使用用户的语言和说话风格
   locale: string;
@@ -557,7 +557,7 @@ export type SuppressedReason =
   | 'budget_exhausted_no_explicit_rule' | 'incognito'
   | 'no_scenario_matched' | 'empty_catalog' | 'no_rule_hit_in_local_mode'
   | 'model_none' | 'below_min_confidence' | 'below_risk_confidence' | 'below_min_margin'
-  | 'in_cooldown' | 'max_per_session_reached' | 'risk_disallowed_for_ghost_text'
+  | 'in_cooldown' | 'max_per_session_reached'
   | 'invalid_model_output' | 'unknown_intent' | 'slot_validation_failed'
   | 'filter_empty_or_meta' | 'filter_label_prefix' | 'filter_ai_voice' | 'filter_evaluative'
   | 'filter_multiple_sentences' | 'filter_formatting' | 'filter_length'
@@ -579,9 +579,9 @@ export interface Feedback {
   sessionId?: string;
   sourceTurnId?: string;
   outcome: 'accepted' | 'edited' | 'ignored' | 'dismissed' | 'expired';
-  method?: 'tab' | 'right' | 'enter' | 'click' | 'shortcut';
-  selectedIntentId?: string;     // 当用户在 chips 模式下选了备选意图时填写
-  similarity?: number;           // [0, 1]，在宿主或 UI 控制器本地计算的编辑相似度
+  method?: 'click' | 'copy' | 'send' | 'edit_send' | 'shortcut';  // 一律是 WebUI 内的动作，无宿主按键
+  selectedIntentId?: string;     // 当用户在 choice 呈现下选了备选意图时填写
+  similarity?: number;           // [0, 1]，由核心在下一条 message.user 到达时计算（推断反馈），不依赖宿主 UI
   finalText?: string;            // 用户最终发出的内容。默认不采集，需要显式开启 collectFinalText
   wasFocusedWhenShown?: boolean;
   msSinceShown?: number;
@@ -662,7 +662,7 @@ export interface Candidate {
 | 来源 | 阶段 | 说明 |
 |---|---|---|
 | **RuleSource** | Phase 1 | 始终启用，本地执行，耗时 < 5ms。严格区分两类产出：<br>① **显式提示候选（`explicit: true`）**：当 `lastAgentMessage.hints` 含 `{ kind: 'slash', value: '/review' }` 且匹配某意图的 `action.command` / `examples`，或含 `{ kind: 'type_literal', value: X }` 且匹配某意图的 `examples` 时，产出 `score: 0.92, explicit: true`。此类候选直接短路模型。<br>② **结构化槽位预填与结构加分（`explicit: false`）**：当 `optionsCount > 1` 时为 `choose_option` 预填确定性槽位 `index = preferredOptionIndex` 并赋予结构加分 `b_rule = 0.20`；当 `endsWithQuestion === true` 时为 `confirm` 赋予结构加分 `b_rule = 0.15`。**非显式规则绝不伪造高置信度独立候选，避免与模型 `none` 打架** |
-| **ModelSource** | Phase 1 | 约束分类。**优先走宿主的 `Sampler`（L2 分叉或 L1 宿主零配置模型委托）**，其次走独立配置的 `ModelClient`（L0）。<br>关闭 thinking/reasoning，温度设为 0，最多输出约 120 个 token。<br>要求模型返回首选意图 `intent`、置信度 `confidence` 以及最多 2 个备选 `runnerUps`（见 §7.5），为 chips 模式提供真实分布 |
+| **ModelSource** | Phase 1 | 约束分类。**优先走宿主的 `Sampler`（L2 分叉或 L1 宿主零配置模型委托）**，其次走独立配置的 `ModelClient`（L0）。<br>关闭 thinking/reasoning，温度设为 0，最多输出约 120 个 token。<br>要求模型返回首选意图 `intent`、置信度 `confidence` 以及最多 2 个备选 `runnerUps`（见 §7.5），为 choice 模式提供真实分布 |
 | **PriorSource** | Phase 2 | 计算狄利克雷平滑转移概率 `P(i \| scenario, lastIntent) = (c(s, i_prev, i) + α₀·p₀(i)) / (Σⱼ c(s, i_prev, j) + α₀)`，其中 `α₀ = 5`，`p₀(i)` 为场景包声明的默认先验（未声明时均分，并为 `none` 预留 `p₀(none) = 0.25`）。数据来自本地反馈日志 |
 | **EmbeddingSource** | Phase 2 | 以"agent 消息末尾 + 信号摘要"为查询，在本地已标注的样例上做余弦近邻检索。不需要调用 LLM |
 
@@ -729,7 +729,7 @@ Reply with a single JSON object only:
    - `slots` 若存在必须是纯对象（plain object）。
    - `runnerUps` 若存在必须是数组（最多取前 2 项），每项的 `intent` 必须在 `catalogIds` 内且不等于主 `intent`，`confidence` 在 `[0, 1]` 内；非法项直接忽略。
 
-### 7.6 融合算法（消除规则与模型冲突，支持多候选 Chips）
+### 7.6 融合算法（消除规则与模型冲突，支持多候选 choice 呈现）
 
 设候选目录加上 `'none'` 构成集合 $\mathcal{I} = \{i_1, \dots, i_m, \text{none}\}$。
 
@@ -744,18 +744,18 @@ Reply with a single JSON object only:
      - 结合场景先验 $P_{\text{prior}}(i)$ 与非显式规则结构加分 $b_{\text{rule}}(i) \in [0, 0.20]$（见 §7.4）：
        $$\tilde{S}(i) = \left(P_{\text{model}}(i) + 0.15 \cdot b_{\text{rule}}(i)\right)^{\alpha} \cdot P_{\text{prior}}(i)^{1 - \alpha}, \quad \text{final}(i) = \frac{\tilde{S}(i)}{\sum_{k \in \mathcal{I}} \tilde{S}(k)}$$
        其中默认 $\alpha = 0.85$。
-   - **备选 `alternatives` 生成（确保 Chips 模式可用）**：
+   - **备选 `alternatives` 生成（确保 choice 呈现可用）**：
      - 备选意图按 $\text{altScore}(j) = 0.65 \cdot P_{\text{model}}(j) + 0.35 \cdot P_{\text{prior}}(j) + 0.15 \cdot b_{\text{rule}}(j)$（$j \neq i_1, j \neq \text{none}$）降序排列。
-     - 只要主意图 $i_1$ 通过门控，且备选意图 $j$ 满足未冷却、有效风险非 `irreversible`、且 $\text{altScore}(j) \ge 0.18$，即可入选 `alternatives`（最多 2 项，使用各自模板确定性渲染文本）。这样即使模型只输出了 top-1，高先验或带规则加分的第二顺位意图（如 `after_edit` 下的 `review_diff`）依然能稳定进入 Chips。
+     - 只要主意图 $i_1$ 通过门控，且备选意图 $j$ 满足未冷却、有效风险非 `irreversible`、且 $\text{altScore}(j) \ge 0.18$，即可入选 `alternatives`（最多 2 项，使用各自模板确定性渲染文本）。这样即使模型只输出了 top-1，高先验或带规则加分的第二顺位意图（如 `after_edit` 下的 `review_diff`）依然能稳定进 choice 呈现。
 
-### 7.7 门控、风险对齐与展示通道裁决
+### 7.7 门控、风险对齐与摩擦分级裁决
 
 ```ts
 export interface GatePolicy {
   minConfidence: number;               // 默认 0.60
   minMargin: number;                   // top1 − top2（含 none），默认 0.15
   riskMinConfidence: Record<Risk, number>;
-  ghostTextRisks: Risk[];              // 允许以单键 Tab ghost text 出现的风险等级
+  quickRisks: Risk[];              // 允许以 quick(单击载入草稿)分级出现的风险等级
   cooldownTurnsAfterDismiss: number;   // 某意图被 Esc 关闭后，几轮内不再出现，默认 3
   ignoredBackoff: {
     streak: number;                    // 默认 3
@@ -778,24 +778,24 @@ export interface GatePolicy {
 | `riskMinConfidence.reversible` | `0.65` | 跑测试、本地修改、本地提交 |
 | `riskMinConfidence.side_effect` | `0.80` | 推送远端、创建 PR、发外部请求 |
 | `riskMinConfidence.irreversible` | `0.95` | 破坏性操作，默认禁止展示 |
-| `ghostTextRisks` | `['none', 'read_only', 'reversible']` | **默认仅允许无副作用或本地可逆意图进入单键 Tab 的 ghost text**；`side_effect` 与 `irreversible` 一律排除在 ghost text 之外 |
-| `cooldownTurnsAfterDismiss` | `3` | 用户按 Esc 关闭某意图后，接下来 3 轮内屏蔽该 `qualifiedIntentId` |
+| `quickRisks` | `['none', 'read_only', 'reversible']` | **默认仅无副作用或本地可逆意图可用 quick 分级**（WebUI 里单击即载入草稿）；`side_effect` 与 `irreversible` 永不进 quick |
+| `cooldownTurnsAfterDismiss` | `3` | 用户在 WebUI 关闭/标没用某意图后，接下来 3 轮内屏蔽该意图的学习键 |
 | `ignoredBackoff` | `{ streak: 3, raiseBy: 0.10, maxRaise: 0.25, nearMatchSimilarityThreshold: 0.75 }` | 仅当 `outcome === 'ignored'` 且 `similarity < 0.75` 时计入未命中连击；若 `similarity >= 0.75`（用户手打了高度相似的话），视为**近似命中（near-match）**，直接清零退避计数 |
 
-**门控与通道判定顺序**（使用胜出意图所属 `originScenario.policy` 覆盖后的策略，任一不满足即返回 `prediction: null` 并记录对应的 `suppressedReason`）：
+**门控与分级判定顺序**（使用胜出意图所属 `originScenario.policy` 覆盖后的策略，任一不满足即返回 `prediction: null` 并记录对应的 `suppressedReason`）：
 1. **计算有效风险 `effectiveRisk`**：若意图声明了 `dynamicRiskFromProposedAction: true`（如 `confirm`、`choose_option`），令 $\text{effectiveRisk} = \max(\text{intent.risk}, \text{lastAgentMessage.proposedRisk})$；否则为 $\text{intent.risk}$。
 2. 若首选是 `'none'` 或 $\text{final}(\text{none}) \ge \text{final}(i_{(1)})$ → `model_none`。
 3. 检查会话展示次数上限 `maxPerSession` → `max_per_session_reached`。
-4. 检查冷却表 `dismissedUntilTurn[qualifiedIntentId] > session.turnCount` → `in_cooldown`。
+4. 检查冷却表 `dismissedUntilTurn[<packId>/<scenarioId>#<intentId>] > session.turnCount` → `in_cooldown`（学习键无版本号，见 §7.3）。
 5. 检查有效阈值（含 `ignoredBackoff` 的 `backoffDelta`）：
    - 若 $\text{final}(i_{(1)}) < \text{minConfidence} + \text{backoffDelta}$ → `below_min_confidence`
    - 若 $\text{final}(i_{(1)}) < \text{riskMinConfidence}[\text{effectiveRisk}] + \text{backoffDelta}$ → `below_risk_confidence`
 6. 检查领先幅度 $\text{final}(i_{(1)}) - \text{final}(i_{(2)}) < \text{minMargin}$ → `below_min_margin`。
-7. **裁决展示通道 `displayChannel`**：
-   - 计算该意图允许的通道集合：`allowed = intent.allowedChannels ?? (ghostTextRisks.includes(effectiveRisk) ? ['ghost_text', 'chips', 'action_button'] : effectiveRisk === 'side_effect' ? ['chips', 'action_button'] : ['action_button'])`。
+7. **裁决摩擦分级 `displayChannel`**（独立 WebUI 内的呈现分级，不是宿主通道）：
+   - 计算该意图允许的分级集合：`allowed = intent.allowedChannels ?? (quickRisks.includes(effectiveRisk) ? ['quick', 'choice', 'confirm'] : effectiveRisk === 'side_effect' ? ['choice', 'confirm'] : ['confirm'])`，取其中摩擦最低者为最终分级。与默认集合交集为空的意图在 §7.3 目录合并时即被剔除，永远不会胜出——因此不再需要 `risk_disallowed_*` 这类抑制原因（已从枚举删除）。
    - 如此设计后：
-     - **`confirm` / `choose_option`**（声明了 `allowedChannels: ['chips', 'action_button']`）与 **`side_effect` 意图**（如 `open_pr`）不会以 ghost text 形式交付，只能走 Chip 或动作按钮。这提高的是操作摩擦与可感知性，不单独构成安全边界；安全性建立在「仅填入、不自动执行 + 宿主二次确认」之上（见 §11.2）。`displayChannel` 只由本节裁决并求交宿主 `capabilities.displayChannels`，UI 层（§10）不得按 margin 或置信度改判通道。
-     - 若宿主仅支持 `ghost_text` 通道（未开启 chips/button），而该意图的 `allowed` 不含 `'ghost_text'`，则门控直接拦截并记录 `risk_disallowed_for_ghost_text`。
+     - **`confirm` / `choose_option`**（声明了 `allowedChannels: ['choice', 'confirm']`）与 **`side_effect` 意图**（如 `open_pr`）在 WebUI 里永远至少是「多选一」呈现、且发送前多一步确认，不会是单击即走的 `quick` 卡。摩擦分级提高的是可感知性与误触成本，不单独构成安全边界；安全性建立在「发送须显式点击 + 永不自动执行」之上（见 §10、§11.2）。
+     - `displayChannel` 只由本节裁决。WebUI 三种分级全支持，无需向宿主协商任何显示能力；WebUI 不得按 margin 或置信度自改分级，更不得降低摩擦。
 
 ### 7.8 渲染、槽位校验、Action 载荷绑定与过滤规则
 
@@ -823,9 +823,9 @@ export interface GatePolicy {
 2. **Action 载荷插值与执行边界**：
    - 若意图声明了 `action`（如 `{ type: 'command', command: '/review', args: '{path}' }` 或 `{ type: 'tool', name: 'track_shipment', input: { orderId: '{orderId}' } }`），SDK 会递归遍历 `action.args`、`action.input`、`action.payload` 中的字符串值，将 `{slotName}` 替换为已通过 §7.8.1 校验的槽位值。
    - **严格原子性**：若 `action` 中引用的任何 `{slotName}` 未定义或未解析出有效值，**整条预测按 `slot_validation_failed` 作废**（绝不向宿主交付带未替换 `{slotName}` 字面量的半成品 `action`）。
-   - **宿主执行契约**：
-     - 当用户在 `ghost_text` 或 `chips` 中按 `Tab` / `Alt+1..3` 接受建议时，默认行为始终是**将文本（或 `action.type === 'command'` 对应的斜杠命令字符串）填入输入框，不直接执行工具**。
-     - `action.type === 'tool' | 'custom'` 仅作为结构化元数据随 `Prediction` 提供给宿主；宿主若将其渲染为快捷动作按钮，点击后**必须经用户显式确认**方可调用对应工具。
+   - **使用与执行契约（独立 WebUI 内）**：
+     - 卡片被点中只意味着文本（或 `action.type === 'command'` 对应的命令串）被载入 **WebUI 自己的草稿编辑框**；再往前一步只有两条路：用户点「复制」（纯剪贴板，SDK 不感知宿主），或宿主声明了 `dispatchModes` 时点「发给 Agent」把草稿作为下一条用户消息/命令投递进会话（等价于用户亲手发送）。两条路都要用户明确点击，`confirm` 分级再加一步确认。
+     - `action.type === 'tool' | 'custom'` 在 A1 仅作为结构化元数据在检查面展示，不触发任何执行；到 A3 才允许经卡片确认后派发（见 §5.2）。
 
 #### 7.8.3 过滤规则（Filter Pipeline）
 
@@ -845,24 +845,24 @@ export interface GatePolicy {
 
 ### 7.9 交付与失效
 
-- 结果通过 `onPrediction` 回调或 `prediction/updated` 通知交付。
-- 宿主**展示前必须再检查一次**：`sourceTurnId` 仍是最近一个已结束的 turn，并且输入框为空。这条借鉴了 Codex `thread/sample` 的 `expectedTurnId`，以及 Qwen 对过期会话的检查。
-- 收到 §7.1 列出的失效事件后，SDK 会主动发出一次 `completed + null`，通知宿主撤下建议。
-- 由宿主控制展示延迟（默认 300ms），避免一闪而过。
+- 结果通过 `onPrediction` 回调、`prediction/updated` 通知或 WebUI 内部数据面交付，最终呈现点只有 SDK 独立 WebUI 的建议流。
+- 过期校验全部在 SDK 侧（借鉴 Codex `expectedTurnId` 与 Qwen 的会话检查，但不要求宿主参与）：核心在交付前复查 `sourceTurnId` 仍是最近一个已结束的 turn；WebUI 渲染前再比对卡片的 `sessionId`/`sourceTurnId` 与流的头状态，不一致就静默标过期而不是画错。
+- 收到 §7.1 的失效事件后，核心发 `completed + null`；WebUI 把仍挂着的卡片标为已过期（留给检查面复盘，不再可点发送）。宿主输入框里此刻有什么，都不影响卡片存废——这是和宿主输入解耦后自然得到的好处。
+- WebUI 内部呈现时序（是否延迟 300ms 入场之类）是本地体验参数，不写进契约、实现可调。
 
 ### 7.10 反馈、相似度计算与学习
 
 | 结果 | 含义 | 作为学习信号 |
 |---|---|---|
-| accepted | 用户接受了建议，并且原样发送（`similarity = 1.0`） | 强正例，立即清零 `ignoredBackoff` 连击 |
-| edited | 用户按 Tab 填入后修改了文本再发送（`similarity ∈ (0, 1)`） | 意图大概率正确，文本需要改进；立即清零 `ignoredBackoff` 连击 |
-| ignored（near-match） | 用户未按 Tab，但手打了与建议高度相似的话（`similarity ≥ 0.75`） | **弱正例（近似命中）**，不计入负例退避，并清零 `ignoredBackoff` 连击 |
-| ignored（mismatch） | 用户未接受建议，直接输入并发送了不相关的内容（`similarity < 0.75`） | 预测意图的负例，累加 `ignoredBackoff` 连击。如果开启了 `collectFinalText`，可以离线标注出真实意图作为正例 |
-| dismissed | 用户按了 Esc 显式关闭建议 | 强负例，触发该 `qualifiedIntentId` 进入 `cooldownTurnsAfterDismiss` 轮冷却 |
-| expired | 用户还没处理，新的一轮就开始了 | 中性，不计入负例退避 |
+| accepted | 用户在 WebUI 点发送、原文未改即发出（method=`send`）；或点了复制后下一条用户消息与建议一致（`similarity = 1.0`，推断） | 强正例，立即清零 `ignoredBackoff` 连击。纯 `copy` 未见后续发送时单独计数，不冒充 accepted |
+| edited | 用户在 WebUI 草稿框改字后发出（method=`edit_send`），或复制后改字发出（`similarity ∈ (0, 1)`，推断） | 意图大概率正确，文本需要改进；立即清零 `ignoredBackoff` 连击 |
+| ignored（near-match） | 用户没理 WebUI，但紧接着在宿主里发了高度相似的话（`similarity ≥ 0.75`，核心推断，无需宿主 UI 配合） | **弱正例（近似命中）**，不计入负例退避，并清零连击 |
+| ignored（mismatch） | 下一条用户消息与建议不相关（`similarity < 0.75`，推断） | 预测意图的负例，累加 `ignoredBackoff` 连击。如果开启了 `collectFinalText`，可以离线标注出真实意图作为正例 |
+| dismissed | 用户在 WebUI 显式关卡/标没用 | 强负例，触发该意图的学习键（无版本号形式）进入 `cooldownTurnsAfterDismiss` 轮冷却 |
+| expired | 卡片还没被处理，新的一轮就开始了（或源 turn 已不是最近已结束轮） | 中性，不计入负例退避 |
 | suppressed | 被门控或过滤器拦下（SDK 内部记录） | 用于分析阈值与覆盖率 |
 
-- **本地隐私安全的编辑相似度计算**：在宿主或 `SuggestionController` 内，当用户提交最终输入 `actual` 时，先对建议文本 `suggested` 与 `actual` 做空白归一化，再计算字符级 Bigram Dice 系数（兼容中英文分词）：
+- **本地隐私安全的编辑相似度计算**：在核心内（核心本就经事件流看得到建议文本与下一条 `message.user`，无需宿主 UI 参与），先做空白归一化，再算字符级 Bigram Dice 系数：
   $$\text{similarity}(A, B) = \frac{2 \cdot |\text{bigrams}(A) \cap \text{bigrams}(B)|}{|\text{bigrams}(A)| + |\text{bigrams}(B)|}$$
   该标量值随 `Feedback.similarity` 上报，无需保存 `finalText` 原文。例外：归一化后任一方是另一方的子串时，近似命中判定按相似度 1.0 处理——例如建议「跑一下测试验证看看」而用户发了「跑一下测试」，Dice 仅约 0.67，低于默认近似命中线 0.75，但意图相同，不得计入退避（规范表述见 `SPEC.md` §6 第 5 项）。
 - 反馈默认写入本地 JSONL 文件（路径可由宿主指定，如 `$HERMES_HOME/logs/intent_predict_feedback.jsonl`），存储接口 `FeedbackStore` 可以替换。
@@ -870,7 +870,7 @@ export interface GatePolicy {
   - outcome、method、selectedIntentId
   - time_to_accept / ignore / first_keystroke
   - 文本长度、Bigram Dice 相似度
-  - 展示时窗口是否在前台（`wasFocusedWhenShown`）
+  - 呈现时 WebUI 页面是否可见（`wasFocusedWhenShown`，语义已改为 WebUI 前台而非宿主窗口）
   - suppressed 的原因（标准化的 `SuppressedReason` 枚举）
   - scenario/intent id、来源、延迟、token 用量（含缓存命中）
 - 各阶段的学习内容：Phase 1 只记录。Phase 2 开始用于先验、校准和阈值调优。
@@ -989,10 +989,7 @@ export interface Sampler {
    - 工具返回 JSON → `tool.result`（从 `terminal` 结果提取 `exit_code`；从 `write_file`/`patch` 提取 `files_modified` 生成 `artifact(file_changed)`）
    - 遇到 `clarify` 或危险命令审批挂起 → `state(pendingInput=true)` / `state(pendingApproval=true)`
    - 一轮结束 → `message.agent(final=true)` + `turn.completed`
-3. **三端 UI 呈现**：
-   - **Ink TUI（`hermes --tui`）**：直接集成 `@intent-predict/ui` 的 Ink 绑定，在底部输入框渲染暗色 ghost text（Tab 填入、Esc 关闭）。
-   - **Hermes Desktop（Electron）**：在 composer 输入框组件挂载 React `useSuggestionController`，支持 ghost text 与可选的备选 chips（`Alt+1..3`）。
-   - **经典 CLI（`prompt_toolkit`）**：通过 `AutoSuggest` 接口将 `prediction.text` 映射为光标后的灰色补全建议，按 `→` 或 `Tab` 填入。
+3. **呈现：宿主零 UI 改动**：Ink TUI、Desktop、经典 CLI 三端都不改——用户在 SDK 独立 WebUI 里看卡片。Hermes 侧与「发回会话」有关的只有可选 dispatch 桥：把 WebUI 草稿框确认的文本当作下一条用户消息喂给对应会话（等价于该会话收到一次普通输入）；未实现 dispatch 时用户复制粘贴即可。Hermes 若将来想在自家界面镜像卡片，是宿主自选行为，不进本设计。
 
 ### 8.5 其他宿主适配器（计划）
 
@@ -1009,18 +1006,22 @@ export interface Sampler {
 
 ## 9. Sidecar 协议（JSON-RPC 2.0）
 
-非 JS 宿主（如 Hermes 的 Python 后端、Rust、Go 等）通过 sidecar 接入：`intent-predict serve --stdio`。传输用换行分隔的 JSON（NDJSON），和 Codex app-server、MCP 的 stdio 传输方式一致。HTTP/SSE 不在 `ROADMAP.md` 五阶段内，视需要另行排期。方法名对应 Codex 的 `thread/prediction/request` 和 `thread/prediction/updated`。完整 Schema 见 [`spec/rpc.schema.json`](../spec/rpc.schema.json)。
+非 JS 宿主（如 Hermes 的 Python 后端、Rust、Go 等）通过 sidecar 接入：`intent-predict serve --stdio`。宿主协议的传输用换行分隔的 JSON（NDJSON），和 Codex app-server、MCP 的 stdio 传输方式一致。独立 WebUI 的本地回环 HTTP 是另一回事（§10.4），不属于本 RPC、不替代 stdio；其传输细节实现自定、不进 `rpc.schema.json`。方法名对应 Codex 的 `thread/prediction/request` 和 `thread/prediction/updated`。完整 Schema 见 [`spec/rpc.schema.json`](../spec/rpc.schema.json)。
 
 | 方向 | 方法 | 类型 | 说明 |
 |---|---|---|---|
-| 宿主 → SDK | `initialize` | 请求 | 声明客户端信息、能力（`samplerModes`、`displayChannels`、`interactive`）、策略和要加载的场景包 |
+| 宿主 → SDK | `initialize` | 请求 | 声明客户端信息、能力（`samplerModes`、`dispatchModes`、`interactive`）、策略和要加载的场景包；不声明任何显示能力（渲染在 SDK WebUI 内） |
 | 宿主 → SDK | `session/observe` | 通知 | `{ sessionId, events: AgentEvent[] }` |
 | 宿主 → SDK | `prediction/request` | 请求 | `{ sessionId, sourceTurnId, messages?, state? }`。立即返回 `{}`，结果另行通知 |
 | 宿主 → SDK | `prediction/cancel` | 请求 | `{ sessionId, reason? }` |
 | 宿主 → SDK | `prediction/feedback` | 通知 | `Feedback` |
 | SDK → 宿主 | `prediction/updated` | 通知 | `{ sessionId, sourceTurnId, result: PredictionResult }` |
-| SDK → 宿主 | `sampler/sample` | 反向请求 | 只在宿主声明了 `sampler` 能力时使用。支持 `mode: 'fork' \| 'compact'`：fork 走宿主缓存分叉，compact 委托宿主已有模型完成推理 |
+| SDK → 宿主 | `sampler/sample` | 反向请求 | 只在宿主声明了 `samplerModes` 非空时使用。支持 `mode: 'fork' \| 'compact'`：fork 走宿主缓存分叉，compact 委托宿主已有模型完成推理 |
 | SDK → 宿主 | `sampler/cancel` | 反向通知 | `{ sampleRequestId, sessionId, reason? }`。通知宿主立即中止正在进行中的采样请求 |
+| SDK → 宿主 | `dispatch/message` | 反向请求 | `{ sessionId, text }`。仅当用户在独立 WebUI 里显式点下发送、且宿主声明 `dispatchModes` 含 `'message'` 时才发；宿主须把 `text` 当作一条普通用户输入处理（走其原生审批与回合流程）。结果 `{}` 表示已接受排队 |
+| SDK → 宿主 | `dispatch/command` | 反向请求 | `{ sessionId, command, args? }`。同上但对应 `action.type === 'command'`；宿主无此能力时 WebUI 退化为把命令串放进草稿走 message 或复制 |
+
+WebUI 与核心/sidecar 之间的数据面（卡片流、草稿动作、标注）是进程内或本地回环的自有通道（§10.4），不占用上表方法；`prediction/feedback` 仍保留给进程内直连集成与测试注入，WebUI 的动作由同进程核心直接记录，无需绕宿主转发。
 
 ### 9.1 全双工并发、ID 命名空间与取消时序（Hermes 落地规范）
 
@@ -1051,7 +1052,7 @@ export interface Sampler {
 
 ```jsonc
 // 宿主 → SDK：初始化并声明支持 sampler 委托（零配置，无需传任何 API Key）
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"0.1","client":{"name":"hermes-agent","version":"3.3.0"},"capabilities":{"samplerModes":["fork","compact"],"displayChannels":["ghost_text","chips","action_button"],"interactive":true},"packs":["builtin/coding"]}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"0.1","client":{"name":"hermes-agent","version":"3.3.0"},"capabilities":{"samplerModes":["fork","compact"],"dispatchModes":["message"],"interactive":true},"packs":["builtin/coding"]}}
 // 宿主 → SDK：上报事件流
 {"jsonrpc":"2.0","method":"session/observe","params":{"sessionId":"s1","events":[{"type":"artifact","turnId":"t7","kind":"file_changed","ref":"src/index.ts"},{"type":"turn.completed","turnId":"t7","status":"completed","at":1762675200000}]}}
 // SDK → 宿主（反向请求：让宿主用自己的分叉或当前模型采样）
@@ -1062,47 +1063,53 @@ export interface Sampler {
 {"jsonrpc":"2.0","method":"prediction/updated","params":{"sessionId":"s1","sourceTurnId":"t7","result":{"type":"completed","prediction":{"id":"p1","sessionId":"s1","sourceTurnId":"t7","packId":"builtin/coding","packVersion":"0.1.0","scenarioId":"coding.after_edit","intent":{"id":"run_tests","confidence":0.82,"slots":{}},"text":"跑一下测试验证看看","locale":"zh-CN","risk":"reversible","alternatives":[{"intentId":"review_diff","confidence":0.24,"text":"检查一下刚才的改动","risk":"read_only"}],"sources":["model","prior"],"createdAt":1762675200450}}}}
 ```
 
-## 10. UI 交互规范
+## 10. 独立 WebUI（与宿主输入框完全解耦）
 
-可选的 `@intent-predict/ui` 提供一个不依赖 UI 框架的纯状态机 `SuggestionController`，参考了 Qwen Code 的 `FollowupController`，同时提供 React 和 Ink（终端）两种绑定。
+**定版（决策 D10）**：SDK 不进宿主输入框。唯一人机界面是 SDK 自带的本地 Web 应用。宿主与 SDK 之间只剩数据面——事件与状态进来、Sampler 委托出去，外加一个可选的 dispatch（把用户在 WebUI 里点下发送的草稿当下一条用户消息喂回会话）。这意味着宿主接入时 UI 改动量恒为零；代价是用户要打开一个与 agent 并排的页面使用卡片，换来每个宿主同一套 UI、同一套可测试行为，且调阈值、看抑制原因、跑回放这些开发者要看的东西有了正屋可住。
 
-### 10.1 控制器状态机
+### 10.1 两个视图，一份数据
+
+| 视图 | 给谁 | 内容 |
+|---|---|---|
+| **用户面** | 正在用 agent 的人 | 按会话的实时建议卡片流（只留当前会话未过期卡置顶）、草稿编辑框、「发给 Agent / 复制 / 关闭 / 标没用」四个动作、`choice` 呈现时并列主候选与 alternatives |
+| **检查面** | 集成方与场景包作者 | 完整预测日志（交付与抑制各记一条）、单条点开看命中场景/门控数值/`SuppressedReason`、会话内阈值试调（仅内存、导出才落文件）、golden 与回放结果查看、标注导出 |
+
+呈现摩擦由核心在 `displayChannel` 里定死，WebUI 只映射：`quick` = 单卡、点击即载入草稿；`choice` = 多卡并列供选一个载入；`confirm` = 发送前弹一步确认（文案写明将发生什么）。WebUI 不得自行降低摩擦（把 confirm 画成一键发送），可以升高。
+
+### 10.2 卡片生命周期（WebUI 侧本地状态机）
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Idle
-  Idle --> PendingShow : set(prediction) 启动 300ms 定时器
-  PendingShow --> Idle : clear() / 打字 / 轮次变化（未展示即取消，不记反馈）
-  PendingShow --> Visible : 300ms 到期且输入框仍为空
-  Visible --> AcceptedLock : accept(method) 填入文本并启动 100ms 防抖锁
-  AcceptedLock --> PostAcceptTracking : 100ms 后解锁编辑
-  PostAcceptTracking --> Idle : 用户发送消息（未改动记 accepted，改动记 edited）
-  Visible --> Idle : dismiss(Esc)，记 dismissed 并触发该意图冷却
-  Visible --> IgnoredTracking : 用户直接打字或粘贴，立即隐藏建议
-  IgnoredTracking --> Idle : 用户发送消息，记 ignored（附带本地计算的 similarity）
-  Visible --> Idle : 新一轮开始 / 会话切换，记 expired
+  [*] --> Live: 收到 Prediction，渲染卡片
+  Live --> Draft: 点卡片，载入草稿编辑框
+  Draft --> Sent: 点发送（confirm 级加确认一步）→ accepted / edited
+  Draft --> Copied: 点复制（是否被用由核心推断）
+  Live --> Dismissed: 点关闭 / 标没用 → dismissed + 冷却
+  Live --> Expired: sourceTurnId 过期 / 新一轮开始（收到 completed + null）
+  Draft --> Expired: 草稿未发而源 turn 过期（草稿保留但发送前明示已过期）
+  Sent --> [*]
+  Copied --> [*]
+  Dismissed --> [*]
+  Expired --> [*]
 ```
 
-### 10.2 按键与展示规范
+失效完全由核心驱动（`completed + null` 与 `sourceTurnId` 比对在 SDK 侧两层都查，见 §7.9）；WebUI 不需要监听宿主按键或焦点，建议活多久与用户在宿主输入框里打字与否无关——没有了「开始打字建议就消失」这条耦合，用户想在宿主把自己的话打一半再回来看卡也行，被新 turn 淘汰的卡转去检查面留档。
 
-| 按键 | 默认行为 |
-|---|---|
-| Tab，或输入框为空时按 → | 接受建议：填入输入框，**不发送** |
-| Esc | 关闭建议：记为 dismissed，并让该意图进入冷却 |
-| 直接打字、退格或粘贴 | 立即隐藏建议。用户发送后，按实际内容记为 ignored |
-| Enter | 默认**不接受**建议，按宿主原来的逻辑处理。可以配置成"填入并发送" |
-| Alt+1..3 | 选择备选项（chips 形态时使用） |
+### 10.3 与宿主的全部接触面
 
-- **展示形态**：
-  - **ghost text**：只显示首选建议，是默认形态。
-  - **chips**：当 `displayChannel === 'chips'` 时，显示最多 3 个建议（首选 + 最多 2 个 `alternatives`）。通道只由 §7.7 裁决，本节不按 margin 另行改判（见 `SPEC.md` §6 第 2 项）；`margin` 只影响是否交付，不影响交付成什么形态。
-  - **动作按钮**：用于 `command` 或 `tool` 类型的意图。点击后填入命令；要直接执行，必须二次确认。
-- **控制器 API**：
-  - `set(prediction | null)`：延迟 300ms 后显示，传 null 立即清除。
-  - `accept(method)`：返回要填入的文本或动作，之后 100ms 内忽略重复操作。
-  - `dismiss()`
-  - `invalidate(reason)`
-- **可访问性**：Web 端用 `aria-live="polite"` 播报建议；终端里 ghost text 使用暗色，并且不覆盖光标。
+| 接触点 | 方向 | 必选？ | 说明 |
+|---|---|---|---|
+| 事件上报 `observe` | 宿主 → SDK | 必选 | 与从前相同 |
+| Sampler | SDK → 宿主 | 二选一（或 L-Local） | 与从前相同 |
+| dispatch `sendMessage` / `invokeCommand` | SDK（经 WebUI 按钮）→ 宿主 | 可选 | 对应 `capabilities.dispatchModes`。只做一件事：把草稿当用户的新输入投进指定会话。任何宿主审批/权限流照其原生逻辑触发，SDK 不绕。没有 dispatch 能力时 WebUI 只显示复制按钮 |
+| 宿主 UI / 按键 / 焦点 | — | **不存在** | 设计上没有这条边。宿主若想在自己的界面镜像卡片，那是它订 `prediction/updated` 自己画的自选行为，不在规范内 |
+
+### 10.4 安全与体验边界
+
+- 仅绑 `127.0.0.1`；每次启动生成随机 token（URL 片段或请求头二者取一并全程携带，包括内部数据面），未带 token 的请求一律拒绝；校验 `Origin`/`Host` 防 DNS rebinding。
+- 静态资源随包分发、断网可用、不引 CDN；页面显示文本默认已脱敏（与 compact 的口径一致），原始事件明细仅在检查面显式展开时出现且仍是本地数据。
+- WebUI 无「执行工具」按钮：`action` 在 A1 只是卡片旁标注的元信息。发送一条等价于用户自己敲那句话，其全部后续（含 agent 触发的工具调用与审批）走宿主正常回合。
+- 可访问性：卡片区域用 `aria-live="polite"` 播报新卡；所有动作键盘可达（WebUI 自己的快捷键，如 `Ctrl+Enter` 发送，属于本地约定、页面上标注即可，不构成跨宿主规范）。
 
 ## 11. 安全与隐私
 
@@ -1138,7 +1145,7 @@ SDK 严格区分 **`fork` 模式**与 **`compact` 模式**的隐私保证，绝�
   2. **确定性模板优先**：内置场景包全部采用多语言模板渲染，最终展示给用户的文本仅由模板和通过严格校验的槽位拼成，不直接使用模型自由生成的句子（层 2）。
   3. **槽位字面约束与路径消毒**：来自模型的 `path` 类型槽位禁止 `..` 与 shell 元字符；模型给出的值必须字面出现在最近对话中，防止幻觉捏造文件名或订单号（层 3）。
   4. **9 条后置过滤规则**：第 9 条 `filter_dangerous` 专门拦截高危破坏性指令（层 4）。
-  5. **人在回路与风险分级门控**：接受建议只填入输入框、绝不自动发送；`side_effect` 要求 ≥ 0.80 置信度；`irreversible` 意图永不以 ghost text 形式出现（层 5）。
+  5. **人在回路与风险分级门控**：点卡只载入 WebUI 草稿、发送须再点；`side_effect` 要求 ≥ 0.80 置信度；`irreversible` 意图永不以 quick 分级出现（层 5）。
 - **反馈数据**：默认只写本地。`finalText` 默认不采集（本地只记录 `similarity` 相似度标量）。导出数据需要显式调用。
 - **内部调用隔离**：预测请求带有专门的标记（如 prompt id `intent_prediction`），不进入 agent 的会话记录和用户可见的日志。
 
@@ -1177,7 +1184,7 @@ SDK 严格区分 **`fork` 模式**与 **`compact` 模式**的隐私保证，绝�
 |---|---|---|
 | 覆盖率 coverage | 展示次数 ÷ 符合条件的轮数 | 衡量建议是否太频繁或太少 |
 | **展示精度 precision@shown** | 意图命中次数 ÷ 展示次数 | **第一指标** |
-| top-3 准确率 | 真实意图在前三名里的比例 | 评估 chips 形态 |
+| top-3 准确率 | 真实意图在前三名里的比例 | 评估 choice 形态 |
 | 风险-覆盖曲线 / AURC | 不同阈值下精度和覆盖率的取舍 | 选择阈值 |
 | ECE | 置信度的校准误差 | 判断置信度是否可信 |
 | 文本相似度 | 建议文本与真实消息的 chrF 或向量相似度 | 评估渲染质量 |
@@ -1196,9 +1203,9 @@ SDK 严格区分 **`fork` 模式**与 **`compact` 模式**的隐私保证，绝�
 | 场景 ID | 优先级 | 识别信号（`match`） | 意图集合（`id (risk, prior, 特殊约束)`） |
 |---|---|---|---|
 | `coding.checks_failed` | 30 | `lastTurn.failedExecs > 0`（`triggerOnTurnStatuses: [completed, failed]`） | `fix_failures (reversible, 0.55)`、`show_details (none, 0.20)`、`rerun_checks (reversible, 0.15)`、`skip_for_now (none, 0.10)` |
-| `coding.awaiting_reply` | 25 | `endsWithQuestion == true` 或 `optionsCount > 1` | `confirm (reversible + dynamicRiskFromProposedAction, 0.45, 禁 ghost_text)`、`choose_option{index} (reversible + dynamicRiskFromProposedAction, 0.35, 禁 ghost_text)`、`ask_tradeoffs (none, 0.12)`、`decline (none, 0.08)` |
+| `coding.awaiting_reply` | 25 | `endsWithQuestion == true` 或 `optionsCount > 1` | `confirm (reversible + dynamicRiskFromProposedAction, 0.45, 禁 quick)`、`choose_option{index} (reversible + dynamicRiskFromProposedAction, 0.35, 禁 quick)`、`ask_tradeoffs (none, 0.12)`、`decline (none, 0.08)` |
 | `coding.after_edit` | 20 | `filesChanged > 0` 且本轮未运行 `execute` 类工具 | `run_tests (reversible, 0.42)`、`review_diff (read_only, 0.22, action=/review)`、`explain_changes (none, 0.14)`、`continue_task (reversible, 0.14)`、`commit_changes (reversible, 0.08)` |
-| `coding.task_verified` | 18 | `filesChanged > 0` 且运行过 `execute` 且 `failedExecs == 0` | `commit_changes (reversible, 0.45)`、`review_diff (read_only, 0.25, action=/review)`、`open_pr (side_effect, 0.15, 仅 chips/button)`、`continue_task (reversible, 0.15)` |
+| `coding.task_verified` | 18 | `filesChanged > 0` 且运行过 `execute` 且 `failedExecs == 0` | `commit_changes (reversible, 0.45)`、`review_diff (read_only, 0.25, action=/review)`、`open_pr (side_effect, 0.15, 仅 choice/button)`、`continue_task (reversible, 0.15)` |
 | `coding.exec_succeeded` | 14 | `filesChanged == 0` 且运行过 `execute` 且 `failedExecs == 0` | `continue_task (reversible, 0.50)`、`explain_output (none, 0.30)`、`apply_suggestion (reversible, 0.20)` |
 | `coding.explained` | 10 | `filesChanged == 0`、`failedExecs == 0`、`lastAgentMessage.length ≥ 200` 且用过 `read/search` | `apply_suggestion (reversible, 0.50)`、`write_plan (read_only, 0.25)`、`ask_example (none, 0.25)` |
 | `coding.general_followup` | 1 | `status == completed`、`failedExecs == 0`、`length ≥ 60`（保守兜底，`minConfidence: 0.75, minMargin: 0.25`） | `apply_suggestion (reversible, 0.45)`、`write_plan (read_only, 0.30)`、`ask_example (none, 0.25)` |
@@ -1254,9 +1261,9 @@ intent-predict/
 ├─ packages/
 │  ├─ core/                     会话状态、信号提取、谓词求值、流水线、门控、过滤、脱敏、反馈存储接口
 │  ├─ models/                   可选的独立 ModelClient（OpenAI、Anthropic、OpenAI 兼容服务、本地模型）
-│  ├─ ui/                       SuggestionController 状态机，以及 React 和 Ink 绑定
+│  ├─ webui/                     SDK 独立 WebUI（用户建议面 + 检查面；静态资源打包分发，可由 sidecar 内置服务)
 │  ├─ sidecar/                  JSON-RPC stdio 服务和 CLI
-│  ├─ adapters/                 hermes（首发）、codex、acp、claude-agent-sdk、openai-agents、vercel-ai、langgraph
+│  ├─ adapters/                 hermes、codex、acp、claude-agent-sdk、openai-agents、vercel-ai、langgraph（只做事件/Sampler/dispatch 三件套，不含任何 UI)
 │  └─ pack-coding/              内置的 coding 场景包（pack.json + TS 导出）
 ├─ eval/                        回放评测工具与黄金测试集
 └─ examples/
@@ -1272,11 +1279,12 @@ Python 等宿主（如 Hermes Agent 后端）通过 sidecar 接入或直接复�
 | D2 | 定义宿主无关的事件模型，再提供适配器和 sidecar | 绑定某一个 agent 框架 | 满足 G1 |
 | D3 | **默认零配置委托宿主自身模型**（通过 `Sampler` 支持 `fork` 缓存共享分叉与 `compact` 宿主模型调用），独立 `ModelClient` 仅作可选兜底 | 要求用户为 SDK 单独配一套 API Key 和模型端点 | 宿主本身已有配置好的模型与凭证池；复用宿主既省去用户配置负担，又能享受缓存命中和主模型质量（§8.1） |
 | D4 | v1 的置信度由模型自报加规则显式分，阈值通过离线回放调优；v2 改用 logprobs 并做校准 | 一开始就做校准 | 先保证能跑通，校准需要真实反馈数据 |
-| D5 | Enter 默认不接受建议 | Qwen 的做法：Enter 填入并发送 | 满足 G5，和 Codex"接受后不自动发送"一致 |
+| D5 | 发送永远是显式动作：WebUI 里载入草稿 ≠ 发送，发送须再点一次，`confirm` 分级再加一步确认 | Enter 即填入并发送（Qwen 做法）；卡片单击直发 | 满足 G5，和 Codex「接受后不自动发送」一致；在独立 WebUI 里这条由自己的交互保证，不再依赖宿主按键约定 |
 | D6 | 推测执行只定义策略接口，执行交给宿主，放到 Phase 4（A2） | 在 SDK 里实现 overlay 文件系统，即 Qwen 的方式 | SDK 不碰宿主的文件系统和工具，否则就不再宿主无关 |
 | D7 | 先用 TypeScript 实现，Python 等宿主通过 JSON-RPC sidecar 接入；第一个深度落地宿主为 **Hermes Agent** | Python 优先 / Codex 优先 | 主流 agent 宿主多数是 TS 生态；而 Hermes 同时具备 Python 核心、Ink TUI、Electron 桌面端和 CLI，能验证 Sidecar、L2 零配置分叉采样和三端 UI 控制器（§8.4）；排期见 D9 |
 | D8 | 没有场景命中时直接输出 `none` | 退回到通用的开放预测 | 遵守"有限场景"的边界，宁缺毋滥 |
 | D9 | 双轴按「一阶段一轴一格」单步推进，**Phase 1 只做 O1 × A1**（单会话观察 + 纯建议），O2/O3 与 A2/A3 的规范先行但不实现 | 一次把全场景观察与三阶段行动力做全；或行动力优先先升 A2 | 观察优先、行动力殿后，效果变化可归因、安全风险后置；Phase 3/4 顺序保留在 Phase 2 出口凭数据对调的权利（见根目录 `ROADMAP.md`） |
+| D10 | 交付面与宿主输入框**完全解耦**：唯一人机界面为 SDK 独立 WebUI（用户面+检查面），摩擦分级 `quick/choice/confirm` 取代 ghost/chips/button 命名；与宿主之间只留事件、Sampler、可选 dispatch 三组数据接口 | 进宿主 composer 做 ghost text（Codex/Qwen 做法）；SDK 开独立浮窗做宿主输入框的替身 | 宿主 UI 改动量恒为零，UI 行为只写一遍、可以无头测，调试与检查面板有正房；代价是用户在两个窗口之间切换、必须经草稿发送或复制完成闭环——先吃这口摩擦力，换 Phase 1 长打磨期不受各端 UI 拖累 |
 
 ## 17. 路线图
 
@@ -1288,7 +1296,7 @@ Python 等宿主（如 Hermes Agent 后端）通过 sidecar 接入或直接复�
 2. **实现语言**：先做 **TypeScript**（core 与 UI），数据结构以 [`spec/*.schema.json`](../spec) 为准、行为以根目录 `SPEC.md` 为准（见 `SPEC.md` 的 Authority & Precedence）；Python 宿主（如 Hermes Agent）通过 JSON-RPC stdio sidecar 接入，暂不做 Python 优先。
 3. **第一个深度落地的宿主**：**Hermes Agent**（见 §8.4）。排期按 `ROADMAP.md`：Phase 1 只要求一个 L0/L1 参考接入完成 dogfood，Hermes 三端深度适配随 Phase 2 前后展开。
 4. **compact 模式的默认模型**：**默认不需要用户额外配置**。SDK 通过 `Sampler` 接口（`mode: 'fork' | 'compact'`）直接委托宿主 Agent 使用其自身已配置的模型或辅助模型完成推理；仅当宿主不提供模型能力时，才允许可选注入独立 `ModelClient` 或自动退回纯本地规则模式。
-5. **是否采集 `finalText`**：默认关闭（`collectFinalText: false`）。在宿主或 UI 控制器本地计算 Bigram Dice 相似度标量（`Feedback.similarity`）上报，兼顾学习信号与隐私安全。
+5. **是否采集 `finalText`**：默认关闭（`collectFinalText: false`）。核心只计算 Bigram Dice 相似度标量（`Feedback.similarity`）落盘，兼顾学习信号与隐私安全。
 6. **包名和 npm scope**：保持 `@intent-predict/*`。
 7. **ACP 自定义通知的命名空间**：定为 `_intent_predict/prediction`（下行通知）与 `_intent_predict/feedback`（上行通知）。
 

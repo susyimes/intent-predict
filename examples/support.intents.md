@@ -30,7 +30,7 @@ scenarios:
         render: { zh-CN: "我要退款", en: "I'd like a refund" }
         action: { type: tool, name: request_refund, input: { orderId: "{orderId}" } }
         risk: side_effect
-        allowedChannels: [chips, action_button]
+        allowedChannels: [choice, confirm]
         prior: 0.25
       - id: talk_to_human
         description: Escalate to a human support agent.

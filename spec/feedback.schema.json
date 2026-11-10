@@ -36,16 +36,16 @@
         "method": {
           "type": "string",
           "enum": [
-            "tab",
-            "right",
-            "enter",
             "click",
+            "copy",
+            "send",
+            "edit_send",
             "shortcut"
           ]
         },
         "selectedIntentId": {
           "type": "string",
-          "description": "Set when the user accepted an alternative chip (Alt+1..3) instead of the primary intent."
+          "description": "Set when the user picked an alternative in a 'choice' presentation instead of the primary intent."
         },
         "similarity": {
           "type": "number",

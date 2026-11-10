@@ -28,7 +28,9 @@
         "prediction/feedback",
         "prediction/updated",
         "sampler/sample",
-        "sampler/cancel"
+        "sampler/cancel",
+        "dispatch/message",
+        "dispatch/command"
       ]
     },
     "JsonRpcRequest": {
@@ -224,21 +226,18 @@
               "default": [],
               "description": "Sampler modes the host can serve via sampler/sample. Empty means no sampler (SDK degrades to L0/L-Local)."
             },
-            "displayChannels": {
+            "dispatchModes": {
               "type": "array",
               "uniqueItems": true,
               "items": {
                 "type": "string",
                 "enum": [
-                  "ghost_text",
-                  "chips",
-                  "action_button"
+                  "message",
+                  "command"
                 ]
               },
-              "default": [
-                "ghost_text"
-              ],
-              "description": "UI channels the host can render. Intents requiring an unsupported channel are suppressed with risk_disallowed_for_ghost_text."
+              "default": [],
+              "description": "Optional ways the host accepts user-approved input from the SDK's independent Web UI into a session: 'message' (send text as the next user message) and/or 'command' (invoke a slash command). Empty means copy-only; the SDK never writes to the host composer/input box."
             }
           }
         },
@@ -522,6 +521,49 @@
               "minimum": 0
             }
           }
+        }
+      }
+    },
+    "DispatchMessageParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "text"
+      ],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "description": "User-approved text from the SDK Web UI draft editor, delivered as the next user message."
+        }
+      }
+    },
+    "DispatchCommandParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "command"
+      ],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command": {
+          "type": "string",
+          "pattern": "^/",
+          "maxLength": 120
+        },
+        "args": {
+          "type": "string",
+          "maxLength": 1000
         }
       }
     }

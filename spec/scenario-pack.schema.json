@@ -366,7 +366,7 @@
             }
           }
         },
-        "ghostTextRisks": {
+        "quickRisks": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/Risk"
@@ -468,9 +468,9 @@
           "items": {
             "type": "string",
             "enum": [
-              "ghost_text",
-              "chips",
-              "action_button"
+              "quick",
+              "choice",
+              "confirm"
             ]
           },
           "description": "Optional explicit UI channel whitelist for this intent."

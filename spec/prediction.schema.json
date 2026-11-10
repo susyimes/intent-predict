@@ -27,7 +27,6 @@
         "below_min_margin",
         "in_cooldown",
         "max_per_session_reached",
-        "risk_disallowed_for_ghost_text",
         "invalid_model_output",
         "unknown_intent",
         "slot_validation_failed",
@@ -167,12 +166,12 @@
         "displayChannel": {
           "type": "string",
           "enum": [
-            "ghost_text",
-            "chips",
-            "action_button"
+            "quick",
+            "choice",
+            "confirm"
           ],
-          "default": "ghost_text",
-          "description": "Recommended presentation channel determined by risk and gate policy."
+          "default": "quick",
+          "description": "Friction tier in the SDK's independent Web UI: 'quick' (single suggestion card, one explicit click to load/use; low risk only), 'choice' (user picks among the primary suggestion and alternatives), 'confirm' (explicit confirmation step required before use/dispatch). Host composer rendering is not part of the design."
         },
         "intent": {
           "type": "object",
@@ -216,7 +215,7 @@
             "propose_and_dispatch"
           ],
           "default": "suggest_only",
-          "description": "Stage 1: suggest_only (render suggestion in UI); Stage 2: speculative_prep (pre-run read-only context/checks in background); Stage 3: propose_and_dispatch (dispatch to target agent upon user confirmation)."
+          "description": "Stage 1: suggest_only (suggestion shown in the SDK Web UI; user may copy it, or edit-and-send / send it to the agent via the optional host dispatch capability); Stage 2: speculative_prep (pre-run read-only context/checks in background); Stage 3: propose_and_dispatch (dispatch to target agent upon explicit confirmation in the Web UI)."
         },
         "prepPlan": {
           "type": "object",

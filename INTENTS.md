@@ -6,7 +6,7 @@ observationStages: [O1, O2, O3]
 policy:
   minConfidence: 0.60
   minMargin: 0.15
-  ghostTextRisks: [none, read_only, reversible]
+  quickRisks: [none, read_only, reversible]
   cooldownTurnsAfterDismiss: 3
   ignoredBackoff:
     streak: 3
@@ -72,7 +72,7 @@ scenarios:
         render: { zh-CN: "可以，按这个方案继续", en: "yes, go ahead with that" }
         risk: reversible
         dynamicRiskFromProposedAction: true
-        allowedChannels: [chips, action_button]
+        allowedChannels: [choice, confirm]
         prior: 0.45
       - id: choose_option
         description: Pick one of the numbered options presented by the agent.
@@ -85,7 +85,7 @@ scenarios:
         render: { zh-CN: "选第 {index} 个方案", en: "let's go with option {index}" }
         risk: reversible
         dynamicRiskFromProposedAction: true
-        allowedChannels: [chips, action_button]
+        allowedChannels: [choice, confirm]
         prior: 0.35
       - id: ask_tradeoffs
         description: Ask the agent to compare the tradeoffs or clarify before deciding.
@@ -161,7 +161,7 @@ scenarios:
         description: Push the branch and open a pull request.
         render: { zh-CN: "创建 Pull Request", en: "open a pull request" }
         risk: side_effect
-        allowedChannels: [chips, action_button]
+        allowedChannels: [choice, confirm]
         prior: 0.15
       - id: continue_task
         description: Proceed to the next item in the plan or task list.
@@ -441,7 +441,7 @@ Predict the user's NEXT message or action in this session, choosing strictly fro
 4. **Fail-Closed Default**: Prefer `"none"` over a guess. A wrong suggestion costs far more than no suggestion.
 5. **Voice & Locale**: `"text"` MUST be written in locale `"{{user.locale}}"`, in the user's natural first-person phrasing, one short sentence, no quotes, no markdown, and NEVER in the assistant's voice (`"Let me..."`, `"I will..."`, `"我来..."`). Leave `"text"` empty when `"intent"` is `"none"`.
 6. **Literal Slot Grounding**: Fill `"slots"` ONLY with values that literally appear in the conversation or observed signals.
-7. **Runner-Ups for Chips**: Optionally include up to 2 plausible runner-up intents in `"runnerUps"` so multi-chip UI surfaces can offer alternatives when margin is tight.
+7. **Runner-Ups for Choice Cards**: Optionally include up to 2 plausible runner-up intents in `"runnerUps"` so the Web UI can offer alternatives when margin is tight.
 
 {{#if compact}}
 ## Recent Conversation (Oldest First, Redacted)

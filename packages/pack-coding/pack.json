@@ -10,7 +10,7 @@
   "policy": {
     "minConfidence": 0.6,
     "minMargin": 0.15,
-    "ghostTextRisks": [
+    "quickRisks": [
       "none",
       "read_only",
       "reversible"
@@ -23,7 +23,7 @@
       "nearMatchSimilarityThreshold": 0.75
     }
   },
-  "promptTemplate": "# Intent Classification Prompt Contract\n\n[INTENT PREDICTION — do not continue the task. Do not call tools.]\n\nPredict the user's NEXT message or action in this session, choosing strictly from the active scenario's catalog below.\n\n- Active Scenario (`{{scenario.id}}` / Stage `{{scenario.stage}}`): {{scenario.description}}\n- User Locale: `{{user.locale}}`\n\n## Candidate Catalog\n\n{{#each intents}}\n- `{{id}}`: {{description}}{{#if slots}} (slots: {{slots_spec}}){{/if}}{{#if examples}} — e.g. {{examples}}{{/if}}\n{{/each}}\n- `none`: nothing above fits, or you are not confident.\n\n## Classification Rules\n\n1. **User Perspective Test**: Predict what THE USER would type next, not what you think they should do. Ask: *\"Would the user think 'I was just about to type that'?\"*\n2. **Explicit Offer Priority**: Read the last few lines of the assistant's message (and any O2/O3 environment signals). If the assistant explicitly offers a next step (a slash command, a direct question, or numbered options), prefer the matching intent.\n3. **Destructive & External Side-Effect Veto**: If the assistant is asking to confirm a destructive action (`rm -rf`, `git reset --hard`, `drop table`, force push) or an unrequested external side effect, you MUST return `\"none\"`.\n4. **Fail-Closed Default**: Prefer `\"none\"` over a guess. A wrong suggestion costs far more than no suggestion.\n5. **Voice & Locale**: `\"text\"` MUST be written in locale `\"{{user.locale}}\"`, in the user's natural first-person phrasing, one short sentence, no quotes, no markdown, and NEVER in the assistant's voice (`\"Let me...\"`, `\"I will...\"`, `\"我来...\"`). Leave `\"text\"` empty when `\"intent\"` is `\"none\"`.\n6. **Literal Slot Grounding**: Fill `\"slots\"` ONLY with values that literally appear in the conversation or observed signals.\n7. **Runner-Ups for Chips**: Optionally include up to 2 plausible runner-up intents in `\"runnerUps\"` so multi-chip UI surfaces can offer alternatives when margin is tight.\n\n{{#if compact}}\n## Recent Conversation (Oldest First, Redacted)\n{{transcript}}\n{{/if}}\n\n## Observed Signals (O1 / O2 / O3)\n{{signals_json}}\n\nReply with a single JSON object only:\n{\"intent\":\"<id>\",\"confidence\":0.0,\"slots\":{},\"text\":\"\",\"runnerUps\":[{\"intent\":\"<id2>\",\"confidence\":0.0}]}\n",
+  "promptTemplate": "# Intent Classification Prompt Contract\n\n[INTENT PREDICTION — do not continue the task. Do not call tools.]\n\nPredict the user's NEXT message or action in this session, choosing strictly from the active scenario's catalog below.\n\n- Active Scenario (`{{scenario.id}}` / Stage `{{scenario.stage}}`): {{scenario.description}}\n- User Locale: `{{user.locale}}`\n\n## Candidate Catalog\n\n{{#each intents}}\n- `{{id}}`: {{description}}{{#if slots}} (slots: {{slots_spec}}){{/if}}{{#if examples}} — e.g. {{examples}}{{/if}}\n{{/each}}\n- `none`: nothing above fits, or you are not confident.\n\n## Classification Rules\n\n1. **User Perspective Test**: Predict what THE USER would type next, not what you think they should do. Ask: *\"Would the user think 'I was just about to type that'?\"*\n2. **Explicit Offer Priority**: Read the last few lines of the assistant's message (and any O2/O3 environment signals). If the assistant explicitly offers a next step (a slash command, a direct question, or numbered options), prefer the matching intent.\n3. **Destructive & External Side-Effect Veto**: If the assistant is asking to confirm a destructive action (`rm -rf`, `git reset --hard`, `drop table`, force push) or an unrequested external side effect, you MUST return `\"none\"`.\n4. **Fail-Closed Default**: Prefer `\"none\"` over a guess. A wrong suggestion costs far more than no suggestion.\n5. **Voice & Locale**: `\"text\"` MUST be written in locale `\"{{user.locale}}\"`, in the user's natural first-person phrasing, one short sentence, no quotes, no markdown, and NEVER in the assistant's voice (`\"Let me...\"`, `\"I will...\"`, `\"我来...\"`). Leave `\"text\"` empty when `\"intent\"` is `\"none\"`.\n6. **Literal Slot Grounding**: Fill `\"slots\"` ONLY with values that literally appear in the conversation or observed signals.\n7. **Runner-Ups for Choice Cards**: Optionally include up to 2 plausible runner-up intents in `\"runnerUps\"` so the Web UI can offer alternatives when margin is tight.\n\n{{#if compact}}\n## Recent Conversation (Oldest First, Redacted)\n{{transcript}}\n{{/if}}\n\n## Observed Signals (O1 / O2 / O3)\n{{signals_json}}\n\nReply with a single JSON object only:\n{\"intent\":\"<id>\",\"confidence\":0.0,\"slots\":{},\"text\":\"\",\"runnerUps\":[{\"intent\":\"<id2>\",\"confidence\":0.0}]}\n",
   "scenarios": [
     {
       "id": "coding.checks_failed",
@@ -148,8 +148,8 @@
           "risk": "reversible",
           "dynamicRiskFromProposedAction": true,
           "allowedChannels": [
-            "chips",
-            "action_button"
+            "choice",
+            "confirm"
           ],
           "prior": 0.45
         },
@@ -189,8 +189,8 @@
           "risk": "reversible",
           "dynamicRiskFromProposedAction": true,
           "allowedChannels": [
-            "chips",
-            "action_button"
+            "choice",
+            "confirm"
           ],
           "prior": 0.35
         },
@@ -353,8 +353,8 @@
           },
           "risk": "side_effect",
           "allowedChannels": [
-            "chips",
-            "action_button"
+            "choice",
+            "confirm"
           ],
           "prior": 0.15
         },
