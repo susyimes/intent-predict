@@ -104,6 +104,11 @@
         "messages": {
           "type": "array",
           "items": { "$ref": "events.schema.json#/$defs/SimpleMessage" }
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Optional L0 host state snapshot (e.g. { 'composer.dirty': false, pendingApproval: false, mode: 'code', incognito: false })."
         }
       }
     },
@@ -112,6 +117,20 @@
       "additionalProperties": false,
       "required": ["sessionId"],
       "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string" }
+      }
+    },
+    "SamplerCancelParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sampleRequestId", "sessionId"],
+      "properties": {
+        "sampleRequestId": {
+          "type": "string",
+          "pattern": "^s-[0-9]+$",
+          "description": "JSON-RPC request id of the in-flight sampler/sample call to abort."
+        },
         "sessionId": { "type": "string", "minLength": 1 },
         "reason": { "type": "string" }
       }

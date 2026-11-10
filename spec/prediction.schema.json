@@ -17,9 +17,11 @@
         "composer_dirty",
         "mode_blocked",
         "budget_exhausted",
+        "budget_exhausted_no_explicit_rule",
         "incognito",
         "no_scenario_matched",
         "empty_catalog",
+        "no_rule_hit_in_local_mode",
         "model_none",
         "below_min_confidence",
         "below_risk_confidence",
@@ -97,6 +99,17 @@
         "packId": { "type": "string", "minLength": 1 },
         "packVersion": { "type": "string", "minLength": 1 },
         "scenarioId": { "type": "string", "minLength": 1 },
+        "qualifiedIntentId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical globally unique key: '<packId>@<packVersion>/<scenarioId>#<intentId>'."
+        },
+        "displayChannel": {
+          "type": "string",
+          "enum": ["ghost_text", "chips", "action_button"],
+          "default": "ghost_text",
+          "description": "Recommended presentation channel determined by risk and gate policy."
+        },
         "intent": {
           "type": "object",
           "additionalProperties": false,
@@ -110,6 +123,27 @@
         "text": { "type": "string", "minLength": 1 },
         "locale": { "type": "string", "minLength": 2 },
         "action": { "$ref": "scenario-pack.schema.json#/$defs/ActionDescriptor" },
+        "agencyStage": {
+          "type": "string",
+          "enum": ["suggest_only", "speculative_prep", "propose_and_dispatch"],
+          "default": "suggest_only",
+          "description": "Stage 1: suggest_only (render suggestion in UI); Stage 2: speculative_prep (pre-run read-only context/checks in background); Stage 3: propose_and_dispatch (dispatch to target agent upon user confirmation)."
+        },
+        "prepPlan": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "readOnlyTools": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "prefetchRefs": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "description": "Optional read-only speculative preparation plan for Stage 2."
+        },
         "risk": { "$ref": "scenario-pack.schema.json#/$defs/Risk" },
         "alternatives": {
           "type": "array",

@@ -136,6 +136,87 @@
         "at": { "type": "integer", "minimum": 0 }
       }
     },
+    "TerminalCommandObservedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "command", "exitCode", "at"],
+      "properties": {
+        "type": { "const": "env.terminal_command" },
+        "command": { "type": "string", "minLength": 1 },
+        "cwd": { "type": "string" },
+        "exitCode": { "type": "integer" },
+        "durationMs": { "type": "number", "minimum": 0 },
+        "summary": { "type": "string" },
+        "at": { "type": "integer", "minimum": 0 }
+      },
+      "description": "User-executed shell command outside or alongside the agent turn (shell hook / terminal observer)."
+    },
+    "GitStatusObservedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "branch", "dirtyCount", "at"],
+      "properties": {
+        "type": { "const": "env.git_status" },
+        "branch": { "type": "string" },
+        "stagedCount": { "type": "integer", "minimum": 0 },
+        "dirtyCount": { "type": "integer", "minimum": 0 },
+        "untrackedCount": { "type": "integer", "minimum": 0 },
+        "ahead": { "type": "integer", "minimum": 0 },
+        "behind": { "type": "integer", "minimum": 0 },
+        "hasConflicts": { "type": "boolean" },
+        "at": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "FileWatcherObservedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "paths", "at"],
+      "properties": {
+        "type": { "const": "env.file_changed" },
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "actor": {
+          "type": "string",
+          "enum": ["user", "agent", "external"],
+          "default": "user"
+        },
+        "at": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "IdeFocusObservedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "at"],
+      "properties": {
+        "type": { "const": "env.ide_context" },
+        "activeFile": { "type": "string" },
+        "cursorLine": { "type": "integer", "minimum": 1 },
+        "selectionLength": { "type": "integer", "minimum": 0 },
+        "DiagnosticsErrors": { "type": "integer", "minimum": 0 },
+        "diagnosticsErrors": { "type": "integer", "minimum": 0 },
+        "diagnosticsWarnings": { "type": "integer", "minimum": 0 },
+        "at": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "WindowClipboardObservedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "at"],
+      "properties": {
+        "type": { "const": "env.ambient_context" },
+        "activeApp": { "type": "string" },
+        "windowTitle": { "type": "string" },
+        "clipboardKind": {
+          "type": "string",
+          "enum": ["stacktrace", "error_log", "url", "code_snippet", "plain_text"]
+        },
+        "clipboardPreview": { "type": "string", "maxLength": 500 },
+        "at": { "type": "integer", "minimum": 0 }
+      }
+    },
     "AgentEvent": {
       "oneOf": [
         { "$ref": "#/$defs/TurnStartedEvent" },
@@ -145,7 +226,12 @@
         { "$ref": "#/$defs/ToolResultEvent" },
         { "$ref": "#/$defs/ArtifactEvent" },
         { "$ref": "#/$defs/StateEvent" },
-        { "$ref": "#/$defs/TurnCompletedEvent" }
+        { "$ref": "#/$defs/TurnCompletedEvent" },
+        { "$ref": "#/$defs/TerminalCommandObservedEvent" },
+        { "$ref": "#/$defs/GitStatusObservedEvent" },
+        { "$ref": "#/$defs/FileWatcherObservedEvent" },
+        { "$ref": "#/$defs/IdeFocusObservedEvent" },
+        { "$ref": "#/$defs/WindowClipboardObservedEvent" }
       ],
       "discriminator": { "propertyName": "type" }
     },

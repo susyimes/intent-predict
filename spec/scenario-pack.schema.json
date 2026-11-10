@@ -220,7 +220,15 @@
           "required": ["streak", "raiseBy"],
           "properties": {
             "streak": { "type": "integer", "minimum": 1 },
-            "raiseBy": { "type": "number", "minimum": 0, "maximum": 1 }
+            "raiseBy": { "type": "number", "minimum": 0, "maximum": 1 },
+            "maxRaise": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.25 },
+            "nearMatchSimilarityThreshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0.75,
+              "description": "If an ignored suggestion has Bigram Dice similarity >= this threshold with the user's actual message, treat it as a near-match (reset streak instead of penalizing)."
+            }
           }
         },
         "maxPerSession": { "type": "integer", "minimum": 1 }
@@ -253,6 +261,19 @@
         },
         "render": { "$ref": "#/$defs/RenderSpec" },
         "risk": { "$ref": "#/$defs/Risk" },
+        "dynamicRiskFromProposedAction": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true (e.g. confirm / choose_option), effective risk is max(intent.risk, lastAgentMessage.proposedRisk), so dangerous agent proposals cannot slip through as low-risk ghost text."
+        },
+        "allowedChannels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["ghost_text", "chips", "action_button"]
+          },
+          "description": "Optional explicit UI channel whitelist for this intent."
+        },
         "action": { "$ref": "#/$defs/ActionDescriptor" },
         "prior": {
           "type": "number",
@@ -287,6 +308,22 @@
           },
           "default": ["completed"],
           "description": "Turn completion statuses that activate this scenario."
+        },
+        "triggers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "turn.completed",
+              "env.terminal_command",
+              "env.git_status",
+              "env.file_changed",
+              "env.ide_context",
+              "env.ambient_context"
+            ]
+          },
+          "default": ["turn.completed"],
+          "description": "Event types that can trigger evaluation of this scenario (supporting ambient/environment triggers beyond turn boundaries)."
         },
         "match": { "$ref": "#/$defs/SignalPredicate" },
         "priority": {

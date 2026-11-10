@@ -112,14 +112,26 @@
             "sounds good, do it"
           ],
           "when": {
-            "signal": "lastAgentMessage.endsWithQuestion",
-            "eq": true
+            "all": [
+              {
+                "signal": "lastAgentMessage.endsWithQuestion",
+                "eq": true
+              },
+              {
+                "not": {
+                  "signal": "lastAgentMessage.proposedRisk",
+                  "in": ["side_effect", "irreversible"]
+                }
+              }
+            ]
           },
           "render": {
             "zh-CN": "可以，按这个方案继续",
             "en": "yes, go ahead with that"
           },
           "risk": "reversible",
+          "dynamicRiskFromProposedAction": true,
+          "allowedChannels": ["chips", "action_button"],
           "prior": 0.45
         },
         {
@@ -132,8 +144,18 @@
             "let's do #1"
           ],
           "when": {
-            "signal": "lastAgentMessage.optionsCount",
-            "gt": 1
+            "all": [
+              {
+                "signal": "lastAgentMessage.optionsCount",
+                "gt": 1
+              },
+              {
+                "not": {
+                  "signal": "lastAgentMessage.proposedRisk",
+                  "in": ["side_effect", "irreversible"]
+                }
+              }
+            ]
           },
           "slots": {
             "index": {
@@ -149,6 +171,8 @@
             "en": "let's go with option {index}"
           },
           "risk": "reversible",
+          "dynamicRiskFromProposedAction": true,
+          "allowedChannels": ["chips", "action_button"],
           "prior": 0.35
         },
         {
@@ -367,6 +391,7 @@
             "en": "open a pull request"
           },
           "risk": "side_effect",
+          "allowedChannels": ["chips", "action_button"],
           "prior": 0.15
         },
         {
@@ -466,6 +491,158 @@
           ],
           "render": {
             "zh-CN": "举个具体的代码调用例子",
+            "en": "show me a concrete code example"
+          },
+          "risk": "none",
+          "prior": 0.25
+        }
+      ]
+    },
+    {
+      "id": "coding.exec_succeeded",
+      "description": "The agent ran read-only or inspection commands that succeeded without modifying files.",
+      "priority": 14,
+      "triggerOnTurnStatuses": [
+        "completed"
+      ],
+      "match": {
+        "all": [
+          {
+            "signal": "lastTurn.filesChanged",
+            "eq": 0
+          },
+          {
+            "signal": "lastTurn.toolKinds",
+            "contains": "execute"
+          },
+          {
+            "signal": "lastTurn.failedExecs",
+            "eq": 0
+          }
+        ]
+      },
+      "intents": [
+        {
+          "id": "continue_task",
+          "description": "Proceed with the next step based on the command output.",
+          "examples": [
+            "继续下一步",
+            "接着往下做",
+            "continue with the next step",
+            "proceed"
+          ],
+          "render": {
+            "zh-CN": "继续下一步",
+            "en": "continue with the next step"
+          },
+          "risk": "reversible",
+          "prior": 0.5
+        },
+        {
+          "id": "explain_output",
+          "description": "Ask the agent to explain or summarize the command output.",
+          "examples": [
+            "解释一下这个输出",
+            "这代表什么意思",
+            "explain this output",
+            "what does this output mean?"
+          ],
+          "render": {
+            "zh-CN": "解释一下这个输出结果",
+            "en": "explain what this output means"
+          },
+          "risk": "none",
+          "prior": 0.3
+        },
+        {
+          "id": "apply_suggestion",
+          "description": "Ask the agent to make the code changes implied by the inspection.",
+          "examples": [
+            "开始改代码吧",
+            "动手修改吧",
+            "go ahead and make the changes",
+            "implement the fix now"
+          ],
+          "render": {
+            "zh-CN": "开始修改代码吧",
+            "en": "go ahead and make the changes"
+          },
+          "risk": "reversible",
+          "prior": 0.2
+        }
+      ]
+    },
+    {
+      "id": "coding.general_followup",
+      "description": "Fallback coding scenario when a turn completes normally without matching specialized edit/test/question triggers; uses a conservative high-threshold gate.",
+      "priority": 1,
+      "triggerOnTurnStatuses": [
+        "completed"
+      ],
+      "match": {
+        "all": [
+          {
+            "signal": "lastTurn.status",
+            "eq": "completed"
+          },
+          {
+            "signal": "lastTurn.failedExecs",
+            "eq": 0
+          },
+          {
+            "signal": "lastAgentMessage.length",
+            "gte": 60
+          }
+        ]
+      },
+      "policy": {
+        "minConfidence": 0.75,
+        "minMargin": 0.25
+      },
+      "intents": [
+        {
+          "id": "apply_suggestion",
+          "description": "Ask the agent to implement or execute the proposed approach.",
+          "examples": [
+            "按你说的实现吧",
+            "直接改代码",
+            "implement this now",
+            "go ahead and code it"
+          ],
+          "render": {
+            "zh-CN": "按这个方案实现吧",
+            "en": "go ahead and implement this"
+          },
+          "risk": "reversible",
+          "prior": 0.45
+        },
+        {
+          "id": "write_plan",
+          "description": "Ask the agent to outline a concrete implementation plan first.",
+          "examples": [
+            "先列个修改计划",
+            "写下具体步骤",
+            "write an implementation plan first",
+            "outline the steps first"
+          ],
+          "render": {
+            "zh-CN": "先列一份修改计划",
+            "en": "outline the implementation plan first"
+          },
+          "risk": "read_only",
+          "prior": 0.3
+        },
+        {
+          "id": "ask_example",
+          "description": "Ask for a concrete code snippet or example.",
+          "examples": [
+            "给个具体例子",
+            "写段示例代码看看",
+            "show me a concrete example",
+            "give me a code snippet"
+          ],
+          "render": {
+            "zh-CN": "给个具体的代码示例",
             "en": "show me a concrete code example"
           },
           "risk": "none",

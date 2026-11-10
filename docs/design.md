@@ -1,10 +1,10 @@
 # intent-predict 设计文档
 
-> 一个**有限场景意图预测** SDK，可接入任意 Agent。它借鉴 OpenAI Codex 的 composer predictions，但不预测任意一句话，只在识别出的场景里，从一个有限集合中预测用户的下一步意图。SDK 不依赖具体宿主，并默认委托宿主已有的模型能力完成零配置运行。
+> 一个让**任意 Agent 成为全场景意图预测 Agent（Intent Predict Agent）**的通用 SDK。它不仅能观察宿主对话，还能观察终端命令、Git 工作区、文件变动、IDE 焦点与桌面/剪贴板环境（Omni-Context Observers），在识别出的有限场景里从封闭集合中预测用户下一步意图；默认零配置复用宿主自身模型，行动力从阶段 1「纯建议输出」渐进演进到阶段 2「推测预执行」与阶段 3「建议+委托执行」。
 
 | 项 | 内容 |
 |---|---|
-| 状态 | v0.2（施工级规范），含完整 `spec/*.schema.json` 与 `packages/pack-coding/pack.json` |
+| 状态 | v0.3（全场景 Intent Predict Agent 规范 + P0/P1/P2 安全与一致性闭环），含 `spec/*.schema.json` 与 `packages/pack-coding/pack.json` |
 | 日期 | 2026-11-10 |
 | 调研依据 | [prior-art.md](prior-art.md)：Codex composer predictions 的开源后端、Qwen Code 的 NES 和推测执行、其他开源插件 |
 
@@ -119,54 +119,90 @@ Qwen 的 Web Shell 里还有一个更接近"意图"的设计。它对用户正�
 | Feedback | 预测展示之后用户的处理结果：接受、编辑、忽略、关闭、过期 |
 | Sampler | 宿主提供的模型采样委托接口：既支持缓存共享分叉（`mode: 'fork'`），也支持委托宿主已有模型跑紧凑提示词（`mode: 'compact'`），实现零配置运行 |
 
-## 5. 总体架构
+## 5. 总体架构：让任意 Agent 成为全场景 Intent Predict Agent
+
+接入 `intent-predict` 后，宿主不再只是被动等待用户输入的对话机器人，而是升级为具备**全场景感知（Omni-Context Observation）**与**三阶段行动力（3-Stage Agency）**的 **Intent Predict Agent**：
 
 ```mermaid
-flowchart LR
-  subgraph Host["宿主 Agent（Hermes / Codex / ACP / 任意）"]
-    E["事件<br/>消息 / 工具 / 产物 / 状态"]
-    S["Sampler（零配置委托）<br/>fork 缓存分叉 / compact 宿主模型"]
-    U["输入框 UI"]
+flowchart TB
+  subgraph Observers["1. 全场景观察层（Omni-Context Observers，超越单一对话）"]
+    direction LR
+    O_CHAT["宿主对话事件<br/>turn / message / tool / artifact"]
+    O_TERM["终端观察器<br/>env.terminal_command (exitCode/cwd)"]
+    O_GIT["Git 工作区观察器<br/>env.git_status (dirty/staged/branch)"]
+    O_FS["文件变动观察器<br/>env.file_changed (user/external)"]
+    O_IDE["IDE 焦点与诊断<br/>env.ide_context (activeFile/errors)"]
+    O_AMB["桌面与剪贴板环境<br/>env.ambient_context (stacktrace/url)"]
   end
-  subgraph SDK["intent-predict core"]
-    ST["SessionStore<br/>信号提取"]
-    TG["触发 + 守卫"]
-    SR["场景路由"]
-    CS["候选来源<br/>规则 / 先验 / 模型 / 向量"]
-    FU["融合"]
-    GT["门控"]
-    RD["渲染 + 过滤"]
-    FB[("反馈日志")]
+
+  subgraph Core["2. intent-predict SDK 核心引擎（使能任意 Agent）"]
+    direction LR
+    ST["Session & Env Store<br/>对话信号 + 环境信号 + 提议风险扫描"]
+    TG["多源触发 + 守卫<br/>turn 边界 / 环境事件防抖触发"]
+    SR["有限场景路由<br/>专用场景 (p:10..30) → 兜底场景 (p:1)<br/>Per-Intent 来源策略绑定"]
+    CS["候选生成<br/>Rule (仅 explicit 短路) / Prior / Model (top-1 + runnerUps)"]
+    FU["融合 + 风险对齐门控<br/>effectiveRisk = max(risk, proposedRisk)<br/>裁决通道: ghost_text / chips / button"]
+    RD["确定性模板 & Action 插值<br/>+ 9 条 CJK/安全过滤"]
+    FB[("本地反馈与校准日志<br/>near-match 豁免退避")]
+    ST --> TG --> SR --> CS --> FU --> RD
+    FB -.->|"Dirichlet 先验 / 阈值退避"| CS
   end
-  E -->|"Adapter / Sidecar"| ST --> TG --> SR --> CS --> FU --> GT --> RD
-  S -.->|"L2 / 宿主模型委托"| CS
-  RD -->|"Prediction"| U
-  U -->|"Feedback"| FB
-  FB -.->|"先验 / 校准"| CS
+
+  subgraph HostModel["宿主零配置 Sampler"]
+    S_FORK["L2 Fork 模式<br/>缓存共享临时分叉（隐私同宿主会话）"]
+    S_COMP["L1 Compact 模式<br/>SDK 先脱敏 → 委托宿主模型"]
+  end
+
+  subgraph Agency["3. 三阶段行动力输出（Progressive Agency）"]
+    direction LR
+    A1["Stage 1：纯建议输出（M0/M1 默认）<br/>Ghost Text / 多候选 Chips / 确认按钮"]
+    A2["Stage 2：推测预执行（M2 可选）<br/>后台静默预跑只读检查/拉取上下文 (prepPlan)"]
+    A3["Stage 3：建议 + 委托执行（M3 可选）<br/>用户一键确认 → 派发给宿主或跨工具执行"]
+    A1 -.->|"渐进升级"| A2 -.->|"渐进升级"| A3
+  end
+
+  Observers -->|"AgentEvent 流 (Adapter / Sidecar)"| ST
+  CS <-->|"sampler/sample + sampler/cancel"| HostModel
+  RD -->|"Prediction (含 displayChannel & agencyStage)"| Agency
+  Agency -->|"Feedback (含 Bigram Dice similarity)"| FB
 ```
 
-数据流程是：宿主送入事件，SDK 返回预测，宿主再把用户反馈传回来。UI 渲染和动作执行都由宿主负责。`@intent-predict/ui` 只是一个可选的参考实现。
+数据流与职责边界：
+- **多源感知汇聚**：除了宿主自身的对话轮次事件（`turn.*`、`tool.*`），外部或宿主内置的轻量观察器（Shell Hook、Git Watcher、FS Watcher、IDE 插件、剪贴板监听）都可以向 SDK 投递 `env.*` 事件。例如用户在终端手敲 `pytest` 失败，即使还没跟 Agent 说话，SDK 也能立即感知并让 Agent 浮现「帮我修一下刚才终端里的 pytest 报错」。
+- **三阶段行动力（Agency Stages）**：
+  - **Stage 1（`suggest_only`，当前默认）**：只输出结构化预测与建议文本，按安全等级投递到宿主 UI（低风险走 `ghost_text`，确认类与外部副作用强制走 `chips` 或 `action_button`），绝不自动执行。
+  - **Stage 2（`speculative_prep`，第二阶段）**：预测产出的同时附带只读预备计划 `prepPlan`（如预取报错文件、静默跑 `git diff` 或 AST 检查），等用户按 Tab 确认时直接秒回。
+  - **Stage 3（`propose_and_dispatch`，第三阶段）**：用户在浮现的意图卡片上点击确认后，直接触发 `action` 派发给目标 Agent 或工具链完成闭环。
 
-一次典型的预测：
+一次典型的全双工预测与取消时序：
 
 ```mermaid
 sequenceDiagram
-  participant H as 宿主 Agent
-  participant P as intent-predict
-  participant M as 宿主 Sampler / 模型
-  participant UI as 输入框
-  H->>P: turn.completed(t7)
-  P->>P: 守卫 → 场景路由 → 规则
-  alt 规则已命中显式提示
-    P-->>H: prediction/updated（不调模型）
-  else 需要模型
-    P->>M: 约束分类（意图目录 + none）
-    M-->>P: intent=run_tests, confidence=0.82
-    P->>P: 融合 → 门控 → 渲染 → 过滤
-    P-->>H: prediction/updated（sourceTurnId=t7）
+  participant Env as 宿主对话 / 环境观察器 (Shell/Git/IDE)
+  participant H as 宿主 Agent (如 Hermes)
+  participant P as intent-predict SDK
+  participant M as 宿主 Sampler (Fork / Compact)
+  participant UI as 输入框 / 意图卡片
+
+  Env->>H: turn.completed 或 env.terminal_command(exit=1)
+  H->>P: session/observe (events)
+  P->>P: settleMs(150ms) → 守卫 → 提议风险扫描(proposedRisk) → 场景路由
+  alt RuleSource 命中 explicit 提示 且 effectiveRisk <= reversible
+    P-->>H: prediction/updated（直接短路，不调模型）
+  else 需要模型分类
+    P->>M: sampler/sample (id="s-1", mode="fork"|"compact")
+    alt 用户在采样中途开始打字 / 新一轮开始
+      H->>P: session/observe (composer.dirty=true / turn.started)
+      P->>M: sampler/cancel (sampleRequestId="s-1")
+      P-->>H: prediction/updated (prediction=null, reason="aborted")
+    else 采样正常返回
+      M-->>P: {intent, confidence, runnerUps, slots, text}
+      P->>P: 融合 → Per-Intent 门控与通道裁决 → 槽位/Action 原子插值 → 9 条过滤
+      P-->>H: prediction/updated (displayChannel="ghost_text"|"chips"|"action_button")
+    end
   end
-  H->>UI: 确认 t7 仍是最新一轮、输入框为空，延迟 300ms 显示
-  UI-->>P: feedback(accepted, tab)
+  H->>UI: 校验 sourceTurnId 未过期且输入框为空，300ms 后按通道渲染
+  UI-->>P: prediction/feedback (accepted | edited | ignored+similarity | dismissed)
 ```
 
 ## 6. 数据模型
@@ -201,6 +237,50 @@ export type AgentEvent =
       type: 'turn.completed'; turnId: string;
       status: 'completed' | 'failed' | 'interrupted';
       errorCode?: string;
+      at: number;
+    }
+  // ── 全场景环境观察事件（Omni-Context Environment Events，超越单一对话边界） ──
+  | {
+      type: 'env.terminal_command';
+      command: string;
+      cwd?: string;
+      exitCode: number;
+      durationMs?: number;
+      summary?: string;
+      at: number;
+    }
+  | {
+      type: 'env.git_status';
+      branch: string;
+      stagedCount?: number;
+      dirtyCount: number;
+      untrackedCount?: number;
+      ahead?: number;
+      behind?: number;
+      hasConflicts?: boolean;
+      at: number;
+    }
+  | {
+      type: 'env.file_changed';
+      paths: string[];
+      actor?: 'user' | 'agent' | 'external';
+      at: number;
+    }
+  | {
+      type: 'env.ide_context';
+      activeFile?: string;
+      cursorLine?: number;
+      selectionLength?: number;
+      diagnosticsErrors?: number;
+      diagnosticsWarnings?: number;
+      at: number;
+    }
+  | {
+      type: 'env.ambient_context';
+      activeApp?: string;
+      windowTitle?: string;
+      clipboardKind?: 'stacktrace' | 'error_log' | 'url' | 'code_snippet' | 'plain_text';
+      clipboardPreview?: string;
       at: number;
     };
 
@@ -241,13 +321,15 @@ export interface ScenarioSpec {
 }
 
 export interface IntentSpec {
-  id: string;                    // 'run_tests'。在包内唯一，禁止为 'none'
+  id: string;                    // 'run_tests'。在单个场景内唯一，禁止为 'none'
   description: string;           // 给模型看，不超过 80 个字符
   examples?: string[];           // 用户的真实说法，建议中英文各 1 到 2 条
   when?: SignalPredicate;        // 前置条件。不满足时该意图不进入候选
   slots?: Record<string, SlotSpec>;
   render?: RenderSpec;           // 文本的生成方式
-  risk: Risk;
+  risk: Risk;                    // 基础风险等级
+  dynamicRiskFromProposedAction?: boolean; // 为 true 时（如 confirm/choose_option），有效风险取 max(risk, lastAgentMessage.proposedRisk)
+  allowedChannels?: Array<'ghost_text' | 'chips' | 'action_button'>; // 显式限定允许展示的 UI 通道
   action?: ActionDescriptor;     // 宿主可以执行的确定性动作
   prior?: number;                // 场景内的默认先验 [0, 1]。不填时平均分配
   enabledByDefault?: boolean;    // 默认 true；freeform 类意图设为 false
@@ -344,9 +426,18 @@ v0.1 内置的信号：
 | `lastAgentMessage.options` | `string[]` | 提取出的编号选项文本数组（算法见 §6.3.3） |
 | `lastAgentMessage.optionsCount` | `number` | `lastAgentMessage.options.length` |
 | `lastAgentMessage.preferredOptionIndex` | `number` | 若某选项含 `(Recommended)` / `（推荐）` 标记则取其 1-based 序号，否则默认 `1` |
+| `lastAgentMessage.proposedRisk` | `Risk` | 从助手最后一条消息的提议内容中检测出的潜在操作风险等级（算法见 §6.3.3），专门用于防止 `confirm` / `choose_option` 低摩擦放行高危操作 |
 | `lastAgentMessage.hints` | `Hint[]` | 显式的下一步提示，结构为 `{ kind: 'slash' \| 'type_literal', value: string }` |
 | `lastUserMessage.text` | `string` | 用户最近一条消息原文 |
 | `user.locale` | `string` | 由用户最近的消息推断（算法见 §6.3.3），**不是** UI 语言 |
+| `env.lastTerminalCommand.command` | `string?` | 最近一次观察到的用户终端命令 |
+| `env.lastTerminalCommand.exitCode` | `number?` | 最近一次用户终端命令的退出码 |
+| `env.git.branch` | `string?` | 当前 Git 分支名 |
+| `env.git.dirtyCount` | `number?` | 工作区未提交改动文件数 |
+| `env.git.hasConflicts` | `boolean?` | 是否存在合并冲突 |
+| `env.ide.activeFile` | `string?` | IDE 当前焦点文件 |
+| `env.ide.diagnosticsErrors` | `number?` | IDE 当前活动文件的 LSP 报错数 |
+| `env.ambient.clipboardKind` | `string?` | 剪贴板内容分类（如 `stacktrace`、`error_log`） |
 | `state.<key>` | `unknown` | 宿主上报的任意状态 |
 
 #### 6.3.3 派生信号的具体提取规则
@@ -370,7 +461,13 @@ v0.1 内置的信号：
    - 在 `lastAgentMessage.tail` 最后 5 行非代码块文本中匹配：
      - **斜杠命令**（`kind: 'slash'`）：反引号、引号或行首的 `/[a-z][a-z0-9_-]{1,30}`，且命令名不含第二个 `/`（排除 `/usr/bin` 之类的路径）。
      - **显式输入引导**（`kind: 'type_literal'`）：匹配 `/(?:type|run|enter|reply with|输入|发送|回复)\s+["'「『]([^"'」』\n]{1,40})["'」』]/iu`。
-5. **用户语言推断 `user.locale`**：
+5. **助手提议风险检测 `lastAgentMessage.proposedRisk`**（解决确认类意图的风险错位问题）：
+   - `confirm` / `choose_option` 等同意类意图本身的文本看似无害（如「可以，继续」），但真正的风险取决于**助手刚刚请求确认的操作**。SDK 对 `lastAgentMessage.tail`（含代码块）执行确定性风险扫描：
+     - **命中 `irreversible`**：匹配 `/(?:\brm\s+-[rRf]+\b|\bgit\s+push\s+[^\n]*--force\b|\bgit\s+reset\s+--hard\b|\bgit\s+clean\s+-[fd]+|\bdrop\s+(?:table|database|schema)\b|\btruncate\s+table\b|\bdelete\s+from\b|\bkubectl\s+delete\b|\bterraform\s+destroy\b|删库|强制推送|清空数据|不可恢复|永久删除)/iu`。
+     - **命中 `side_effect`**：匹配 `/(?:\bgit\s+push\b|\bgh\s+pr\s+(?:create|merge)\b|\bnpm\s+publish\b|\bcargo\s+publish\b|\bdeploy\b|\bkubectl\s+apply\b|\bterraform\s+apply\b|\bdocker\s+push\b|推送到远端|推到生产|发布到|部署到|合并\s*PR|发送邮件)/iu`。
+     - **默认**：未命中上述模式时返回 `'reversible'`。
+   - 任何声明了 `dynamicRiskFromProposedAction: true` 的意图（如 `confirm`、`choose_option`），其运行时的**有效风险等级**强制升级为 `effectiveRisk = max(intent.risk, lastAgentMessage.proposedRisk)`，且在内置 coding 包中默认通过 `when` 谓词直接排除 `proposedRisk ∈ {'side_effect', 'irreversible'}` 的自动确认候选，并限定 `allowedChannels: ['chips', 'action_button']`（禁止进入单键 Tab 接受的 ghost text）。
+6. **用户语言推断 `user.locale`**：
    - 拼接当前会话最近最多 3 条 `message.user.text`（剥离代码块与 URL）。
    - 统计 Unicode 字符占比：假名 `[\u3040-\u30ff]` > 5% → `'ja'`；谚文 `[\uac00-\ud7af]` > 5% → `'ko'`；CJK 表意文字 `[\u4e00-\u9fff]` ≥ 10%（或 CJK 字符数 ≥ 2 且拉丁字母词数 < 5）→ `'zh-CN'`；其余默认 → `'en'`。
 
@@ -386,6 +483,8 @@ export interface Prediction {
   packId: string;
   packVersion: string;
   scenarioId: string;
+  qualifiedIntentId: string;     // 全局唯一归档键：'<packId>@<packVersion>/<scenarioId>#<intentId>'
+  displayChannel: 'ghost_text' | 'chips' | 'action_button'; // 经门控裁定后的推荐展示通道
   intent: { id: string; confidence: number; slots: Record<string, unknown> };
   text: string;                  // 渲染好的建议，使用用户的语言和说话风格
   locale: string;
@@ -408,7 +507,8 @@ export interface Prediction {
 export type SuppressedReason =
   | 'disabled' | 'non_interactive' | 'pending_interaction' | 'failed_turn_unhandled'
   | 'interrupted_turn' | 'min_turns_not_met' | 'composer_dirty' | 'mode_blocked'
-  | 'budget_exhausted' | 'incognito' | 'no_scenario_matched' | 'empty_catalog'
+  | 'budget_exhausted' | 'budget_exhausted_no_explicit_rule' | 'incognito'
+  | 'no_scenario_matched' | 'empty_catalog' | 'no_rule_hit_in_local_mode'
   | 'model_none' | 'below_min_confidence' | 'below_risk_confidence' | 'below_min_margin'
   | 'in_cooldown' | 'max_per_session_reached' | 'risk_disallowed_for_ghost_text'
   | 'invalid_model_output' | 'unknown_intent' | 'slot_validation_failed'
@@ -470,10 +570,10 @@ export interface Feedback {
 | 会话太短 | `session.turnCount < minTurns` | `min_turns_not_met` | `minTurns = 1` |
 | 输入框非空 | `state.composer.dirty` | `composer_dirty` | 跳过 |
 | 模式 | 宿主声明的模式黑名单，例如 plan 模式 | `mode_blocked` | 可以配置 |
-| 预算 | 会话预算或每小时预算用完 | `budget_exhausted` | 跳过（退回纯本地规则） |
+| 模型预算 | 会话或每小时**模型调用预算**用完 | `budget_exhausted_no_explicit_rule` | **仅跳过 `ModelSource`**（降级为 `L-Local`）：若 `RuleSource` 命中 `explicit: true` 候选仍正常产出建议；若未命中 `explicit` 规则则放弃并记录 `budget_exhausted_no_explicit_rule` |
 | 隐私模式 | `state.incognito` | `incognito` | 跳过 |
 
-### 7.3 场景路由与意图合并算法
+### 7.3 场景路由、意图合并与作用域隔离
 
 1. **过滤与排序**：
    - 遍历已加载的所有 `ScenarioPack` 中的场景，先检查 `triggerOnTurnStatuses` 是否包含当前 `lastTurn.status`，再求值 `match` 谓词。
@@ -481,17 +581,20 @@ export interface Feedback {
      1. `scenario.priority ?? 0`（从高到低）
      2. `specificity(scenario.match)`（谓词命中特异性，从高到低，见 §6.3.1）
      3. 声明顺序（先声明的优先）
-2. **硬边界**：若没有任何场景命中，立即返回 `{ type: 'completed', prediction: null, suppressedReason: 'no_scenario_matched' }`，**绝不调用模型**。这是"有限场景"的硬边界：识别不出场景，就不做预测。
-3. **Top-k 合并与意图去重**：
-   - 取排名前 `k` 个命中场景（默认 `k = 2`），排名第 1 的场景作为主场景（决定 `prediction.scenarioId`、`prediction.packId` 和场景级 `policy` 覆盖）。
-   - 遍历这 `k` 个场景中的意图：
+2. **硬边界与覆盖梯度**：
+   - 若没有任何场景命中，立即返回 `{ type: 'completed', prediction: null, suppressedReason: 'no_scenario_matched' }`，**绝不调用模型**。
+   - 为避免场景条件过窄导致覆盖率悬崖，场景包采用“**高特异度场景（priority 10–30）+ 保守兜底场景（如 `coding.general_followup`，priority 1，自带高门控阈值 `minConfidence: 0.75, minMargin: 0.25`）**”的斜坡结构；且当已有 `priority ≥ 10` 的专用场景命中时，不再把 `priority ≤ 1` 的兜底场景混入 top-k。
+3. **Top-k 合并、来源场景绑定与全局唯一键**：
+   - 取排名前 `k` 个命中场景（默认 `k = 2`）。
+   - 遍历这 `k` 个场景中的意图，每个候选条目保留其**来源场景引用** `originScenario`（含 `packId`、`packVersion`、`scenarioId`、`scenario.policy`）：
      - 过滤掉 `enabledByDefault === false`（且未被宿主显式开启）的意图；
      - 若意图带有 `when` 谓词且求值为 `false`，剔除该意图；
-     - 若多个场景包含相同 `intent.id`，保留高优先级场景中的定义。
+     - 若多个命中场景包含相同 `intent.id`，保留高优先级场景中的定义及其 `originScenario`。
+   - **策略归属（Per-Intent Origin Policy）**：门控阶段对最终胜出的首选意图 $i_{(1)}$ 求值时，使用的是**该意图所属 `originScenario.policy`** 与全局 `GatePolicy` 的合并结果（而非盲目使用第 1 场景的 policy），且最终 `Prediction.scenarioId` 与 `qualifiedIntentId`（格式：`<packId>@<packVersion>/<originScenarioId>#<intentId>`）均精确指向该意图的来源场景，彻底杜绝跨场景门控错位与遥测串味。
    - **上限截断**：合并后的候选目录最多保留 **15 个意图**（超出时按 `(scenarioRank, intent.prior ?? 1/N)` 截断）。这样模型提示词能稳定控制在 4,000 字节以内，满足 Codex `thread/sample` 的字节上限。
    - 若过滤后候选目录为空，返回 `suppressedReason: 'empty_catalog'`。
 
-### 7.4 候选来源
+### 7.4 候选来源与规则定位
 
 ```ts
 export interface CandidateSource {
@@ -502,7 +605,7 @@ export interface CandidateSource {
 export interface Candidate {
   intentId: string;              // 必须在目录内，或者是 'none'
   score: number;                 // 取值 [0, 1]
-  explicit?: boolean;            // 是否来自 agent 的显式提示
+  explicit?: boolean;            // 是否来自 agent 的显式提示（唯一可短路模型的规则类型）
   slots?: Record<string, unknown>;
   text?: string;
   evidence?: string;             // 调试用
@@ -511,12 +614,16 @@ export interface Candidate {
 
 | 来源 | 阶段 | 说明 |
 |---|---|---|
-| **RuleSource** | M0 | 始终启用，本地执行，耗时小于 5ms。<br>① 用 `when` 过滤目录。<br>② **显式命令映射**：若 `lastAgentMessage.hints` 含 `{ kind: 'slash', value: '/review' }`，且目录中某意图的 `action.command === '/review'`（或 `examples` 含 `'/review'`），则产出 `{ intentId, score: 0.92, explicit: true }` 候选（借鉴 Qwen 的规则："助手给了 type X 的提示就取 X"）。<br>③ **显式文本提示映射**：若 `hints` 含 `{ kind: 'type_literal', value: X }`，且 `X` 与某意图的 `examples` 归一化匹配，产出 `{ intentId, score: 0.90, explicit: true, text: X }`。<br>④ **结构化选项/确认加分**：若 `lastAgentMessage.optionsCount > 1` 且目录含 `choose_option`，给予规则分 `0.78` 并填入槽位 `index = preferredOptionIndex`；若 `endsWithQuestion === true` 且目录含 `confirm`，给予规则分 `0.72` |
-| **ModelSource** | M0 | 约束分类。**优先走宿主的 `Sampler`（L2 分叉或 L1 宿主零配置模型委托）**，其次走独立配置的 `ModelClient`（L0）。<br>关闭 thinking/reasoning，温度设为 0，最多输出约 120 个 token。<br>提供方支持结构化输出时，用带 enum 的 JSON Schema 约束输出；不支持时用严格解析（见 §7.5.2），失败就放弃 |
+| **RuleSource** | M0 | 始终启用，本地执行，耗时 < 5ms。严格区分两类产出：<br>① **显式提示候选（`explicit: true`）**：当 `lastAgentMessage.hints` 含 `{ kind: 'slash', value: '/review' }` 且匹配某意图的 `action.command` / `examples`，或含 `{ kind: 'type_literal', value: X }` 且匹配某意图的 `examples` 时，产出 `score: 0.92, explicit: true`。此类候选直接短路模型。<br>② **结构化槽位预填与结构加分（`explicit: false`）**：当 `optionsCount > 1` 时为 `choose_option` 预填确定性槽位 `index = preferredOptionIndex` 并赋予结构加分 `b_rule = 0.20`；当 `endsWithQuestion === true` 时为 `confirm` 赋予结构加分 `b_rule = 0.15`。**非显式规则绝不伪造高置信度独立候选，避免与模型 `none` 打架** |
+| **ModelSource** | M0 | 约束分类。**优先走宿主的 `Sampler`（L2 分叉或 L1 宿主零配置模型委托）**，其次走独立配置的 `ModelClient`（L0）。<br>关闭 thinking/reasoning，温度设为 0，最多输出约 120 个 token。<br>要求模型返回首选意图 `intent`、置信度 `confidence` 以及最多 2 个备选 `runnerUps`（见 §7.5），为 chips 模式提供真实分布 |
 | **PriorSource** | M2 | 计算狄利克雷平滑转移概率 `P(i \| scenario, lastIntent) = (c(s, i_prev, i) + α₀·p₀(i)) / (Σⱼ c(s, i_prev, j) + α₀)`，其中 `α₀ = 5`，`p₀(i)` 为场景包声明的默认先验（未声明时均分，并为 `none` 预留 `p₀(none) = 0.25`）。数据来自本地反馈日志 |
 | **EmbeddingSource** | M2 | 以"agent 消息末尾 + 信号摘要"为查询，在本地已标注的样例上做余弦近邻检索。不需要调用 LLM |
 
-**短路规则**：RuleSource 给出了 `explicit: true` 候选，且该意图的风险不高于 `reversible`，且其所有必填槽位都能由 `slot.from` 信号或 `default` 解析完毕时，直接采用，不调模型。
+**短路规则（Short-circuit）**：
+- 当且仅当 `RuleSource` 给出了 `explicit: true` 候选，且该意图的有效风险 `effectiveRisk ∈ {'none', 'read_only', 'reversible'}`，且所有必填槽位已由 `slot.from` 或 `default` 解析完毕时，**直接采用该候选，跳过模型调用**。
+- 当没有 `explicit: true` 候选时：
+  - 若存在可用的 `Sampler` 或 `ModelClient`（且模型预算未耗尽），调用 `ModelSource`；此时 `RuleSource` 的非显式规则仅负责**确定性槽位预填**与**备选排序加分**，裁决权归模型。
+  - 若处于 `L-Local`（无模型或 `budget_exhausted`），不产生物理猜测，直接返回 `no_rule_hit_in_local_mode`（或 `budget_exhausted_no_explicit_rule`）。
 
 ### 7.5 模型提示词与输出解析
 
@@ -527,7 +634,7 @@ export interface Candidate {
 Predict the user's NEXT message in this session, choosing from a fixed catalog.
 
 Scenario: {{scenario.description}}
-Catalog (pick exactly one id):
+Catalog (pick from these ids):
 {{#each intents}}- {{id}}: {{description}}{{#if slots}} (slots: {{slots_spec}}){{/if}}{{#if examples}} e.g. {{examples}}{{/if}}
 {{/each}}- none: nothing above fits, or you are not confident.
 
@@ -536,19 +643,22 @@ Rules:
    THE TEST: Would the user think "I was just about to type that"?
 2. Read the last few lines of the assistant's message carefully: if it explicitly
    offers a next step (a slash command, a direct question, or numbered options),
-   prefer the matching intent.
+   prefer the matching intent. If the assistant asks to confirm a destructive or
+   external side-effect action, return "none".
 3. Prefer "none" over a guess. A wrong suggestion costs more than no suggestion.
 4. "text" is what the user would type in locale "{{user.locale}}": one short
    sentence matching the user's tone, no quotes, no markdown, never in the
    assistant's voice. Leave "text" empty if intent is "none".
 5. Fill "slots" ONLY with values that literally appear in the conversation.
+6. Optionally list up to 2 plausible runner-up intents in "runnerUps" with their
+   probabilities; total probability (confidence + sum(runnerUps) + P(none)) <= 1.
 
 {{#if compact}}Recent conversation (oldest first):
 {{transcript}}
 {{/if}}Signals: {{signals_json}}
 
 Reply with a single JSON object only:
-{"intent":"<id>","confidence":0.0,"slots":{},"text":""}
+{"intent":"<id>","confidence":0.0,"slots":{},"text":"","runnerUps":[{"intent":"<id2>","confidence":0.0}]}
 ```
 
 #### 7.5.1 紧凑上下文（compact 模式）的确定性构建规则
@@ -570,36 +680,42 @@ Reply with a single JSON object only:
    - `intent` 必须是字符串，且属于 `catalogIds ∪ {'none'}`（否则记为 `unknown_intent`）。
    - `confidence` 必须是有限数字且在 `[0, 1]` 内（否则记为 `invalid_model_output`）。
    - `slots` 若存在必须是纯对象（plain object）。
+   - `runnerUps` 若存在必须是数组（最多取前 2 项），每项的 `intent` 必须在 `catalogIds` 内且不等于主 `intent`，`confidence` 在 `[0, 1]` 内；非法项直接忽略。
 
-### 7.6 融合算法
+### 7.6 融合算法（消除规则与模型冲突，支持多候选 Chips）
 
 设候选目录加上 `'none'` 构成集合 $\mathcal{I} = \{i_1, \dots, i_m, \text{none}\}$。
 
-1. **显式提示直通**：若 RuleSource 产出了 `explicit: true` 候选 $i^*$，它排第一，分数取 `max(0.90, 规则分, 模型分)`，其余意图分数按剩余概率质量缩放。
-2. **模型 + 先验/规则融合（常规路径）**：
-   - 将模型输出转换为全目录概率分布 $P_{\text{model}}$：
-     - 若模型输出 `intent = "none"`，则直接令 $P_{\text{model}}(\text{none}) = 1$，门控直接以 `model_none` 放弃。
-     - 若模型给出首选意图 $i_1$ 及置信度 $c \in [0, 1]$：
-       - $P_{\text{model}}(\text{none}) = 1 - c$
-       - $P_{\text{model}}(i_1) = c \cdot (1 - \epsilon)$，其中平滑项 $\epsilon = 0.05$
-       - 对其余目录内意图 $j \neq i_1$，按先验比例分配剩余的 $c \cdot \epsilon$。
-   - 计算对数线性几何加权并归一化（默认 $\alpha = 0.85$；M0 阶段无本地历史反馈时，先验分布 $P_{\text{prior}}$ 直接取场景包中的 `intent.prior` 归一化值）：
-     $$\tilde{S}(i) = P_{\text{model}}(i)^{\alpha} \cdot P_{\text{prior}}(i)^{1 - \alpha}, \quad \text{final}(i) = \frac{\tilde{S}(i)}{\sum_{k \in \mathcal{I}} \tilde{S}(k)}$$
-3. **无模型降级路径（纯本地模式）**：
-   - 仅当存在 RuleSource 候选（显式提示、问句确认、编号选项）时产出预测：$\text{final}(i) = 0.75 \cdot s_{\text{rule}}(i) + 0.25 \cdot P_{\text{prior}}(i)$。若无任何规则命中，纯先验分数不得单独跨越门控阈值（避免盲猜）。
+1. **路径 A：显式提示短路（Explicit Rule Short-circuit）**
+   - 若 `RuleSource` 产出了 `explicit: true` 候选 $i^*$（且满足 §7.4 短路条件），直接令 $\text{final}(i^*) = 0.92$，不调用模型。
+   - 备选 `alternatives` 直接从同场景下其余满足 `when` 条件的意图中按先验 $P_{\text{prior}}(j)$ 选取前 2 项（分数设为 $0.25 \cdot P_{\text{prior}}(j) / \max_k P_{\text{prior}}(k)$）。
+2. **路径 B：模型分类与先验/结构加分融合（Standard Model Path）**
+   - **当模型返回 `intent === "none"` 时**：因为 `explicit: true` 已在路径 A 短路，走到这里的只剩非显式结构信号（如句子末尾有问号）。模型在阅读完整语义后判定 `none`（例如问句只是修辞、或涉及高危操作），**无条件尊重模型的否决权**，直接以 `suppressedReason: 'model_none'` 终止，不让非显式规则强行推翻模型。
+   - **当模型返回首选意图 $i_1$（置信度 $c_1$）及可选的 `runnerUps` $(i_2, c_2), (i_3, c_3)$ 时**：
+     - 记已知模型概率和 $S = \min(0.98, c_1 + c_2 + c_3)$，令 $P_{\text{model}}(\text{none}) = \max(1 - c_1, 1 - S)$。
+     - 对模型未显式列出的其余目录内意图 $j \notin \{i_1, i_2, i_3\}$，分配极小平滑底数 $\epsilon_0 = 0.02 / m$。
+     - 结合场景先验 $P_{\text{prior}}(i)$ 与非显式规则结构加分 $b_{\text{rule}}(i) \in [0, 0.20]$（见 §7.4）：
+       $$\tilde{S}(i) = \left(P_{\text{model}}(i) + 0.15 \cdot b_{\text{rule}}(i)\right)^{\alpha} \cdot P_{\text{prior}}(i)^{1 - \alpha}, \quad \text{final}(i) = \frac{\tilde{S}(i)}{\sum_{k \in \mathcal{I}} \tilde{S}(k)}$$
+       其中默认 $\alpha = 0.85$。
+   - **备选 `alternatives` 生成（确保 Chips 模式可用）**：
+     - 备选意图按 $\text{altScore}(j) = 0.65 \cdot P_{\text{model}}(j) + 0.35 \cdot P_{\text{prior}}(j) + 0.15 \cdot b_{\text{rule}}(j)$（$j \neq i_1, j \neq \text{none}$）降序排列。
+     - 只要主意图 $i_1$ 通过门控，且备选意图 $j$ 满足未冷却、有效风险非 `irreversible`、且 $\text{altScore}(j) \ge 0.18$，即可入选 `alternatives`（最多 2 项，使用各自模板确定性渲染文本）。这样即使模型只输出了 top-1，高先验或带规则加分的第二顺位意图（如 `after_edit` 下的 `review_diff`）依然能稳定进入 Chips。
 
-v2 会改成可学习的对数线性权重，并加入置信度校准：优先用 logprobs，否则用温度缩放或保序回归。
-
-### 7.7 门控与默认阈值参数
+### 7.7 门控、风险对齐与展示通道裁决
 
 ```ts
 export interface GatePolicy {
   minConfidence: number;               // 默认 0.60
   minMargin: number;                   // top1 − top2（含 none），默认 0.15
   riskMinConfidence: Record<Risk, number>;
-  ghostTextRisks: Risk[];              // 允许以 ghost text 出现的风险等级
+  ghostTextRisks: Risk[];              // 允许以单键 Tab ghost text 出现的风险等级
   cooldownTurnsAfterDismiss: number;   // 某意图被 Esc 关闭后，几轮内不再出现，默认 3
-  ignoredBackoff: { streak: number; raiseBy: number; maxRaise: number };
+  ignoredBackoff: {
+    streak: number;                    // 默认 3
+    raiseBy: number;                   // 默认 0.10
+    maxRaise: number;                  // 默认 0.25
+    nearMatchSimilarityThreshold: number; // 默认 0.75：忽略但打出高相似文本时视为弱正例
+  };
   maxPerSession?: number;
 }
 ```
@@ -608,39 +724,33 @@ export interface GatePolicy {
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `minConfidence` | `0.60` | 全局最低置信度 |
+| `minConfidence` | `0.60` | 全局最低置信度（场景级 `policy` 可覆盖，如兜底场景设为 `0.75`） |
 | `minMargin` | `0.15` | $\text{final}(i_{(1)}) - \max_{j \neq i_{(1)}} \text{final}(j) \ge 0.15$ |
 | `riskMinConfidence.none` | `0.55` | 纯对话问答 |
 | `riskMinConfidence.read_only` | `0.60` | 只读检查/查看 |
 | `riskMinConfidence.reversible` | `0.65` | 跑测试、本地修改、本地提交 |
 | `riskMinConfidence.side_effect` | `0.80` | 推送远端、创建 PR、发外部请求 |
-| `riskMinConfidence.irreversible` | `0.95` | 默认禁止出现在 ghost text 中 |
-| `ghostTextRisks` | `['none', 'read_only', 'reversible', 'side_effect']` | `irreversible` 排除在外 |
-| `cooldownTurnsAfterDismiss` | `3` | 用户按 Esc 关闭某意图后，接下来 3 轮内屏蔽该 `intent.id` |
-| `ignoredBackoff` | `{ streak: 3, raiseBy: 0.10, maxRaise: 0.25 }` | 连续被忽略达到 3 次时，每多忽略一次将有效阈值上调 `0.10`（最高累计上调 `0.25`）；一旦出现 `accepted` 或 `edited` 立即清零 |
+| `riskMinConfidence.irreversible` | `0.95` | 破坏性操作，默认禁止展示 |
+| `ghostTextRisks` | `['none', 'read_only', 'reversible']` | **默认仅允许无副作用或本地可逆意图进入单键 Tab 的 ghost text**；`side_effect` 与 `irreversible` 一律排除在 ghost text 之外 |
+| `cooldownTurnsAfterDismiss` | `3` | 用户按 Esc 关闭某意图后，接下来 3 轮内屏蔽该 `qualifiedIntentId` |
+| `ignoredBackoff` | `{ streak: 3, raiseBy: 0.10, maxRaise: 0.25, nearMatchSimilarityThreshold: 0.75 }` | 仅当 `outcome === 'ignored'` 且 `similarity < 0.75` 时计入未命中连击；若 `similarity >= 0.75`（用户手打了高度相似的话），视为**近似命中（near-match）**，直接清零退避计数 |
 
-**门控判定顺序**（任一不满足即返回 `prediction: null` 并记录对应的 `suppressedReason`）：
-1. 若首选是 `'none'` 或 $\text{final}(\text{none}) \ge \text{final}(i_{(1)})$ → `model_none`。对比原 `none` 分数大于等于 top1 的规则。
-2. 检查会话展示次数上限 `maxPerSession` → `max_per_session_reached`
-3. 检查冷却表 `dismissedUntilTurn[intent] > session.turnCount` → `in_cooldown`
-4. 检查有效阈值（其中 backoffDelta 来自 ignoredBackoff 累计上调值）：
+**门控与通道判定顺序**（使用胜出意图所属 `originScenario.policy` 覆盖后的策略，任一不满足即返回 `prediction: null` 并记录对应的 `suppressedReason`）：
+1. **计算有效风险 `effectiveRisk`**：若意图声明了 `dynamicRiskFromProposedAction: true`（如 `confirm`、`choose_option`），令 $\text{effectiveRisk} = \max(\text{intent.risk}, \text{lastAgentMessage.proposedRisk})$；否则为 $\text{intent.risk}$。
+2. 若首选是 `'none'` 或 $\text{final}(\text{none}) \ge \text{final}(i_{(1)})$ → `model_none`。
+3. 检查会话展示次数上限 `maxPerSession` → `max_per_session_reached`。
+4. 检查冷却表 `dismissedUntilTurn[qualifiedIntentId] > session.turnCount` → `in_cooldown`。
+5. 检查有效阈值（含 `ignoredBackoff` 的 `backoffDelta`）：
    - 若 $\text{final}(i_{(1)}) < \text{minConfidence} + \text{backoffDelta}$ → `below_min_confidence`
-   - 若 $\text{final}(i_{(1)}) < \text{riskMinConfidence}[\text{risk}] + \text{backoffDelta}$ → `below_risk_confidence`
-5. 检查领先幅度 $\text{final}(i_{(1)}) - \text{final}(i_{(2)}) < \text{minMargin}$ → `below_min_margin`
-6. 检查展示通道：`!ghostTextRisks.includes(risk)` 且宿主未声明按钮展示通道 → `risk_disallowed_for_ghost_text`。`irreversible` 意图不以 ghost text 形式出现；它只能以需要确认的按钮出现，并且必须由场景显式开启。
+   - 若 $\text{final}(i_{(1)}) < \text{riskMinConfidence}[\text{effectiveRisk}] + \text{backoffDelta}$ → `below_risk_confidence`
+6. 检查领先幅度 $\text{final}(i_{(1)}) - \text{final}(i_{(2)}) < \text{minMargin}$ → `below_min_margin`。
+7. **裁决展示通道 `displayChannel`**：
+   - 计算该意图允许的通道集合：`allowed = intent.allowedChannels ?? (ghostTextRisks.includes(effectiveRisk) ? ['ghost_text', 'chips', 'action_button'] : effectiveRisk === 'side_effect' ? ['chips', 'action_button'] : ['action_button'])`。
+   - 如此设计后：
+     - **`confirm` / `choose_option`**（声明了 `allowedChannels: ['chips', 'action_button']`）与 **`side_effect` 意图**（如 `open_pr`）**永远不会以单键 Tab 即可上屏的 ghost text 出现**，只能以显式的 Chip（需 `Alt+1` 或点击）或需二次确认的动作按钮展示。
+     - 若宿主仅支持 `ghost_text` 通道（未开启 chips/button），而该意图的 `allowed` 不含 `'ghost_text'`，则门控直接拦截并记录 `risk_disallowed_for_ghost_text`。
 
-- **出现下列任一情况就不给建议，并记录 `suppressed` 及原因**：
-  - 模型输出格式错误（`invalid_model_output`）
-  - 意图不在目录内（`unknown_intent`）
-  - 槽位校验失败（`slot_validation_failed`）
-  - 超时（`timeout`）
-  - 被取消（`aborted`）
-  - 过滤规则命中（`filter_*`）
-  - 结果已过期（`stale_turn`）
-
-- **备选列表 `alternatives`**：从其余目录内意图中筛选满足未冷却、非 `irreversible`、且 $\text{final}(j) \ge 0.20$ 的前 2 项，连同首选凑成最多 3 个 chips。
-
-### 7.8 渲染、槽位校验与过滤规则
+### 7.8 渲染、槽位校验、Action 载荷绑定与过滤规则
 
 - **语言**：以 `user.locale` 为准，它来自用户最近的消息，所以用户用中文提问时，建议也用中文。
 - **模板语言回退链**：`user.locale`（如 `zh-CN`）→ 语言主标签（`zh`）→ `en` → 第一个可用键。
@@ -660,10 +770,15 @@ export interface GatePolicy {
    - 若声明了 `slotSpec.pattern`，用 `new RegExp(pattern, 'u')` 校验字符串表示。
    - 任一槽位校验不通过，**整条预测立即作废**，记录 `suppressedReason: 'slot_validation_failed'`。
 
-#### 7.8.2 模板渲染
+#### 7.8.2 模板与 Action 载荷渲染（Action Payload Interpolation）
 
-- 使用模板时，把槽位填进模板的 `{slotName}` 占位符。若模板中引用了未定义的槽位名，按 `slot_validation_failed` 作废。
-- `render.mode=model` 时用模型生成的文本，生成的文本同样必须通过下面的过滤规则。
+1. **文本模板渲染**：把通过校验的槽位填进 `render` 模板的 `{slotName}` 占位符。若模板中引用了未定义或值为空的槽位名，按 `slot_validation_failed` 作废。
+2. **Action 载荷插值与执行边界**：
+   - 若意图声明了 `action`（如 `{ type: 'command', command: '/review', args: '{path}' }` 或 `{ type: 'tool', name: 'track_shipment', input: { orderId: '{orderId}' } }`），SDK 会递归遍历 `action.args`、`action.input`、`action.payload` 中的字符串值，将 `{slotName}` 替换为已通过 §7.8.1 校验的槽位值。
+   - **严格原子性**：若 `action` 中引用的任何 `{slotName}` 未定义或未解析出有效值，**整条预测按 `slot_validation_failed` 作废**（绝不向宿主交付带未替换 `{slotName}` 字面量的半成品 `action`）。
+   - **宿主执行契约**：
+     - 当用户在 `ghost_text` 或 `chips` 中按 `Tab` / `Alt+1..3` 接受建议时，默认行为始终是**将文本（或 `action.type === 'command'` 对应的斜杠命令字符串）填入输入框，不直接执行工具**。
+     - `action.type === 'tool' | 'custom'` 仅作为结构化元数据随 `Prediction` 提供给宿主；宿主若将其渲染为快捷动作按钮，点击后**必须经用户显式确认**方可调用对应工具。
 
 #### 7.8.3 过滤规则（Filter Pipeline）
 
@@ -692,10 +807,11 @@ export interface GatePolicy {
 
 | 结果 | 含义 | 作为学习信号 |
 |---|---|---|
-| accepted | 用户接受了建议，并且原样发送（`similarity = 1.0`） | 强正例 |
-| edited | 用户按 Tab 填入后修改了文本再发送（`similarity ∈ (0, 1)`） | 意图大概率正确，文本需要改进 |
-| ignored | 用户未接受建议，直接输入并发送了别的内容 | 预测意图的负例。如果开启了 `collectFinalText`，可以离线标注出真实意图作为正例 |
-| dismissed | 用户按了 Esc 显式关闭建议 | 强负例，触发该意图 `cooldownTurnsAfterDismiss` 轮冷却 |
+| accepted | 用户接受了建议，并且原样发送（`similarity = 1.0`） | 强正例，立即清零 `ignoredBackoff` 连击 |
+| edited | 用户按 Tab 填入后修改了文本再发送（`similarity ∈ (0, 1)`） | 意图大概率正确，文本需要改进；立即清零 `ignoredBackoff` 连击 |
+| ignored（near-match） | 用户未按 Tab，但手打了与建议高度相似的话（`similarity ≥ 0.75`） | **弱正例（近似命中）**，不计入负例退避，并清零 `ignoredBackoff` 连击 |
+| ignored（mismatch） | 用户未接受建议，直接输入并发送了不相关的内容（`similarity < 0.75`） | 预测意图的负例，累加 `ignoredBackoff` 连击。如果开启了 `collectFinalText`，可以离线标注出真实意图作为正例 |
+| dismissed | 用户按了 Esc 显式关闭建议 | 强负例，触发该 `qualifiedIntentId` 进入 `cooldownTurnsAfterDismiss` 轮冷却 |
 | expired | 用户还没处理，新的一轮就开始了 | 中性，不计入负例退避 |
 | suppressed | 被门控或过滤器拦下（SDK 内部记录） | 用于分析阈值与覆盖率 |
 
@@ -748,10 +864,17 @@ const predictor = createPredictor({
 
 const session = predictor.session('thread-123', { interactive: true });
 
-// L0：每轮结束时调用一次
+// L0：每轮结束时调用一次（可传入 state 快照让守卫完整生效）
 const result = await session.predict({
   sourceTurnId: 't7',
   messages: history,        // SimpleMessage[]，也接受 fromOpenAIChat(history) 等转换结果
+  state: {                  // 可选：L0 下一次性传入宿主当前状态快照
+    'composer.dirty': false,
+    pendingApproval: false,
+    pendingInput: false,
+    mode: 'code',
+    incognito: false,
+  },
   signal: abort.signal,
 });
 
@@ -845,11 +968,34 @@ export interface Sampler {
 |---|---|---|---|
 | 宿主 → SDK | `initialize` | 请求 | 声明客户端信息、能力（`sampler`、`interactive`）、策略和要加载的场景包 |
 | 宿主 → SDK | `session/observe` | 通知 | `{ sessionId, events: AgentEvent[] }` |
-| 宿主 → SDK | `prediction/request` | 请求 | `{ sessionId, sourceTurnId, messages? }`。立即返回 `{}`，结果另行通知 |
+| 宿主 → SDK | `prediction/request` | 请求 | `{ sessionId, sourceTurnId, messages?, state? }`。立即返回 `{}`，结果另行通知 |
 | 宿主 → SDK | `prediction/cancel` | 请求 | `{ sessionId, reason? }` |
 | 宿主 → SDK | `prediction/feedback` | 通知 | `Feedback` |
 | SDK → 宿主 | `prediction/updated` | 通知 | `{ sessionId, sourceTurnId, result: PredictionResult }` |
-| SDK → 宿主 | `sampler/sample` | 反向请求 | 只在宿主声明了 `sampler` 能力时使用。支持 `mode: 'fork' | 'compact'`：fork 走宿主缓存分叉，compact 委托宿主已有模型完成推理 |
+| SDK → 宿主 | `sampler/sample` | 反向请求 | 只在宿主声明了 `sampler` 能力时使用。支持 `mode: 'fork' \| 'compact'`：fork 走宿主缓存分叉，compact 委托宿主已有模型完成推理 |
+| SDK → 宿主 | `sampler/cancel` | 反向通知 | `{ sampleRequestId, sessionId, reason? }`。通知宿主立即中止正在进行中的采样请求 |
+
+### 9.1 全双工并发、ID 命名空间与取消时序（Hermes 落地规范）
+
+由于 stdio 上“宿主 → SDK”与“SDK → 宿主”共享同一对管道，必须严格遵守以下多路复用与取消规范：
+
+1. **JSON-RPC 请求 ID 命名空间隔离**：
+   - **宿主发起的请求**（`initialize`、`prediction/request`、`prediction/cancel`）：`id` 使用正整数 `1, 2, 3, ...` 或以 `"h-"` 开头（如 `"h-42"`）。
+   - **SDK 发起的反向请求**（`sampler/sample`）：`id` 固定以 `"s-"` 开头加单调递增序号（如 `"s-1"`, `"s-2"`），绝对不会与宿主请求 ID 碰撞。
+2. **宿主侧非阻塞事件循环（防死锁）**：
+   - 宿主在处理 `turn.completed` 发送 `session/observe` 通知后，其 stdio 读取协程必须保持持续消费：在等待 `prediction/updated` 期间，随时可能收到 SDK 发来的 `sampler/sample` 反向请求并异步派发给 LLM 客户端，不得同步阻塞主读取循环。
+3. **单会话 In-Flight 上限**：
+   - 每个 `sessionId` 在同一时刻最多只允许有 **1 个** in-flight 的预测流水线与最多 **1 个** in-flight 的 `sampler/sample` 请求。
+4. **中断与取消传播时序（Abort Propagation）**：
+   - 当预测处于 `sampler/sample`（假设请求 ID 为 `"s-1"`）等待期间，若 SDK 收到以下任一事件：
+     - `session/observe` 携带 `turn.started`、`message.user` 或 `state(composer.dirty=true)`；
+     - 宿主显式调用 `prediction/cancel`；
+     - SDK 内部 4s 硬超时到期；
+   - SDK 会**立即**执行三步原子清理：
+     1. 触发内部 `AbortController.abort()`；
+     2. 向宿主发送 `sampler/cancel` 通知：`{"jsonrpc":"2.0","method":"sampler/cancel","params":{"sampleRequestId":"s-1","sessionId":"s1","reason":"user_typing"}}`；
+     3. 向宿主发送 `prediction/updated (prediction: null, suppressedReason: 'aborted' | 'stale_turn' | 'timeout')` 以确保 UI 撤下任何残留状态。
+   - 宿主收到 `sampler/cancel` 后立即 close/abort 底层模型 HTTP 流，并对 `"s-1"` 返回错误码 `-32003 (SAMPLER_ABORTED)`（SDK 收到迟到的 `"s-1"` 正常响应或错误响应时均直接静默忽略）。
 
 **标准 JSON-RPC 错误码约定**：
 - `-32001` `SESSION_BUSY`：源会话仍在运行中，拒绝采样
@@ -913,9 +1059,15 @@ stateDiagram-v2
 
 ## 11. 安全与隐私
 
-### 11.1 内置脱敏管道（Redaction Pipeline）
+### 11.1 按采样模式划分的隐私边界与内置脱敏管道
 
-任何内容发给模型之前都要先经过脱敏管道。在 `compact` 模式下，会话文本或工具摘要拼入 prompt 前必须按顺序通过以下内置规则（命中后替换为 `[REDACTED_<TYPE>]`）：
+SDK 严格区分 **`fork` 模式**与 **`compact` 模式**的隐私保证，绝不做虚假承诺：
+
+1. **Fork 模式（`mode: 'fork'`）的隐私边界 = 宿主会话边界**：
+   - 在 `fork` 模式下，采样直接在宿主已有的会话上下文上开临时分叉以复用 Prompt Cache。SDK **不会、也无法重写宿主已经发给过当前模型提供商的历史消息前缀**。
+   - 因此，`fork` 模式下的历史消息脱敏由宿主自身的隐私层（如 Hermes 的 secret redaction）负责；SDK 仅保证新追加的 4KB 预测指令与 `signals_json` 经过脱敏。由于 `fork` 请求发往的正是当前会话同一个模型与同一个提供商，**不会产生任何跨厂商或跨边界的数据外流**。
+2. **Compact 模式（`mode: 'compact'`）与独立 `ModelClient` 的全量脱敏保证**：
+   - 当使用 `compact` 模式（可能路由到辅助小模型或不同端点）时，所有进入 `transcript`、`signals_json` 与环境观察摘要（`env.*`）的文本，在拼入 prompt 前**必须 100% 经过 SDK 内置脱敏管道**（命中后替换为 `[REDACTED_<TYPE>]`）：
 
 | 类别 | 匹配规则摘要 | 替换标记 |
 |---|---|---|
@@ -992,15 +1144,17 @@ stateDiagram-v2
 
 ### 14.1 内置 coding 包（`packages/pack-coding/pack.json`）
 
-完整可序列化定义已落地在 [`packages/pack-coding/pack.json`](../packages/pack-coding/pack.json)，符合 [`spec/scenario-pack.schema.json`](../spec/scenario-pack.schema.json)。包含以下 5 个核心场景与 20 个意图（每个场景均提供中英双语 examples 与 zh-CN/en 渲染模板）：
+完整可序列化定义已落地在 [`packages/pack-coding/pack.json`](../packages/pack-coding/pack.json)，符合 [`spec/scenario-pack.schema.json`](../spec/scenario-pack.schema.json)。采用“**5 个高特异度场景 + 1 个只读执行场景 + 1 个高阈值保守兜底场景**”的斜坡梯度结构（共 7 个场景、26 个意图），避免覆盖率悬崖：
 
-| 场景 ID | 优先级 | 识别信号（`match`） | 意图集合（`id (risk, prior)`） |
+| 场景 ID | 优先级 | 识别信号（`match`） | 意图集合（`id (risk, prior, 特殊约束)`） |
 |---|---|---|---|
 | `coding.checks_failed` | 30 | `lastTurn.failedExecs > 0`（`triggerOnTurnStatuses: [completed, failed]`） | `fix_failures (reversible, 0.55)`、`show_details (none, 0.20)`、`rerun_checks (reversible, 0.15)`、`skip_for_now (none, 0.10)` |
-| `coding.awaiting_reply` | 25 | `endsWithQuestion == true` 或 `optionsCount > 1` | `confirm (reversible, 0.45)`、`choose_option{index} (reversible, 0.35)`、`ask_tradeoffs (none, 0.12)`、`decline (none, 0.08)` |
+| `coding.awaiting_reply` | 25 | `endsWithQuestion == true` 或 `optionsCount > 1` | `confirm (reversible + dynamicRiskFromProposedAction, 0.45, 禁 ghost_text)`、`choose_option{index} (reversible + dynamicRiskFromProposedAction, 0.35, 禁 ghost_text)`、`ask_tradeoffs (none, 0.12)`、`decline (none, 0.08)` |
 | `coding.after_edit` | 20 | `filesChanged > 0` 且本轮未运行 `execute` 类工具 | `run_tests (reversible, 0.42)`、`review_diff (read_only, 0.22, action=/review)`、`explain_changes (none, 0.14)`、`continue_task (reversible, 0.14)`、`commit_changes (reversible, 0.08)` |
-| `coding.task_verified` | 18 | `filesChanged > 0` 且运行过 `execute` 且 `failedExecs == 0` | `commit_changes (reversible, 0.45)`、`review_diff (read_only, 0.25, action=/review)`、`open_pr (side_effect, 0.15)`、`continue_task (reversible, 0.15)` |
+| `coding.task_verified` | 18 | `filesChanged > 0` 且运行过 `execute` 且 `failedExecs == 0` | `commit_changes (reversible, 0.45)`、`review_diff (read_only, 0.25, action=/review)`、`open_pr (side_effect, 0.15, 仅 chips/button)`、`continue_task (reversible, 0.15)` |
+| `coding.exec_succeeded` | 14 | `filesChanged == 0` 且运行过 `execute` 且 `failedExecs == 0` | `continue_task (reversible, 0.50)`、`explain_output (none, 0.30)`、`apply_suggestion (reversible, 0.20)` |
 | `coding.explained` | 10 | `filesChanged == 0`、`failedExecs == 0`、`lastAgentMessage.length ≥ 200` 且用过 `read/search` | `apply_suggestion (reversible, 0.50)`、`write_plan (read_only, 0.25)`、`ask_example (none, 0.25)` |
+| `coding.general_followup` | 1 | `status == completed`、`failedExecs == 0`、`length ≥ 60`（保守兜底，`minConfidence: 0.75, minMargin: 0.25`） | `apply_suggestion (reversible, 0.45)`、`write_plan (read_only, 0.30)`、`ask_example (none, 0.25)` |
 
 ### 14.2 非编程场景：客服 agent
 

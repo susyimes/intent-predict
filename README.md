@@ -1,8 +1,8 @@
 # intent-predict
 
-**intent-predict** 是一个可以接入任意 Agent 的意图预测 SDK，只处理有限场景。每当 agent 回复结束，它会预测用户下一步最可能的意图，并给出一句能直接填进输入框的建议。预测范围限定在一个**有限的意图集合**里，没有把握时就不给建议。
+**intent-predict** 是一个让**任意 Agent 成为全场景意图预测 Agent（Intent Predict Agent）**的通用 SDK。它的观察范围不局限于对话气泡，还可以感知终端命令、Git 工作区、文件变动、IDE 焦点与桌面/剪贴板环境；在识别出的有限场景里从一个封闭集合中预测用户下一步最可能的意图，并支持从「纯建议输出」渐进升级到「推测预执行」与「委托执行」。没有把握时就不给建议（fail-closed）。
 
-> 当前状态：**施工级设计规范已完成（v0.2）**，已产出完整 JSON Schema 与内置编程场景包。
+> 当前状态：**施工级设计规范已完成（v0.3）**，已产出完整 JSON Schema 与内置编程场景包。
 > - 设计文档：[docs/design.md](docs/design.md)
 > - 形式化规范：[spec/](spec/)（`events`、`scenario-pack`、`prediction`、`feedback`、`rpc`）
 > - 内置编程场景包：[packages/pack-coding/pack.json](packages/pack-coding/pack.json)
@@ -10,37 +10,61 @@
 
 ## 一个例子
 
-agent 改完代码后，输入框里会出现灰色的建议文字「跑一下测试验证看看」，按 Tab 就能填入。同时 SDK 会返回一份结构化结果：
+agent 改完代码（或用户在终端手动跑完命令）后，输入框里会出现灰色的建议文字「跑一下测试验证看看」，按 Tab 就能填入；若遇到确认或外部副作用意图（如创建 PR），则自动切换为显式的 Chips 或确认按钮。同时 SDK 会返回一份结构化结果：
 
 ```json
-{ "intent": { "id": "run_tests", "confidence": 0.82 }, "text": "跑一下测试验证看看", "risk": "reversible" }
+{
+  "scenarioId": "coding.after_edit",
+  "qualifiedIntentId": "builtin/coding@0.1.0/coding.after_edit#run_tests",
+  "displayChannel": "ghost_text",
+  "agencyStage": "suggest_only",
+  "intent": { "id": "run_tests", "confidence": 0.82, "slots": {} },
+  "text": "跑一下测试验证看看",
+  "risk": "reversible"
+}
 ```
 
-宿主可以根据这份结果绑定确定性的动作，比如 `/review`、某个工具调用或快捷按钮，不需要从文本里猜用户的意思。
+宿主可以根据这份结果绑定确定性的动作，比如 `/review`、后台只读预备任务（Stage 2）或快捷按钮，不需要从文本里猜用户的意思。
 
-## 工作流程
+## 架构与工作流程
 
 ```mermaid
-flowchart LR
-  subgraph Host["宿主 Agent（Hermes / Codex / ACP / 任意）"]
-    E["1. 事件流<br/>消息 / 工具 / 产物 / 状态"]
-    S["Sampler（零配置委托）<br/>fork 缓存分叉 / compact 宿主模型"]
-    UI["4. 输入框 UI<br/>Ghost Text / Chips"]
+flowchart TB
+  subgraph Observers["1. 全场景观察层（Omni-Context Observers，超越单一对话）"]
+    direction LR
+    O1["Agent 对话流<br/>turn / message / tool / artifact"]
+    O2["终端 & Shell<br/>env.terminal_command"]
+    O3["Git & 文件系统<br/>env.git_status / file_changed"]
+    O4["IDE & 桌面环境<br/>env.ide_context / ambient_context"]
   end
 
-  subgraph SDK["intent-predict SDK"]
-    SG["2. 信号提取 & 守卫"]
-    SR["3. 有限场景路由<br/>未命中 → none"]
-    CS["候选生成<br/>Rule 短路 / Prior / Model"]
-    FG["融合 → 门控 → 模板渲染 → 9 条过滤<br/>任一不通过 → fail-closed"]
-    FB[("5. 本地反馈日志<br/>先验更新 / 校准")]
+  subgraph Engine["2. intent-predict SDK（赋予任意 Agent 意图预测能力）"]
+    direction LR
+    SG["信号提取 + 守卫<br/>+ 提议风险扫描 (proposedRisk)"]
+    SR["有限场景路由<br/>专用场景 → 保守兜底<br/>未命中 → none"]
+    CS["候选生成<br/>Rule (仅 explicit 短路)<br/>Prior / Model (top-1 + runnerUps)"]
+    FG["融合 → Per-Intent 门控 & 通道裁决<br/>→ 模板/Action 原子插值 → 9 条过滤"]
+    FB[("本地反馈与校准日志<br/>near-match 豁免退避")]
+    SG --> SR --> CS --> FG
+    FB -.->|"Dirichlet 先验 / 阈值退避"| CS
   end
 
-  E -->|"turn.completed"| SG --> SR -->|"命中场景目录"| CS
-  CS <-->|"需要模型时复用宿主"| S
-  CS --> FG -->|"Prediction"| UI
-  UI -->|"Tab 接受 / Esc 关闭 / 忽略"| FB
-  FB -.-> CS
+  subgraph Sampler["宿主零配置 Sampler"]
+    SM["fork 缓存共享分叉<br/>compact 先脱敏后委托宿主模型"]
+  end
+
+  subgraph Agency["3. 三阶段行动力输出（Progressive Agency）"]
+    direction LR
+    A1["Stage 1：纯建议输出（默认）<br/>Ghost Text / Chips / 确认按钮"]
+    A2["Stage 2：推测预执行（后续）<br/>静默预跑只读检查 & 拉取上下文"]
+    A3["Stage 3：建议 + 委托执行（后续）<br/>用户确认后派发执行"]
+    A1 -.-> A2 -.-> A3
+  end
+
+  Observers -->|"AgentEvent 流"| SG
+  CS <-->|"sampler/sample + cancel"| Sampler
+  FG -->|"Prediction"| Agency
+  Agency -->|"Feedback + similarity"| FB
 ```
 
 ## 和 Codex composer predictions 有什么不同
