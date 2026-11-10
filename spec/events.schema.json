@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intent-predict.dev/spec/events.schema.json",
+  "title": "IntentPredictEvents",
+  "description": "Normalized agent events and simple messages reported from a host agent to the intent-predict SDK.",
+  "type": "object",
+  "$defs": {
+    "ToolKind": {
+      "type": "string",
+      "enum": [
+        "read",
+        "search",
+        "edit",
+        "delete",
+        "execute",
+        "fetch",
+        "ask_user",
+        "other"
+      ],
+      "description": "Coarse tool category, directly mappable from ACP tool kinds or Hermes toolsets."
+    },
+    "TurnStartedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "turnId", "at"],
+      "properties": {
+        "type": { "const": "turn.started" },
+        "turnId": { "type": "string", "minLength": 1 },
+        "at": { "type": "integer", "minimum": 0, "description": "Epoch milliseconds." }
+      }
+    },
+    "MessageUserEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "turnId", "text"],
+      "properties": {
+        "type": { "const": "message.user" },
+        "turnId": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" },
+        "hasAttachments": { "type": "boolean" }
+      }
+    },
+    "MessageAgentEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "turnId", "text"],
+      "properties": {
+        "type": { "const": "message.agent" },
+        "turnId": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" },
+        "final": { "type": "boolean", "default": true }
+      }
+    },
+    "ToolCallEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "turnId", "callId", "name"],
+      "properties": {
+        "type": { "const": "tool.call" },
+        "turnId": { "type": "string", "minLength": 1 },
+        "callId": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "#/$defs/ToolKind" },
+        "input": {}
+      }
+    },
+    "ToolResultEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "turnId", "callId", "status"],
+      "properties": {
+        "type": { "const": "tool.result" },
+        "turnId": { "type": "string", "minLength": 1 },
+        "callId": { "type": "string", "minLength": 1 },
+        "status": {
+          "type": "string",
+          "enum": ["ok", "error", "denied"]
+        },
+        "exitCode": { "type": "integer" },
+        "summary": {
+          "type": "string",
+          "description": "Single-line summary eligible for compact model context after redaction."
+        },
+        "output": {
+          "description": "Optional structured output. Accessible only to deterministic slot.from paths; never sent to models."
+        }
+      }
+    },
+    "ArtifactEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "turnId", "kind", "ref"],
+      "properties": {
+        "type": { "const": "artifact" },
+        "turnId": { "type": "string", "minLength": 1 },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file_changed",
+            "file_created",
+            "file_deleted",
+            "command_suggested",
+            "link",
+            "other"
+          ]
+        },
+        "ref": { "type": "string", "minLength": 1 }
+      }
+    },
+    "StateEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "key", "value"],
+      "properties": {
+        "type": { "const": "state" },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Dot-separated state key, e.g. mode, pendingApproval, pendingInput, composer.dirty, incognito, interactive."
+        },
+        "value": {}
+      }
+    },
+    "TurnCompletedEvent": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "turnId", "status", "at"],
+      "properties": {
+        "type": { "const": "turn.completed" },
+        "turnId": { "type": "string", "minLength": 1 },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "failed", "interrupted"]
+        },
+        "errorCode": { "type": "string" },
+        "at": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "AgentEvent": {
+      "oneOf": [
+        { "$ref": "#/$defs/TurnStartedEvent" },
+        { "$ref": "#/$defs/MessageUserEvent" },
+        { "$ref": "#/$defs/MessageAgentEvent" },
+        { "$ref": "#/$defs/ToolCallEvent" },
+        { "$ref": "#/$defs/ToolResultEvent" },
+        { "$ref": "#/$defs/ArtifactEvent" },
+        { "$ref": "#/$defs/StateEvent" },
+        { "$ref": "#/$defs/TurnCompletedEvent" }
+      ],
+      "discriminator": { "propertyName": "type" }
+    },
+    "SimpleMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "content"],
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["user", "assistant", "tool"]
+        },
+        "content": { "type": "string" },
+        "toolName": { "type": "string" },
+        "toolKind": { "$ref": "#/$defs/ToolKind" },
+        "exitCode": { "type": "integer" },
+        "isError": { "type": "boolean" }
+      }
+    }
+  }
+}

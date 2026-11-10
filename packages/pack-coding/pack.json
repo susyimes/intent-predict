@@ -1,0 +1,477 @@
+{
+  "id": "builtin/coding",
+  "version": "0.1.0",
+  "description": "Built-in bounded-scenario intent catalog for coding and software engineering agents.",
+  "scenarios": [
+    {
+      "id": "coding.checks_failed",
+      "description": "The agent ran tests, build, or linter commands in the last turn and at least one execution failed.",
+      "priority": 30,
+      "triggerOnTurnStatuses": [
+        "completed",
+        "failed"
+      ],
+      "match": {
+        "signal": "lastTurn.failedExecs",
+        "gt": 0
+      },
+      "intents": [
+        {
+          "id": "fix_failures",
+          "description": "Ask the agent to diagnose and fix the failing tests, build, or lint errors.",
+          "examples": [
+            "修一下这些报错",
+            "把挂掉的测试修好",
+            "fix the failing tests",
+            "fix these errors"
+          ],
+          "render": {
+            "zh-CN": "修一下这些失败",
+            "en": "fix the failures"
+          },
+          "risk": "reversible",
+          "prior": 0.55
+        },
+        {
+          "id": "show_details",
+          "description": "Ask the agent to explain the root cause or show detailed failure output first.",
+          "examples": [
+            "先看看具体哪里错了",
+            "为什么会报这个错",
+            "show me the error details",
+            "what caused the failure?"
+          ],
+          "render": {
+            "zh-CN": "先看看具体报错原因",
+            "en": "show me the root cause of the failure"
+          },
+          "risk": "none",
+          "prior": 0.2
+        },
+        {
+          "id": "rerun_checks",
+          "description": "Ask the agent to re-run the failed command or tests (suspecting flakiness).",
+          "examples": [
+            "再跑一次试试",
+            "重新运行一下",
+            "run it again",
+            "re-run the tests"
+          ],
+          "render": {
+            "zh-CN": "再跑一次试试",
+            "en": "run the checks again"
+          },
+          "risk": "reversible",
+          "prior": 0.15
+        },
+        {
+          "id": "skip_for_now",
+          "description": "Tell the agent to ignore the failure for now and move on with the task.",
+          "examples": [
+            "先不管这个，继续往下做",
+            "跳过这个报错",
+            "skip this for now and continue",
+            "ignore that failure for now"
+          ],
+          "render": {
+            "zh-CN": "先跳过这个，继续下一步",
+            "en": "skip this for now and continue"
+          },
+          "risk": "none",
+          "prior": 0.1
+        }
+      ]
+    },
+    {
+      "id": "coding.awaiting_reply",
+      "description": "The agent ended its message with a direct question or a numbered list of choices awaiting user decision.",
+      "priority": 25,
+      "triggerOnTurnStatuses": [
+        "completed"
+      ],
+      "match": {
+        "any": [
+          {
+            "signal": "lastAgentMessage.endsWithQuestion",
+            "eq": true
+          },
+          {
+            "signal": "lastAgentMessage.optionsCount",
+            "gt": 1
+          }
+        ]
+      },
+      "intents": [
+        {
+          "id": "confirm",
+          "description": "Approve or agree with the agent's proposed plan or default recommendation.",
+          "examples": [
+            "好，按这个来",
+            "可以，继续",
+            "yes, go ahead",
+            "sounds good, do it"
+          ],
+          "when": {
+            "signal": "lastAgentMessage.endsWithQuestion",
+            "eq": true
+          },
+          "render": {
+            "zh-CN": "可以，按这个方案继续",
+            "en": "yes, go ahead with that"
+          },
+          "risk": "reversible",
+          "prior": 0.45
+        },
+        {
+          "id": "choose_option",
+          "description": "Pick one of the numbered options presented by the agent.",
+          "examples": [
+            "选第一个",
+            "用方案 1",
+            "go with option 1",
+            "let's do #1"
+          ],
+          "when": {
+            "signal": "lastAgentMessage.optionsCount",
+            "gt": 1
+          },
+          "slots": {
+            "index": {
+              "type": "number",
+              "from": "lastAgentMessage.preferredOptionIndex",
+              "pattern": "^[1-9]$",
+              "required": true,
+              "default": 1
+            }
+          },
+          "render": {
+            "zh-CN": "选第 {index} 个方案",
+            "en": "let's go with option {index}"
+          },
+          "risk": "reversible",
+          "prior": 0.35
+        },
+        {
+          "id": "ask_tradeoffs",
+          "description": "Ask the agent to compare the tradeoffs or clarify before deciding.",
+          "examples": [
+            "这几个方案各有什么优缺点？",
+            "你推荐哪个？",
+            "what are the tradeoffs?",
+            "which one do you recommend and why?"
+          ],
+          "render": {
+            "zh-CN": "先说说这几种做法的利弊",
+            "en": "what are the tradeoffs between these options?"
+          },
+          "risk": "none",
+          "prior": 0.12
+        },
+        {
+          "id": "decline",
+          "description": "Reject the proposed direction and ask for a simpler or different approach.",
+          "examples": [
+            "不用这么做",
+            "换个简单点的办法",
+            "no, let's take a simpler approach",
+            "don't do that"
+          ],
+          "render": {
+            "zh-CN": "不用这样，换个更简单的做法",
+            "en": "no, let's use a simpler approach"
+          },
+          "risk": "none",
+          "prior": 0.08
+        }
+      ]
+    },
+    {
+      "id": "coding.after_edit",
+      "description": "The agent modified or created files in this turn without running tests afterward.",
+      "priority": 20,
+      "triggerOnTurnStatuses": [
+        "completed"
+      ],
+      "match": {
+        "all": [
+          {
+            "signal": "lastTurn.filesChanged",
+            "gt": 0
+          },
+          {
+            "not": {
+              "signal": "lastTurn.toolKinds",
+              "contains": "execute"
+            }
+          }
+        ]
+      },
+      "intents": [
+        {
+          "id": "run_tests",
+          "description": "Ask the agent to run the relevant tests or typecheck to verify the changes.",
+          "examples": [
+            "跑一下测试",
+            "测试看看过没过",
+            "run the tests",
+            "run tests to verify"
+          ],
+          "render": {
+            "zh-CN": "跑一下测试验证看看",
+            "en": "run the tests to verify"
+          },
+          "risk": "reversible",
+          "prior": 0.42
+        },
+        {
+          "id": "review_diff",
+          "description": "Ask to inspect or review the diff of the changes made so far.",
+          "examples": [
+            "看看改了哪些地方",
+            "/review",
+            "review the diff",
+            "show me the git diff"
+          ],
+          "render": {
+            "zh-CN": "检查一下刚才的改动",
+            "en": "review the changes"
+          },
+          "action": {
+            "type": "command",
+            "command": "/review"
+          },
+          "risk": "read_only",
+          "prior": 0.22
+        },
+        {
+          "id": "explain_changes",
+          "description": "Ask the agent to briefly explain how or why the change was made this way.",
+          "examples": [
+            "讲讲为什么这么改",
+            "解释一下这部分的逻辑",
+            "explain how this change works",
+            "walk me through the changes"
+          ],
+          "render": {
+            "zh-CN": "解释一下这处改动的原理",
+            "en": "walk me through how this change works"
+          },
+          "risk": "none",
+          "prior": 0.14
+        },
+        {
+          "id": "continue_task",
+          "description": "Ask the agent to proceed with the next step of the plan or implementation.",
+          "examples": [
+            "继续下一步",
+            "接着往下写",
+            "continue with the next step",
+            "keep going"
+          ],
+          "render": {
+            "zh-CN": "继续下一步",
+            "en": "continue with the next step"
+          },
+          "risk": "reversible",
+          "prior": 0.14
+        },
+        {
+          "id": "commit_changes",
+          "description": "Ask the agent to stage and commit the current changes locally.",
+          "examples": [
+            "提交一下代码",
+            "commit 这些改动",
+            "commit these changes",
+            "create a git commit"
+          ],
+          "render": {
+            "zh-CN": "提交一下当前的改动",
+            "en": "commit these changes"
+          },
+          "risk": "reversible",
+          "prior": 0.08
+        }
+      ]
+    },
+    {
+      "id": "coding.task_verified",
+      "description": "The agent modified files and ran verification commands that all succeeded (0 failed execs).",
+      "priority": 18,
+      "triggerOnTurnStatuses": [
+        "completed"
+      ],
+      "match": {
+        "all": [
+          {
+            "signal": "lastTurn.filesChanged",
+            "gt": 0
+          },
+          {
+            "signal": "lastTurn.toolKinds",
+            "contains": "execute"
+          },
+          {
+            "signal": "lastTurn.failedExecs",
+            "eq": 0
+          }
+        ]
+      },
+      "intents": [
+        {
+          "id": "commit_changes",
+          "description": "Ask the agent to commit the verified changes with a concise commit message.",
+          "examples": [
+            "提交一下",
+            "把改动 commit 了",
+            "commit the changes",
+            "commit this"
+          ],
+          "render": {
+            "zh-CN": "把这些改动提交一下",
+            "en": "commit these changes"
+          },
+          "risk": "reversible",
+          "prior": 0.45
+        },
+        {
+          "id": "review_diff",
+          "description": "Run a code review on the current changes before committing.",
+          "examples": [
+            "review 一下代码",
+            "/review",
+            "do a quick code review",
+            "review the diff"
+          ],
+          "render": {
+            "zh-CN": "先 review 一下全部改动",
+            "en": "review all changes before committing"
+          },
+          "action": {
+            "type": "command",
+            "command": "/review"
+          },
+          "risk": "read_only",
+          "prior": 0.25
+        },
+        {
+          "id": "open_pr",
+          "description": "Push the branch and open a pull request.",
+          "examples": [
+            "提个 PR",
+            "推上去开个 PR",
+            "open a pull request",
+            "push and create a PR"
+          ],
+          "render": {
+            "zh-CN": "创建 Pull Request",
+            "en": "open a pull request"
+          },
+          "risk": "side_effect",
+          "prior": 0.15
+        },
+        {
+          "id": "continue_task",
+          "description": "Proceed to the next item in the plan or task list.",
+          "examples": [
+            "继续做下一项",
+            "下一步",
+            "move on to the next task",
+            "continue to the next step"
+          ],
+          "render": {
+            "zh-CN": "继续下一项任务",
+            "en": "move on to the next step"
+          },
+          "risk": "reversible",
+          "prior": 0.15
+        }
+      ]
+    },
+    {
+      "id": "coding.explained",
+      "description": "The agent inspected or searched the codebase (read-only tools only) and provided an explanation or plan without editing files.",
+      "priority": 10,
+      "triggerOnTurnStatuses": [
+        "completed"
+      ],
+      "match": {
+        "all": [
+          {
+            "signal": "lastTurn.filesChanged",
+            "eq": 0
+          },
+          {
+            "signal": "lastTurn.failedExecs",
+            "eq": 0
+          },
+          {
+            "signal": "lastAgentMessage.length",
+            "gte": 200
+          },
+          {
+            "any": [
+              {
+                "signal": "lastTurn.toolKinds",
+                "contains": "read"
+              },
+              {
+                "signal": "lastTurn.toolKinds",
+                "contains": "search"
+              }
+            ]
+          }
+        ]
+      },
+      "intents": [
+        {
+          "id": "apply_suggestion",
+          "description": "Ask the agent to go ahead and implement the changes or plan it just explained.",
+          "examples": [
+            "照你说的改吧",
+            "直接实现它",
+            "go ahead and implement this",
+            "apply these changes"
+          ],
+          "render": {
+            "zh-CN": "按这个思路直接修改代码",
+            "en": "go ahead and implement these changes"
+          },
+          "risk": "reversible",
+          "prior": 0.5
+        },
+        {
+          "id": "write_plan",
+          "description": "Ask the agent to turn the analysis into a step-by-step implementation plan.",
+          "examples": [
+            "先列个详细的修改计划",
+            "写一份实施步骤",
+            "write a step-by-step plan first",
+            "break this down into a plan"
+          ],
+          "render": {
+            "zh-CN": "先列一份分步修改计划",
+            "en": "write a step-by-step implementation plan first"
+          },
+          "risk": "read_only",
+          "prior": 0.25
+        },
+        {
+          "id": "ask_example",
+          "description": "Ask for a concrete code example or call-site trace.",
+          "examples": [
+            "给个具体的代码示例看看",
+            "看下调用链路",
+            "show me a concrete code example",
+            "trace where this is called"
+          ],
+          "render": {
+            "zh-CN": "举个具体的代码调用例子",
+            "en": "show me a concrete code example"
+          },
+          "risk": "none",
+          "prior": 0.25
+        }
+      ]
+    }
+  ]
+}

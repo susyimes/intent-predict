@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intent-predict.dev/spec/prediction.schema.json",
+  "title": "PredictionResult",
+  "description": "Structured intent prediction output and suppression reason codes.",
+  "type": "object",
+  "$defs": {
+    "SuppressedReason": {
+      "type": "string",
+      "enum": [
+        "disabled",
+        "non_interactive",
+        "pending_interaction",
+        "failed_turn_unhandled",
+        "interrupted_turn",
+        "min_turns_not_met",
+        "composer_dirty",
+        "mode_blocked",
+        "budget_exhausted",
+        "incognito",
+        "no_scenario_matched",
+        "empty_catalog",
+        "model_none",
+        "below_min_confidence",
+        "below_risk_confidence",
+        "below_min_margin",
+        "in_cooldown",
+        "max_per_session_reached",
+        "risk_disallowed_for_ghost_text",
+        "invalid_model_output",
+        "unknown_intent",
+        "slot_validation_failed",
+        "filter_empty_or_meta",
+        "filter_label_prefix",
+        "filter_ai_voice",
+        "filter_evaluative",
+        "filter_multiple_sentences",
+        "filter_formatting",
+        "filter_length",
+        "filter_error_text",
+        "filter_dangerous",
+        "timeout",
+        "aborted",
+        "stale_turn"
+      ]
+    },
+    "CandidateSourceId": {
+      "type": "string",
+      "enum": ["rule", "prior", "model", "embedding"]
+    },
+    "AlternativePrediction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intentId", "confidence", "text", "risk"],
+      "properties": {
+        "intentId": { "type": "string", "minLength": 1 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "slots": { "type": "object" },
+        "text": { "type": "string", "minLength": 1 },
+        "risk": { "$ref": "scenario-pack.schema.json#/$defs/Risk" },
+        "action": { "$ref": "scenario-pack.schema.json#/$defs/ActionDescriptor" }
+      }
+    },
+    "PredictionUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["latencyMs"],
+      "properties": {
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "cachedInputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 },
+        "latencyMs": { "type": "number", "minimum": 0 }
+      }
+    },
+    "Prediction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sessionId",
+        "sourceTurnId",
+        "packId",
+        "packVersion",
+        "scenarioId",
+        "intent",
+        "text",
+        "locale",
+        "risk",
+        "alternatives",
+        "sources",
+        "createdAt"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "sessionId": { "type": "string", "minLength": 1 },
+        "sourceTurnId": { "type": "string", "minLength": 1 },
+        "packId": { "type": "string", "minLength": 1 },
+        "packVersion": { "type": "string", "minLength": 1 },
+        "scenarioId": { "type": "string", "minLength": 1 },
+        "intent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "confidence", "slots"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+            "slots": { "type": "object" }
+          }
+        },
+        "text": { "type": "string", "minLength": 1 },
+        "locale": { "type": "string", "minLength": 2 },
+        "action": { "$ref": "scenario-pack.schema.json#/$defs/ActionDescriptor" },
+        "risk": { "$ref": "scenario-pack.schema.json#/$defs/Risk" },
+        "alternatives": {
+          "type": "array",
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/AlternativePrediction" }
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/CandidateSourceId" }
+        },
+        "createdAt": { "type": "integer", "minimum": 0 },
+        "usage": { "$ref": "#/$defs/PredictionUsage" }
+      }
+    },
+    "PredictionResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "prediction"],
+          "properties": {
+            "type": { "const": "completed" },
+            "prediction": {
+              "oneOf": [
+                { "$ref": "#/$defs/Prediction" },
+                { "type": "null" }
+              ]
+            },
+            "suppressedReason": { "$ref": "#/$defs/SuppressedReason" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "error"],
+          "properties": {
+            "type": { "const": "failed" },
+            "error": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    }
+  }
+}

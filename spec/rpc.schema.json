@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intent-predict.dev/spec/rpc.schema.json",
+  "title": "SidecarJsonRpcProtocol",
+  "description": "JSON-RPC 2.0 protocol for @intent-predict/sidecar over stdio (NDJSON).",
+  "type": "object",
+  "$defs": {
+    "InitializeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["client", "capabilities"],
+      "properties": {
+        "protocolVersion": { "type": "string", "default": "0.1" },
+        "client": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "minLength": 1 }
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sampler": {
+              "type": "boolean",
+              "default": false,
+              "description": "Host supports sampler/sample reverse RPC (L2 forked cache-sharing or zero-config host delegation)."
+            },
+            "interactive": { "type": "boolean", "default": true }
+          }
+        },
+        "packs": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string", "description": "Built-in pack ID or file path." },
+              { "$ref": "scenario-pack.schema.json" }
+            ]
+          }
+        },
+        "policy": { "$ref": "scenario-pack.schema.json#/$defs/GatePolicyPartial" },
+        "privacy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "redact": { "type": "string", "enum": ["default", "strict", "off"], "default": "default" },
+            "collectFinalText": { "type": "boolean", "default": false }
+          }
+        }
+      }
+    },
+    "InitializeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "server", "loadedPacks"],
+      "properties": {
+        "protocolVersion": { "type": "string" },
+        "server": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string" },
+            "version": { "type": "string" }
+          }
+        },
+        "loadedPacks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "version", "scenarioCount"],
+            "properties": {
+              "id": { "type": "string" },
+              "version": { "type": "string" },
+              "scenarioCount": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "SessionObserveParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "events"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "events.schema.json#/$defs/AgentEvent" }
+        }
+      }
+    },
+    "PredictionRequestParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "sourceTurnId"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "sourceTurnId": { "type": "string", "minLength": 1 },
+        "messages": {
+          "type": "array",
+          "items": { "$ref": "events.schema.json#/$defs/SimpleMessage" }
+        }
+      }
+    },
+    "PredictionCancelParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string" }
+      }
+    },
+    "PredictionUpdatedParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "sourceTurnId", "result"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "sourceTurnId": { "type": "string", "minLength": 1 },
+        "result": { "$ref": "prediction.schema.json#/$defs/PredictionResult" }
+      }
+    },
+    "SamplerSampleParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "expectedTurnId", "prompt"],
+      "properties": {
+        "sessionId": { "type": "string", "minLength": 1 },
+        "expectedTurnId": { "type": "string", "minLength": 1 },
+        "mode": {
+          "type": "string",
+          "enum": ["fork", "compact"],
+          "default": "fork",
+          "description": "'fork' appends prompt to an ephemeral cache-sharing fork of sessionId; 'compact' sends a self-contained prompt via the host's configured auxiliary/fast model without user configuration."
+        },
+        "prompt": { "type": "string", "maxLength": 12000 },
+        "jsonSchema": { "type": "object" },
+        "effort": { "type": "string", "enum": ["none", "minimal", "low"] },
+        "maxOutputTokens": { "type": "integer", "minimum": 1, "maximum": 512, "default": 120 }
+      }
+    },
+    "SamplerSampleResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {
+        "text": {
+          "type": ["string", "null"]
+        },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "inputTokens": { "type": "integer", "minimum": 0 },
+            "cachedInputTokens": { "type": "integer", "minimum": 0 },
+            "outputTokens": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}

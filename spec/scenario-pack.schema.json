@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intent-predict.dev/spec/scenario-pack.schema.json",
+  "title": "ScenarioPack",
+  "description": "Portable bounded-scenario intent catalog definition.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "scenarios"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+(/[a-z0-9_-]+)*$",
+      "description": "Pack identifier, e.g. builtin/coding."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$",
+      "description": "SemVer string."
+    },
+    "description": { "type": "string" },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/ScenarioSpec" }
+    }
+  },
+  "$defs": {
+    "Risk": {
+      "type": "string",
+      "enum": [
+        "none",
+        "read_only",
+        "reversible",
+        "side_effect",
+        "irreversible"
+      ]
+    },
+    "SignalLeafPredicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal"],
+      "properties": {
+        "signal": { "type": "string", "minLength": 1 },
+        "eq": {},
+        "ne": {},
+        "gt": { "type": "number" },
+        "gte": { "type": "number" },
+        "lt": { "type": "number" },
+        "lte": { "type": "number" },
+        "in": { "type": "array" },
+        "contains": {},
+        "matches": { "type": "string", "description": "ECMA-262 regular expression source." },
+        "exists": { "type": "boolean" }
+      }
+    },
+    "SignalPredicate": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["all"],
+          "properties": {
+            "all": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/SignalPredicate" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["any"],
+          "properties": {
+            "any": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/SignalPredicate" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["not"],
+          "properties": {
+            "not": { "$ref": "#/$defs/SignalPredicate" }
+          }
+        },
+        { "$ref": "#/$defs/SignalLeafPredicate" }
+      ]
+    },
+    "SlotSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "number", "enum", "path"]
+        },
+        "description": { "type": "string", "maxLength": 80 },
+        "enum": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "from": {
+          "type": "string",
+          "description": "Deterministic signal path to resolve before falling back to model extraction."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Regex validation pattern; if violated, the prediction is discarded."
+        },
+        "maxLength": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 80
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        },
+        "default": {}
+      }
+    },
+    "LocalizedTemplates": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "RenderSpec": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "$ref": "#/$defs/LocalizedTemplates" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": { "const": "model" },
+            "fallback": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                { "$ref": "#/$defs/LocalizedTemplates" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ActionDescriptor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "fill" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "command"],
+          "properties": {
+            "type": { "const": "command" },
+            "command": { "type": "string", "minLength": 1 },
+            "args": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "name", "input"],
+          "properties": {
+            "type": { "const": "tool" },
+            "name": { "type": "string", "minLength": 1 },
+            "input": { "type": "object" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "name"],
+          "properties": {
+            "type": { "const": "custom" },
+            "name": { "type": "string", "minLength": 1 },
+            "payload": {}
+          }
+        }
+      ]
+    },
+    "GatePolicyPartial": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minConfidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "minMargin": { "type": "number", "minimum": 0, "maximum": 1 },
+        "riskMinConfidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "none": { "type": "number", "minimum": 0, "maximum": 1 },
+            "read_only": { "type": "number", "minimum": 0, "maximum": 1 },
+            "reversible": { "type": "number", "minimum": 0, "maximum": 1 },
+            "side_effect": { "type": "number", "minimum": 0, "maximum": 1 },
+            "irreversible": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        "ghostTextRisks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Risk" }
+        },
+        "cooldownTurnsAfterDismiss": { "type": "integer", "minimum": 0 },
+        "ignoredBackoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["streak", "raiseBy"],
+          "properties": {
+            "streak": { "type": "integer", "minimum": 1 },
+            "raiseBy": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        "maxPerSession": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "IntentSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "risk"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "not": { "const": "none" },
+          "description": "Stable intent identifier within the pack; 'none' is reserved."
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "examples": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "when": { "$ref": "#/$defs/SignalPredicate" },
+        "slots": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/SlotSpec" }
+        },
+        "render": { "$ref": "#/$defs/RenderSpec" },
+        "risk": { "$ref": "#/$defs/Risk" },
+        "action": { "$ref": "#/$defs/ActionDescriptor" },
+        "prior": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "enabledByDefault": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "ScenarioSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "match", "intents"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.]*$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "triggerOnTurnStatuses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["completed", "failed"]
+          },
+          "default": ["completed"],
+          "description": "Turn completion statuses that activate this scenario."
+        },
+        "match": { "$ref": "#/$defs/SignalPredicate" },
+        "priority": {
+          "type": "integer",
+          "default": 0
+        },
+        "intents": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 15,
+          "items": { "$ref": "#/$defs/IntentSpec" }
+        },
+        "policy": { "$ref": "#/$defs/GatePolicyPartial" }
+      }
+    }
+  }
+}

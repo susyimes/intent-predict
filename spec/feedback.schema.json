@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intent-predict.dev/spec/feedback.schema.json",
+  "title": "Feedback",
+  "description": "User outcome and telemetry event for a delivered or suppressed prediction.",
+  "type": "object",
+  "$defs": {
+    "Feedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["predictionId", "outcome"],
+      "properties": {
+        "predictionId": { "type": "string", "minLength": 1 },
+        "sessionId": { "type": "string" },
+        "sourceTurnId": { "type": "string" },
+        "outcome": {
+          "type": "string",
+          "enum": ["accepted", "edited", "ignored", "dismissed", "expired"]
+        },
+        "method": {
+          "type": "string",
+          "enum": ["tab", "right", "enter", "click", "shortcut"]
+        },
+        "selectedIntentId": {
+          "type": "string",
+          "description": "Set when the user accepted an alternative chip (Alt+1..3) instead of the primary intent."
+        },
+        "similarity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Normalized edit similarity in [0, 1] when outcome is 'edited' or 'ignored', computed locally without persisting raw finalText."
+        },
+        "finalText": {
+          "type": "string",
+          "description": "Only populated when privacy.collectFinalText is explicitly true."
+        },
+        "wasFocusedWhenShown": { "type": "boolean" },
+        "msSinceShown": { "type": "number", "minimum": 0 },
+        "msToFirstKeystroke": { "type": "number", "minimum": 0 }
+      }
+    },
+    "TelemetryRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timestamp",
+        "sessionId",
+        "sourceTurnId",
+        "outcome"
+      ],
+      "properties": {
+        "timestamp": { "type": "integer", "minimum": 0 },
+        "sessionId": { "type": "string" },
+        "sourceTurnId": { "type": "string" },
+        "predictionId": { "type": "string" },
+        "packId": { "type": "string" },
+        "packVersion": { "type": "string" },
+        "scenarioId": { "type": "string" },
+        "intentId": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "sources": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "edited",
+            "ignored",
+            "dismissed",
+            "expired",
+            "suppressed"
+          ]
+        },
+        "suppressedReason": { "$ref": "prediction.schema.json#/$defs/SuppressedReason" },
+        "method": { "type": "string" },
+        "similarity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "suggestionLength": { "type": "integer", "minimum": 0 },
+        "wasFocusedWhenShown": { "type": "boolean" },
+        "msSinceShown": { "type": "number", "minimum": 0 },
+        "msToFirstKeystroke": { "type": "number", "minimum": 0 },
+        "usage": { "$ref": "prediction.schema.json#/$defs/PredictionUsage" }
+      }
+    }
+  }
+}
