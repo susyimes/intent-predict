@@ -1,0 +1,8 @@
+{"type": "text", "data": "I'll fix `add` in `math.js` so it returns `a + b`, and I won't run anything else."}
+{"type": "tool_call", "toolCallId": "call-30097104-61ca-43fb-862c-3b2ee5ca454d-0", "kind": "search", "toolName": "grep", "rawInput": {"pattern": "function add|add\\s*[:=]|exports\\.add|const add", "glob": "**/math.js"}}
+{"type": "tool_call_update", "toolCallId": "call-30097104-61ca-43fb-862c-3b2ee5ca454d-0", "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "found 1 matches"}}], "rawOutput": {"type": "GrepSearch", "exit_code": 0}, "locations": []}
+{"type": "tool_call", "toolCallId": "call-f601bd49-1acc-4bb1-9b8f-16a213aec855-1", "kind": "read", "toolName": "read_file", "rawInput": {"target_file": "C:\\proj\\math.js"}}
+{"type": "tool_call_update", "toolCallId": "call-f601bd49-1acc-4bb1-9b8f-16a213aec855-1", "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "1→export function add(a, b) {\n  return a - b;\n}\n"}}], "rawOutput": {"type": "ReadFile"}, "locations": []}
+{"type": "tool_call", "toolCallId": "call-7927d00c-9e96-43f5-8e09-de5c12185466-2", "kind": "edit", "toolName": "search_replace", "rawInput": {"file_path": "C:\\proj\\math.js", "old_string": "  return a - b;", "new_string": "  return a + b;"}}
+{"type": "tool_call_update", "toolCallId": "call-7927d00c-9e96-43f5-8e09-de5c12185466-2", "status": "failed", "content": [{"type": "content", "content": {"type": "text", "text": "User cancelled the execution for tool `search_replace`"}}], "rawOutput": {}, "locations": []}
+{"type": "end", "stopReason": "cancelled", "sessionId": "00000000-0000-7000-8000-000000000001"}

@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>intent-predict</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --line:#d9dde3; --text:#1c2430; --dim:#667085; --accent:#2457d6; --warn:#b54708; --bad:#b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12161c; --panel:#1b212a; --line:#2e3744; --text:#e6e9ee; --dim:#98a2b3; --accent:#7ea2ff; --warn:#f0a35e; --bad:#f97066; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:16px; }
+  header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+  h1 { font-size:17px; margin:0; }
+  h2 { font-size:14px; margin:20px 0 8px; color:var(--dim); font-weight:600; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--bad); display:inline-block; }
+  .dot.on { background:#17b26a; }
+  select, button, textarea { font:inherit; color:inherit; }
+  select { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:4px 8px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .card.stale { opacity:.6; }
+  .meta { display:flex; gap:8px; flex-wrap:wrap; font-size:12px; color:var(--dim); margin-bottom:10px; }
+  .tag { border:1px solid var(--line); border-radius:999px; padding:0 8px; }
+  .tag.risk { color:var(--warn); border-color:var(--warn); }
+  .context { border-left:3px solid var(--line); padding:4px 10px; margin:0 0 10px; color:var(--dim); white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; }
+  .context b { display:block; font-weight:600; font-size:12px; }
+  .choices label { display:flex; gap:8px; padding:6px 8px; border:1px solid var(--line); border-radius:8px; margin-bottom:6px; cursor:pointer; }
+  .choices small { color:var(--dim); display:block; overflow-wrap:anywhere; }
+  textarea { width:100%; min-height:64px; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px; resize:vertical; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center; }
+  button { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 14px; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button:focus-visible, textarea:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .alts button { font-size:13px; padding:3px 10px; }
+  .confirm { border:1px solid var(--warn); border-radius:8px; padding:10px; margin-top:10px; }
+  .confirm pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:6px 0; font:inherit; }
+  .status { font-size:13px; color:var(--dim); min-height:20px; margin-top:8px; }
+  .status.bad { color:var(--bad); }
+  .empty { color:var(--dim); padding:20px 0; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); vertical-align:top; overflow-wrap:anywhere; }
+  th { color:var(--dim); font-weight:600; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>intent-predict</h1>
+    <span><span id="dot" class="dot"></span> <span id="conn">未连接</span></span>
+    <label>会话 <select id="session"></select></label>
+  </header>
+
+  <section aria-live="polite">
+    <h2>下一步建议</h2>
+    <div id="card"></div>
+  </section>
+
+  <section>
+    <h2>检查面：最近的求值（含被抑制的）</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>时间</th><th>轮次</th><th>结果</th><th>场景</th><th>来源</th><th>置信度 / 阈值</th></tr></thead>
+      <tbody id="log"></tbody>
+    </table></div>
+  </section>
+</main>
+<script>
+'use strict';
+// Everything shown here was produced (and redacted) by the core. This page never touches the host's
+// input box: a suggestion leaves it only through an explicit Send (dispatch) or Copy.
+const token = new URLSearchParams(location.search).get('t') || '';
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...children) => {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children.filter((c) => c !== null && c !== undefined));
+  return node;
+};
+const sessions = new Map();   // sessionId -> { live, stale, log: [] }
+let current = null;
+let dispatchModes = [];
+let draft = { id: null, text: '', choice: null, alternative: null, confirming: false, status: '', bad: false };
+
+const sessionOf = (id) => {
+  if (!sessions.has(id)) sessions.set(id, { live: null, stale: null, log: [] });
+  if (current === null) current = id;
+  return sessions.get(id);
+};
+
+async function rpc(method, params) {
+  const res = await fetch('/rpc', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token },
+    body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params }),
+  });
+  const msg = await res.json();
+  if (msg.error) throw new Error(msg.error.message + ' (' + msg.error.code + ')');
+  return msg.result;
+}
+
+function resetDraft(p) {
+  const needsPick = p && p.choices && p.preferredChoice === undefined;
+  draft = {
+    id: p ? p.id : null, text: p && !needsPick ? p.text : '',
+    choice: p && p.choices && p.preferredChoice !== undefined ? p.preferredChoice : null,
+    alternative: null, confirming: false, status: '', bad: false,
+  };
+}
+
+const STATUS = {
+  dispatched: '已发送给 Agent。', recorded: '已记录。', stale: '这条建议已过期（会话已进入下一轮），没有发送。',
+  busy: 'Agent 正在运行，稍后再试。', confirmation_required: '需要先确认。',
+  unsupported: '这个宿主不支持从这里发送，请复制后自行粘贴。', failed: '发送失败。',
+};
+
+async function act(action, extra = {}) {
+  const p = sessions.get(current)?.live;
+  if (!p) return;
+  const params = { predictionId: p.id, action, ...extra };
+  if (action === 'send') {
+    params.text = draft.text;
+    if (draft.choice !== null) params.choice = draft.choice;
+    if (draft.alternative !== null) params.alternative = draft.alternative;
+  }
+  try {
+    const { status } = await rpc('prediction/act', params);
+    draft.status = STATUS[status] || status;
+    draft.bad = !['dispatched', 'recorded'].includes(status);
+    draft.confirming = false;
+  } catch (e) {
+    draft.status = String(e.message || e);
+    draft.bad = true;
+  }
+  render();
+}
+
+function renderCard() {
+  const box = $('card');
+  box.replaceChildren();
+  const s = sessions.get(current);
+  const p = s?.live || s?.stale;
+  if (!p) return box.append(el('div', { className: 'empty', textContent: '现在没有建议。没有把握时就不给，这是正常情况。' }));
+  const live = s.live === p;
+  if (live && draft.id !== p.id) resetDraft(p);
+  const card = el('div', { className: 'card' + (live ? '' : ' stale') });
+
+  const conf = p.intent.confidence === null ? '规则命中' : '置信度 ' + p.intent.confidence.toFixed(2);
+  card.append(el('div', { className: 'meta' },
+    el('span', { className: 'tag', textContent: p.intent.id }),
+    el('span', { className: 'tag', textContent: p.scenarioId }),
+    el('span', { className: 'tag', textContent: conf }),
+    p.risk === 'side_effect' ? el('span', { className: 'tag risk', textContent: '有外部副作用' }) : null,
+    live ? null : el('span', { className: 'tag', textContent: '已过期' })));
+
+  if (p.context) {
+    card.append(el('div', { className: 'context' }, el('b', { textContent: 'Agent 刚才说（节选）：' }), p.context.excerpt));
+  }
+  if (!live) {
+    card.append(el('div', { textContent: p.text }));
+    return box.append(card);
+  }
+
+  if (p.choices) {
+    const group = el('div', { className: 'choices', role: 'radiogroup' });
+    p.choices.forEach((c, i) => {
+      const radio = el('input', { type: 'radio', name: 'choice', checked: draft.choice === i });
+      radio.addEventListener('change', () => {
+        Object.assign(draft, { choice: i, alternative: null, text: c.text, confirming: false });
+        render();
+      });
+      group.append(el('label', {}, radio, el('span', {}, c.text, el('small', { textContent: c.label }))));
+    });
+    card.append(group);
+  }
+
+  const area = el('textarea', { value: draft.text, placeholder: p.choices ? '先在上面选一项' : '', ariaLabel: '将要发送的内容' });
+  area.addEventListener('input', () => { draft.text = area.value; draft.confirming = false; sendBtn.disabled = !draft.text.trim(); });
+  card.append(area);
+  if (p.action?.type === 'command') {
+    card.append(el('div', { className: 'status', textContent: '不改字直接发送时，将作为命令 ' + p.action.command + ' 执行。' }));
+  }
+
+  if (p.alternatives.length) {
+    const alts = el('div', { className: 'row alts' }, el('span', { className: 'status', textContent: '或者：' }));
+    for (const a of p.alternatives) {
+      const b = el('button', { textContent: a.text, title: a.intentId });
+      b.addEventListener('click', () => {
+        Object.assign(draft, { alternative: a.intentId, choice: null, text: a.text, confirming: false });
+        render();
+      });
+      alts.append(b);
+    }
+    card.append(alts);
+  }
+
+  const needsConfirm = p.confirmBeforeSend && draft.alternative === null;
+  const sendBtn = el('button', { className: 'primary', textContent: '发给 Agent', disabled: !draft.text.trim() });
+  sendBtn.addEventListener('click', () => {
+    if (needsConfirm) { draft.confirming = true; render(); } else act('send');
+  });
+  const copyBtn = el('button', { textContent: '复制' });
+  copyBtn.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(draft.text || p.text); } catch { /* clipboard may be unavailable */ }
+    act('copy');
+  });
+  const closeBtn = el('button', { textContent: '没用，关掉' });
+  closeBtn.addEventListener('click', () => act('dismiss'));
+  card.append(el('div', { className: 'row' }, dispatchModes.length ? sendBtn : null, copyBtn, closeBtn));
+
+  if (draft.confirming) {
+    const yes = el('button', { className: 'primary', textContent: '确认发送' });
+    yes.addEventListener('click', () => act('send', { confirmed: true }));
+    const no = el('button', { textContent: '取消' });
+    no.addEventListener('click', () => { draft.confirming = false; render(); });
+    card.append(el('div', { className: 'confirm', role: 'alertdialog' },
+      el('div', { textContent: '这条消息会让 Agent 做有外部影响的事。将把下面这句话作为你的消息发到会话 ' + p.sessionId + '：' }),
+      el('pre', { textContent: draft.text }),
+      p.context ? el('div', { className: 'context' }, el('b', { textContent: '它回应的是：' }), p.context.excerpt) : null,
+      el('div', { className: 'row' }, yes, no)));
+  }
+  card.append(el('div', { className: 'status' + (draft.bad ? ' bad' : ''), textContent: draft.status }));
+  box.append(card);
+}
+
+function renderLog() {
+  const rows = (sessions.get(current)?.log || []).slice(-50).reverse().map((e) => {
+    const r = e.result;
+    const outcome = r.type === 'failed' ? '内部错误：' + r.error : r.prediction ? '给出 ' + r.prediction.intent.id : '抑制：' + r.suppressedReason;
+    const t = e.trace || {};
+    const conf = t.confidence === undefined || t.confidence === null ? '—' : t.confidence.toFixed(2) + (t.threshold === undefined ? '' : ' / ' + t.threshold.toFixed(2));
+    return el('tr', {},
+      el('td', { textContent: new Date(e.at).toLocaleTimeString() }), el('td', { textContent: e.sourceTurnId }),
+      el('td', { textContent: outcome }), el('td', { textContent: t.scenarioId || '—' }),
+      el('td', { textContent: t.source || '—' }), el('td', { textContent: conf }));
+  });
+  $('log').replaceChildren(...rows);
+}
+
+function render() {
+  const select = $('session');
+  select.replaceChildren(...[...sessions.keys()].map((id) => el('option', { value: id, textContent: id, selected: id === current })));
+  renderCard();
+  renderLog();
+}
+
+function onNotification(msg) {
+  const p = msg.params;
+  const s = sessionOf(p.sessionId);
+  if (msg.method === 'prediction/updated') {
+    s.log.push({ ...p, at: Date.now() });
+    if (p.result.type === 'completed' && p.result.prediction) { s.live = p.result.prediction; s.stale = null; }
+  } else if (msg.method === 'prediction/invalidated' && s.live && s.live.id === p.predictionId) {
+    s.stale = s.live;
+    s.live = null;
+  }
+  render();
+}
+
+$('session').addEventListener('change', (e) => { current = e.target.value; render(); });
+
+(async function start() {
+  try {
+    const attached = await rpc('surface/attach', { token, inspector: true });
+    dispatchModes = attached.dispatchModes || [];
+    for (const s of attached.sessions) sessionOf(s.sessionId).live = s.live || null;
+  } catch (e) {
+    $('conn').textContent = '连接失败：' + (e.message || e);
+    return;
+  }
+  const events = new EventSource('/events?inspector=1&t=' + encodeURIComponent(token));
+  events.onopen = () => { $('dot').className = 'dot on'; $('conn').textContent = '已连接'; };
+  events.onerror = () => { $('dot').className = 'dot'; $('conn').textContent = '连接中断，正在重连…'; };
+  events.onmessage = (e) => onNotification(JSON.parse(e.data));
+  render();
+})();
+</script>
+</body>
+</html>

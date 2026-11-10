@@ -1,0 +1,11 @@
+{
+  "name": "@intent-predict/host-grok",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Grok CLI as an intent-predict host: events from headless turns, the compact sampler, and dispatch by resuming the session.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "intent-predict-grok": "./src/main.ts"
+  }
+}

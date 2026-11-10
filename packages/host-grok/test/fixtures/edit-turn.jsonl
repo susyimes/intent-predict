@@ -1,0 +1,9 @@
+{"type": "text", "data": "I'll fix `add` in `math.js` so it returns `a + b`, and I won't run anything."}
+{"type": "tool_call", "toolCallId": "call-de1c0cf8-191e-4e94-8bd0-aaad3e69cd0d-0", "kind": "search", "toolName": "grep", "rawInput": {"pattern": "function add|exports\\.add|const add", "glob": "**/math.js"}}
+{"type": "tool_call_update", "toolCallId": "call-de1c0cf8-191e-4e94-8bd0-aaad3e69cd0d-0", "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "found 1 matches"}}], "rawOutput": {"type": "GrepSearch", "exit_code": 0}, "locations": []}
+{"type": "tool_call", "toolCallId": "call-47bc6449-20f8-4598-b71a-ec8bd4180a25-1", "kind": "read", "toolName": "read_file", "rawInput": {"target_file": "C:\\proj\\math.js"}}
+{"type": "tool_call_update", "toolCallId": "call-47bc6449-20f8-4598-b71a-ec8bd4180a25-1", "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "1→export function add(a, b) {\n  return a - b;\n}\n"}}], "rawOutput": {"type": "ReadFile"}, "locations": []}
+{"type": "tool_call", "toolCallId": "call-40e4cdcd-d023-42ab-927b-c0add81fc840-2", "kind": "edit", "toolName": "search_replace", "rawInput": {"file_path": "C:\\proj\\math.js", "old_string": "  return a - b;", "new_string": "  return a + b;"}}
+{"type": "tool_call_update", "toolCallId": "call-40e4cdcd-d023-42ab-927b-c0add81fc840-2", "status": "completed", "content": [], "rawOutput": {"type": "SearchReplace"}, "locations": []}
+{"type": "text", "data": "`add` in `math.js` now returns `a + b`.\n\nIt was subtracting (`return a - b`). I did not run anything."}
+{"type": "end", "stopReason": "end_turn", "sessionId": "00000000-0000-7000-8000-000000000001"}
