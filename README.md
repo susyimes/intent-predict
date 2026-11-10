@@ -37,50 +37,57 @@ agent 改完代码（或子 Agent 完成任务、或用户在终端手动跑完�
 
 宿主可以根据这份结果绑定确定性的动作，比如 `/review`、后台只读预备任务（Stage A2）或快捷按钮，不需要从文本里猜用户的意思。
 
-## 架构与双轴三阶段演进图
+## 架构图（当前 Phase 1：O1 × A1）
 
-`intent-predict` 将**观察范围（O1→O2→O3）**与**行动力（A1→A2→A3）**拆分为两个正交的三阶段演进轴，按 [ROADMAP.md](ROADMAP.md) 以「一阶段一轴一格」单步推进（Phase 1 当前只做 O1 × A1）：
+双轴五阶段怎么走见 [ROADMAP.md](ROADMAP.md)；每阶段单独的说明图（含全景总图与后续增量图）见 [docs/diagrams.md](docs/diagrams.md)。下面只画当前阶段这一格：输入只有当前会话，输出只有「填入式」建议，流水线任一级不过就静默（红框）。
 
 ```mermaid
 flowchart TB
-  subgraph Obs["1. 观察范围三阶段（Observation Stages: O1 → O2 → O3）"]
-    direction LR
-    O1["Stage O1：观察单一会话<br/>(Single-Session)<br/>当前 thread 的消息、工具调用与文件产物"]
-    O2["Stage O2：观察整个 Agent<br/>(Agent-Wide)<br/>跨会话 / 子 Agent / 后台任务 / Kanban 看板"]
-    O3["Stage O3：观察全局环境<br/>(Global / Ambient)<br/>外部终端命令、Git 工作区、IDE 诊断报错、剪贴板"]
-    O1 -->|"扩展视野"| O2 -->|"扩展视野"| O3
+  classDef now fill:#e8f3ff,stroke:#2b6cb0,color:#1a365d
+  classDef future fill:#f7f7f7,stroke:#9aa0a6,color:#5f6368,stroke-dasharray: 5 5
+  classDef stop fill:#fdecec,stroke:#b03a2e,color:#7b241c
+  classDef host fill:#eafaf1,stroke:#1e8449,color:#145a32
+
+  EV["宿主 · O1 事件流（唯一输入）<br/>turn / message / tool / artifact / state"]:::host
+  XB["O2/O3 事件 agent.* / env.*<br/>Phase 1 接收即忽略"]:::future
+
+  subgraph Core["intent-predict 核心（Phase 1）"]
+    direction TB
+    SS["会话存储 + 信号提取 + 守卫<br/>proposedRisk 提议风险扫描"]:::now
+    RT["有限场景路由（INTENTS.md）<br/>仅 stage=O1 场景 · 专用 → 兜底"]:::now
+    CD{"显式规则命中？"}:::now
+    MD["模型约束分类<br/>封闭目录选一或 none"]:::now
+    GT["Per-Intent 门控<br/>阈值 / 分差 / 风险 / 冷却 → 通道裁决"]:::now
+    RD["槽位校验 → 模板与 Action 插值 → 9 条过滤"]:::now
+    PD["Prediction<br/>意图 + 槽位 + 建议文本"]:::now
+    NX["completed + null（fail-closed 静默）<br/>SuppressedReason 记录原因"]:::stop
+    SS --> RT --> CD
+    CD -->|"是，短路跳过模型"| GT
+    CD -->|"否"| MD --> GT
+    CD -.->|"无模型且未命中"| NX
+    GT --> RD --> PD
+    SS -.-> NX
+    RT -.-> NX
+    MD -.-> NX
+    GT -.-> NX
+    RD -.-> NX
   end
 
-  subgraph Engine["2. intent-predict 核心（SPEC.md 确定性外壳 + INTENTS.md 提示词契约）"]
-    direction LR
-    LD["契约加载器<br/>INTENTS.md<br/>(YAML 头 + Prompt 正文)"]
-    SG["信号提取 + 守卫<br/>+ 提议风险扫描 (proposedRisk)"]
-    SR["有限场景路由<br/>按 O1/O2/O3 匹配<br/>专用场景 → 保守兜底 | 未命中 → none"]
-    CS["候选生成<br/>Rule (仅 explicit 短路)<br/>Prior / Model (top-1 + runnerUps)"]
-    FG["融合 → Per-Intent 门控 & 通道裁决<br/>→ 模板/Action 原子插值 → 9 条过滤"]
-    FB[("本地反馈与校准日志<br/>near-match 豁免退避")]
-    LD --> SR
-    SG --> SR --> CS --> FG
-    FB -.->|"Dirichlet 先验 / 阈值退避"| CS
-  end
+  SM["宿主零配置 Sampler<br/>compact 必备 · fork 可选 · 可取消"]:::host
+  UI["宿主输入框（唯一输出面）<br/>Ghost Text / Chips / 确认按钮<br/>只填入 · 不发送 · 不执行"]:::host
+  FB[("本地反馈 JSONL<br/>驱动冷却与退避")]:::now
+  AG["A2 推测预执行 · A3 委托执行<br/>不在 Phase 1"]:::future
 
-  subgraph Sampler["宿主零配置 Sampler"]
-    SM["fork 缓存共享分叉<br/>compact 先脱敏后委托宿主模型"]
-  end
-
-  subgraph Agency["3. 行动力三阶段（Agency Stages: A1 → A2 → A3）"]
-    direction LR
-    A1["Stage A1：纯建议输出（默认）<br/>Ghost Text / Chips / 确认按钮"]
-    A2["Stage A2：推测预执行（后续）<br/>静默预跑只读检查 & 预取上下文"]
-    A3["Stage A3：建议 + 委托执行（后续）<br/>用户确认后派发给目标 Agent 执行"]
-    A1 -.->|"升级行动力"| A2 -.->|"升级行动力"| A3
-  end
-
-  Obs -->|"AgentEvent 流"| SG
-  CS <-->|"sampler/sample + cancel"| Sampler
-  FG -->|"Prediction"| Agency
-  Agency -->|"Feedback + similarity"| FB
+  EV --> SS
+  XB -.-> SS
+  MD <--> SM
+  PD --> UI
+  NX -.->|"撤下残留建议"| UI
+  UI -->|"Feedback + similarity"| FB
+  FB -.-> GT
 ```
+
+Phase 1 的时序图与 UI 状态图见 [docs/diagrams.md](docs/diagrams.md#1-phase-1o1--a1当前精修范围)。
 
 ## 和 Codex composer predictions 有什么不同
 
@@ -89,7 +96,7 @@ flowchart TB
 | | Codex composer predictions | intent-predict |
 |---|---|---|
 | 预测什么 | 一句开放文本 | 场景内有限意图集合中的一项（或 `none`），附带槽位、置信度、文本和动作 |
-| 能在哪里用 | 只能在 Codex 桌面版里用 | 任意 agent（首发适配 **Hermes Agent**），通过适配器或 JSON-RPC sidecar 接入 |
+| 能在哪里用 | 只能在 Codex 桌面版里用 | 任意 agent（第一个深度落地 Hermes Agent，见路线图），通过适配器或 JSON-RPC sidecar 接入 |
 | 模型配置 | 绑定 Codex 自身后端 | **零配置优先**：通过 `Sampler` 直接复用宿主 Agent 已有的模型或缓存分叉 |
 | 什么时候出现 | 策略未公开 | 显式门控：阈值、领先幅度、冷却、风险等级 |
 | 怎么评估 | 看接受率 | 分类指标 + 接受率 + 校准 |

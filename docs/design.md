@@ -121,7 +121,7 @@ Qwen 的 Web Shell 里还有一个更接近"意图"的设计。它对用户正�
 
 ## 5. 总体架构：双轴三阶段演进（O1/O2/O3 观察阶段 × A1/A2/A3 行动力阶段）
 
-借鉴 OpenAI Symphony 的 **Spec-as-Prompt（`SPEC.md`）+ 仓库契约文件（`INTENTS.md`）** 模式，任意宿主 Agent 接入后即升级为 **Intent Predict Agent**，并沿着**观察范围（O1→O2→O3）**和**行动力（A1→A2→A3）**两个正交的三阶段轴渐进演进：
+借鉴 OpenAI Symphony 的 **Spec-as-Prompt（`SPEC.md`）+ 仓库契约文件（`INTENTS.md`）** 模式，任意宿主 Agent 接入后即升级为 **Intent Predict Agent**，并沿着**观察范围（O1→O2→O3）**和**行动力（A1→A2→A3）**两个正交的三阶段轴渐进演进。下图是**全景愿景图**；按阶段拆开的说明图在 [diagrams.md](diagrams.md)，当前精修与实现的只有其中 Phase 1（O1 × A1）的三张图，其余阶段在图上均按未启用理解：
 
 ```mermaid
 flowchart TB

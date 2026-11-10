@@ -20,6 +20,7 @@ O1 单会话  Phase 1（当前，只做这一格）
 
 观察范围：**仅当前单个会话**（`turn.*`、`message.*`、`tool.*`、`artifact`、`state`）。
 行动力：**仅纯建议输出**（`agencyStage` 恒为 `suggest_only`；ghost text / chips / 确认按钮；从不自动发送、从不执行工具、不产 `prepPlan`）。
+说明图：[docs/diagrams.md](docs/diagrams.md) 第 1 节三张图（架构主图、含取消的时序图、UI 控制器状态图）是本阶段的精修对象，随实现打磨同步维护；后续阶段在同文件只有单页增量图，进入该阶段再展开。
 
 ### 做（In）
 

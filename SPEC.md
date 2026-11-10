@@ -77,6 +77,8 @@ flowchart TB
   G -->|"结构化 Prediction"| AgencyAxis
 ```
 
+This is the full-vision overview. Implementations are phased one grid cell at a time ([ROADMAP.md](ROADMAP.md)); the per-phase diagrams — including the detailed Phase 1 (O1 × A1) architecture, sequence, and UI-state diagrams — live in [docs/diagrams.md](docs/diagrams.md). A Phase 1 diagram shows only the O1 inputs and A1 outputs of the picture above.
+
 ---
 
 ## 2. Three Observation Stages (O1 / O2 / O3)
