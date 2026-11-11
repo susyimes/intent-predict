@@ -1,16 +1,22 @@
 // The bundled surface's session picker, end to end: surface RPC -> sidecar -> host binding.
-// No Grok turn runs, so no Grok binary is needed; binding only reseeds the host.
+// Every agent CLI points nowhere unless a test gives it a stand-in: no real agent ever runs here.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { CODEX_SAMPLE_ARGS } from '../src/codex.ts';
 import { GrokHost } from '../src/host.ts';
 import type { GrokHostOptions } from '../src/host.ts';
 
+const NO_BIN = 'intent-predict-no-such-bin';
+const FAKE_ACP = fileURLToPath(new URL('./fixtures/fake-acp-agent.mjs', import.meta.url));
+const FAKE_CODEX = fileURLToPath(new URL('./fixtures/fake-codex.mjs', import.meta.url));
+
 async function started(extra: Partial<GrokHostOptions> = {}) {
-  const host = new GrokHost({ cwd: process.cwd(), ...extra });
+  const host = new GrokHost({ cwd: process.cwd(), bin: NO_BIN, hermesBin: NO_BIN, codexBin: NO_BIN, kimiBin: NO_BIN, ...extra });
   await host.start();
   const base = new URL(host.surfaceUrl!);
   const token = base.searchParams.get('t')!;
@@ -35,7 +41,7 @@ test('the picker page is served and attach advertises binding', async () => {
     assert.equal(page.status, 200);
     const html = await page.text();
     assert.match(html, /选择会话/);
-    assert.match(html, /内容会发给 Grok/, 'the picker says that bound sessions are evaluated with Grok');
+    assert.match(html, /建议由该会话自己的 Agent 挑/, 'the picker says who picks the suggestions for a bound session');
 
     const list = await rpc('binding/list', {});
     assert.equal(list.result.current, null);
@@ -279,6 +285,94 @@ test('a turn never hands grok a flag-like session id', async () => {
     assert.equal(host.busy, false, 'the refused turn still ends');
   } finally {
     await host.stop();
+  }
+});
+
+/** The first finished evaluation of the host's current core session, as an inspector sees it. */
+async function firstEvaluation(rpc: (m: string, p?: Record<string, unknown>) => Promise<any>, host: GrokHost): Promise<any> {
+  for (const end = Date.now() + 20_000; Date.now() < end;) {
+    const attached = await rpc('surface/attach', { inspector: true });
+    const recent: any[] = attached.result.sessions.find((s: any) => s.sessionId === host.sessionId)?.recent ?? [];
+    const done = recent.find((e) => e.result.prediction || e.result.suppressedReason);
+    if (done) return done;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error('no evaluation within 20 s');
+}
+
+test('a bound Codex session is replayed from its rollout and evaluated by Codex itself', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'ip-codex-home-'));
+  const saved = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  const log = join(home, 'codex.log');
+  writeFileSync(log, '');
+  try {
+    const id = '01a1ca3a-0000-7000-8000-00000000abcd';
+    const day = join(home, 'sessions', '2026', '11', '11');
+    mkdirSync(day, { recursive: true });
+    const row = (type: string, payload: object) => JSON.stringify({ timestamp: '2026-11-11T10:00:00Z', type, payload });
+    writeFileSync(join(day, `rollout-2026-11-11T18-00-00-${id}.jsonl`), [
+      row('session_meta', { id, cwd: process.cwd() }),
+      row('event_msg', { type: 'task_started', turn_id: 'u1' }),
+      row('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'fix the login' }] }),
+      row('response_item', { type: 'custom_tool_call', name: 'apply_patch', call_id: 'p1', input: '*** Begin Patch\n*** Update File: src/login.py\n*** End Patch' }),
+      row('response_item', { type: 'custom_tool_call_output', call_id: 'p1', output: 'Success.' }),
+      row('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Changed the login check.' }] }),
+      row('event_msg', { type: 'task_complete', turn_id: 'u1' }),
+    ].join('\n') + '\n');
+    const { host, rpc } = await started({ codexBin: { command: process.execPath, prefix: [FAKE_CODEX, log] } });
+    try {
+      const bound = await rpc('binding/bind', { kind: 'codex', id, cwd: process.cwd() });
+      assert.equal(bound.result.bound.kind, 'codex');
+      assert.equal(bound.result.replayedTurns, 1);
+      const evaluation = await firstEvaluation(rpc, host);
+      assert.equal(evaluation.result.prediction?.intent.id, 'run_tests', JSON.stringify(evaluation.result));
+      const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+      assert.deepEqual(calls.map((c) => c.args), [CODEX_SAMPLE_ARGS], 'Codex itself picked the suggestion, in an ephemeral call');
+    } finally {
+      await host.stop();
+    }
+  } finally {
+    if (saved === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = saved;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a bound Kimi session is replayed from its wire log and evaluated by Kimi itself', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ip-kimi-home-'));
+  const saved = process.env.KIMI_CODE_HOME;
+  process.env.KIMI_CODE_HOME = root;
+  const log = join(root, 'acp.log');
+  writeFileSync(log, '');
+  try {
+    const dir = join(root, 'sessions', 'wd_1', 'session_k1');
+    mkdirSync(join(dir, 'agents', 'main'), { recursive: true });
+    writeFileSync(join(root, 'session_index.jsonl'), JSON.stringify({ sessionId: 'session_k1', sessionDir: dir, workDir: process.cwd() }) + '\n');
+    const loop = (event: object) => ({ type: 'context.append_loop_event', agentId: 'main', event });
+    writeFileSync(join(dir, 'agents', 'main', 'wire.jsonl'), [
+      { type: 'turn.prompt', agentId: 'main', input: [{ type: 'text', text: 'fix the login' }], origin: { kind: 'user' } },
+      loop({ type: 'tool.call', toolCallId: 'e1', name: 'Edit', args: { path: join(process.cwd(), 'src', 'login.ts') } }),
+      loop({ type: 'tool.result', toolCallId: 'e1', result: { output: 'ok' } }),
+      loop({ type: 'content.part', part: { type: 'text', text: 'Changed the login check.' } }),
+      { type: 'turn.ended', agentId: 'main', reason: 'completed' },
+    ].map((o) => JSON.stringify(o)).join('\n') + '\n');
+    const { host, rpc } = await started({ kimiBin: { command: process.execPath, prefix: [FAKE_ACP, log] } });
+    try {
+      const bound = await rpc('binding/bind', { kind: 'kimi', id: 'session_k1', cwd: process.cwd() });
+      assert.equal(bound.result.replayedTurns, 1);
+      const evaluation = await firstEvaluation(rpc, host);
+      assert.equal(evaluation.result.prediction?.intent.id, 'run_tests', JSON.stringify(evaluation.result));
+    } finally {
+      await host.stop();                                   // waits for the throwaway session's deletion
+    }
+    const methods = readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).method).filter(Boolean);
+    assert.deepEqual(methods, ['initialize', 'session/new', 'session/prompt', 'session/delete'],
+      'Kimi itself picked the suggestion, in a session it then deleted');
+  } finally {
+    if (saved === undefined) delete process.env.KIMI_CODE_HOME;
+    else process.env.KIMI_CODE_HOME = saved;
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

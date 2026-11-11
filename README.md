@@ -65,12 +65,14 @@ npm run typecheck
 pip install jsonschema pyyaml && python tools/validate.py   # 规范、契约、用例、文档互相一致
 ```
 
-用 Grok CLI 当宿主试用（需已登录的 `grok`）：
+用本机的 Agent 命令行当宿主试用（Grok、Hermes、Codex、Kimi 任选，需已登录）：
 
 ```bash
-node packages/host-grok/src/main.ts --cwd <你的项目> -- --allow search_replace
-# 终端里和 Grok 对话；启动时打印的网页地址里看「下一步建议」
-# 网页顶部的「选择会话」可嗅探本机活跃 AI 会话，并热绑定 Grok / Hermes 会话（绑定时还原近 3 轮；刷新页面同步外部新轮次；求值时这些轮次的节选会发给 Grok 的模型）
+node packages/host-grok/src/main.ts --agent grok --cwd <你的项目> -- --allow search_replace
+# --agent 也可以是 hermes / codex / kimi；终端里和它对话，启动时打印的网页地址里看「下一步建议」
+# 网页顶部的「选择会话」可嗅探本机活跃 AI 会话，并热绑定 Grok / Hermes / Codex / Kimi 会话
+#   （绑定时还原近 3 轮；刷新页面同步外部新轮次；建议由该会话自己的 Agent 用默认模型挑）
+# 发出的消息按该 Agent 自己的审批规则执行，宿主收到的权限请求一律拒绝；`--` 后的 --allow 只对 Grok 有效
 # 太难出建议时加 --eagerness eager；可用 --min-confidence/--side-effect-min-confidence/--alt-min-confidence/--cooldown-turns 细调
 npm run e2e:grok                # 在一次性目录里对真实 Grok 跑一遍端到端检查（花费几美分）
 npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自带网页

@@ -83,7 +83,7 @@ const el = (tag, props = {}, ...children) => {
   node.append(...children.filter((c) => c !== null && c !== undefined));
   return node;
 };
-const KIND_LABEL = { grok: 'Grok', hermes: 'Hermes' };
+const KIND_LABEL = { grok: 'Grok', hermes: 'Hermes', codex: 'Codex', kimi: 'Kimi' };
 const sessions = new Map();   // sessionId -> { live, stale, log: [] }
 let current = null;
 let bound = null;

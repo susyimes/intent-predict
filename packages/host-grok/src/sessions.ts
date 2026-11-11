@@ -1,16 +1,16 @@
 // Sniff out active AI sessions on this machine from each harness's local store, so the bundled
 // surface can offer them for binding. Discovery reads metadata only (ids, cwds, titles,
 // timestamps) and never conversation bodies. Only Grok registers its live sessions; elsewhere
-// "active" means recent activity in the store. Grok and Hermes sessions are bindable from this
-// host when their ids are plain names (see isSafeName): their turns are driven headlessly
-// (`grok --resume`, `hermes -z --resume`).
-import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+// "active" means recent activity in the store. Grok, Hermes, Codex and Kimi sessions are bindable
+// from this host when their ids are plain names (see isSafeName): their turns are driven
+// headlessly by the adapters in grok.ts, hermes.ts, codex.ts and kimi.ts.
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 
-export type SessionKind = 'grok' | 'hermes' | 'claude-code' | 'codex' | 'muse';
+export type SessionKind = 'grok' | 'hermes' | 'codex' | 'kimi' | 'claude-code' | 'muse';
 
 export interface DiscoveredSession {
   kind: SessionKind;
@@ -183,8 +183,60 @@ function codexSessions(home: string, cutoff: number, limit: number): DiscoveredS
       const match = /"cwd"\s*:\s*"((?:\\.|[^"\\])*)"/.exec(head(file, 262_144));
       if (match) cwd = JSON.parse(`"${match[1]}"`) as string;
     } catch { /* metadata is best effort */ }
-    const session: DiscoveredSession = { kind: 'codex', id, running: false, bindable: false, updatedAt: mtimeOf(file) };
+    const session: DiscoveredSession = { kind: 'codex', id, running: false, bindable: isSafeName(id), updatedAt: mtimeOf(file) };
     if (cwd) session.cwd = cwd;
+    out.push(session);
+  }
+  return out;
+}
+
+/** Kimi Code's home: KIMI_CODE_HOME, else ~/.kimi-code. */
+export function kimiRoot(home: string): string {
+  return process.env.KIMI_CODE_HOME ?? join(home, '.kimi-code');
+}
+
+/**
+ * Kimi's session index (session_index.jsonl: {sessionId, sessionDir, workDir} per line, last entry
+ * wins). The index is append-only and outlives deleted sessions, so entries whose directory is
+ * gone are left out.
+ */
+export function kimiIndex(root: string): Map<string, { dir: string; workDir?: string }> {
+  const index = new Map<string, { dir: string; workDir?: string }>();
+  let text: string;
+  try {
+    text = readFileSync(join(root, 'session_index.jsonl'), 'utf8');
+  } catch {
+    return index;
+  }
+  for (const line of text.split('\n')) {
+    try {
+      const o = JSON.parse(line);
+      if (typeof o?.sessionId !== 'string' || typeof o?.sessionDir !== 'string') continue;
+      const entry: { dir: string; workDir?: string } = { dir: isAbsolute(o.sessionDir) ? o.sessionDir : join(root, o.sessionDir) };
+      if (typeof o.workDir === 'string') entry.workDir = o.workDir;
+      index.set(o.sessionId, entry);
+    } catch { /* a partial line */ }
+  }
+  for (const [id, entry] of index) if (!existsSync(entry.dir)) index.delete(id);
+  return index;
+}
+
+/** Kimi Code: sessions whose main wire log changed inside the window; title and cwd from state.json. */
+function kimiSessions(home: string, cutoff: number, limit: number): DiscoveredSession[] {
+  const recent: Array<{ id: string; dir: string; workDir?: string; mtime: number }> = [];
+  for (const [id, entry] of kimiIndex(kimiRoot(home))) {
+    const mtime = mtimeOf(join(entry.dir, 'agents', 'main', 'wire.jsonl'));
+    if (mtime !== undefined && mtime >= cutoff) recent.push({ id, dir: entry.dir, workDir: entry.workDir, mtime });
+  }
+  const out: DiscoveredSession[] = [];
+  for (const r of recent.sort((a, b) => b.mtime - a.mtime)) {
+    if (out.length >= limit) break;
+    const state = jsonFile(join(r.dir, 'state.json'));
+    if (state?.archived === true) continue;
+    const session: DiscoveredSession = { kind: 'kimi', id: r.id, running: false, bindable: isSafeName(r.id), updatedAt: r.mtime };
+    const cwd = typeof state?.cwd === 'string' && state.cwd ? state.cwd : r.workDir;
+    if (cwd) session.cwd = cwd;
+    if (typeof state?.title === 'string' && state.title) session.title = state.title;
     out.push(session);
   }
   return out;
@@ -291,6 +343,7 @@ export function discoverSessions(opts: DiscoverOptions = {}): DiscoveredSession[
     ...each(() => hermesSessions(home, opts.hermesHome, cutoff, limit)),
     ...each(() => claudeSessions(home, cutoff, limit)),
     ...each(() => codexSessions(home, cutoff, limit)),
+    ...each(() => kimiSessions(home, cutoff, limit)),
     ...each(() => museSessions(home, cutoff, limit)),
   ];
   return all.sort((a, b) =>

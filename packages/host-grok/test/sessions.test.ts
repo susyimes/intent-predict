@@ -121,6 +121,53 @@ test('discovers Hermes sessions from its SQLite store, including named profiles'
   }
 });
 
+test('discovers Kimi sessions from its index, skipping deleted, archived and idle ones; Codex is bindable', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ip-kimi-disc-'));
+  const saved = process.env.KIMI_CODE_HOME;
+  delete process.env.KIMI_CODE_HOME;
+  const now = Date.now();
+  try {
+    const root = join(home, '.kimi-code');
+    const session = (id: string, state: object, mtime = now) => {
+      const dir = join(root, 'sessions', 'wd_1', id);
+      mkdirSync(join(dir, 'agents', 'main'), { recursive: true });
+      writeFileSync(join(dir, 'state.json'), JSON.stringify({ id, ...state }));
+      const wire = join(dir, 'agents', 'main', 'wire.jsonl');
+      writeFileSync(wire, '{"type":"metadata"}\n');
+      utimesSync(wire, new Date(mtime), new Date(mtime));
+      return dir;
+    };
+    const live = session('session_live', { cwd: 'D:\\kimi-proj', title: 'Kimi 会话', archived: false });
+    const archived = session('session_archived', { cwd: 'D:\\x', archived: true });
+    const idle = session('session_idle', { cwd: 'D:\\x' }, now - 13 * 3_600_000);
+    const unsafe = session('-unsafe', { cwd: 'D:\\x' });
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, 'session_index.jsonl'), [
+      { sessionId: 'session_live', sessionDir: live, workDir: 'D:\\kimi-proj' },
+      { sessionId: 'session_gone', sessionDir: join(root, 'sessions', 'wd_1', 'session_gone'), workDir: 'D:\\x' },
+      { sessionId: 'session_archived', sessionDir: archived },
+      { sessionId: 'session_idle', sessionDir: idle },
+      { sessionId: '-unsafe', sessionDir: unsafe },
+    ].map((o) => JSON.stringify(o)).join('\n') + '\n');
+    const codexDay = join(home, '.codex', 'sessions', '2026', '11', '11');
+    mkdirSync(codexDay, { recursive: true });
+    writeFileSync(join(codexDay, 'rollout-2026-11-11T01-00-00-12345678-1234-1234-1234-1234567890ab.jsonl'),
+      '{"type":"session_meta","payload":{"cwd":"D:\\\\codex-proj"}}\n');
+
+    const byId = new Map(discoverSessions({ home, now, hermesHome: join(home, 'no-hermes') }).map((x) => [x.id, x]));
+    assert.deepEqual(byId.get('session_live'), {
+      kind: 'kimi', id: 'session_live', running: false, bindable: true, updatedAt: byId.get('session_live')?.updatedAt,
+      cwd: 'D:\\kimi-proj', title: 'Kimi 会话',
+    });
+    for (const id of ['session_gone', 'session_archived', 'session_idle']) assert.equal(byId.has(id), false, id);
+    assert.equal(byId.get('-unsafe')?.bindable, false);
+    assert.equal(byId.get('12345678-1234-1234-1234-1234567890ab')?.bindable, true, 'Codex sessions can now be bound');
+  } finally {
+    if (saved !== undefined) process.env.KIMI_CODE_HOME = saved;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('sessions whose id or profile could act as an option are listed but not bindable', () => {
   const home = mkdtempSync(join(tmpdir(), 'ip-sessions-unsafe-'));
   const hermesHome = join(home, 'hermes');

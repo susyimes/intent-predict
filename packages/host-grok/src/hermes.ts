@@ -1,40 +1,194 @@
-// Hermes Agent plumbing: one headless turn per process. `hermes -z` prints only the final
-// response text, so a Hermes turn yields no tool-call events — signals come from the final
-// message alone. Verified live against Hermes on this machine: `-z ... --resume <id>`
-// continues the same session id, and a named profile is selected with a leading `-p`.
-import { spawn } from 'node:child_process';
-import { isAbsolute, relative } from 'node:path';
+// Hermes Agent plumbing (verified against Hermes v0.22 on the development machine).
+//
+// Turns run in single-query mode: `hermes [-p profile] chat --query-file F --oneshot --format
+// stream-json [--resume id]`. Not `hermes -z`: one-shot mode auto-approves dangerous commands,
+// whereas single-query mode follows `approvals.single_query_mode`, which denies them by default.
+// The JSONL stream carries tool calls with their exit codes and a final `result` with the session id.
+import { isAbsolute, join, relative } from 'node:path';
 import type { AgentEvent, ToolCall, ToolResult } from '../../core/src/index.ts';
-import type { HistoryReplay } from './grok.ts';
-import { loadSqlite, safeName } from './sessions.ts';
+import type { AgentAdapter, AgentEnv, AgentRef } from './agent.ts';
+import type { GrokLine, HistoryReplay } from './grok.ts';
+import { firstLine, jsonLines, runProcess } from './proc.ts';
+import { hermesHomePath, isSafeName, loadSqlite, safeName } from './sessions.ts';
 
-/** Throws when the session id or profile could be read as an option (see isSafeName). */
-export function hermesTurnArgs(text: string, opts: { sessionId?: string; profile?: string }): string[] {
+/** Arguments for a driven turn. Throws when the session id or profile could be read as an option. */
+export function hermesChatArgs(promptFile: string, opts: { sessionId?: string; profile?: string }): string[] {
   const args: string[] = [];
   if (opts.profile) args.push('-p', safeName(opts.profile, 'profile'));
-  args.push('-z', text);
+  args.push('chat', '--query-file', promptFile, '--oneshot', '--format', 'stream-json');
   if (opts.sessionId) args.push('--resume', safeName(opts.sessionId, 'session id'));
   return args;
 }
 
-export interface HermesRunOptions { cwd: string; bin?: string; signal?: AbortSignal }
-
-/** Run `hermes` and collect its whole stdout (one-shot mode emits no incremental output). */
-export function runHermes(
-  args: string[], opts: HermesRunOptions,
-): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(opts.bin ?? 'hermes', args, {
-      cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, signal: opts.signal,
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d: Buffer) => { stdout += d.toString('utf8'); });
-    child.stderr.on('data', (d: Buffer) => { stderr += d.toString('utf8'); });
-    child.once('error', reject);
-    child.once('close', (code) => resolve({ code, stdout, stderr }));
-  });
+/**
+ * Arguments for a classification call: the profile's default model, only the side-effect-free
+ * `clarify` toolset (an unknown toolset name is rejected), no rules or memory injection, and
+ * source `tool`, which keeps the session out of the user's session lists until it is deleted.
+ */
+export function hermesSampleArgs(promptFile: string, profile?: string): string[] {
+  const args: string[] = [];
+  if (profile) args.push('-p', safeName(profile, 'profile'));
+  args.push('chat', '--query-file', promptFile, '--oneshot', '--format', 'stream-json',
+    '--source', 'tool', '--ignore-rules', '-t', 'clarify');
+  return args;
 }
+
+const WRITE_TOOLS = /write|edit|patch|create|append|insert|replace/i;
+const DELETE_TOOLS = /delete|remove|unlink/i;
+
+/** Maps one Hermes single-query run (stream-json lines) to the events of one turn. */
+export class HermesStreamMapper {
+  sessionId: string | undefined;
+  private readonly turnId: string;
+  private readonly cwd: string;
+  private text = '';
+  private ended = false;
+  private readonly calls = new Map<string, { name: string; path?: string }>();
+  private seq = 0;
+
+  constructor(turnId: string, cwd: string) {
+    this.turnId = turnId;
+    this.cwd = cwd;
+  }
+
+  private flush(final: boolean): AgentEvent[] {
+    const text = this.text.trim();
+    this.text = '';
+    return text ? [{ type: 'message.agent', turnId: this.turnId, text, final }] : [];
+  }
+
+  push(line: Record<string, any>): AgentEvent[] {
+    const turnId = this.turnId;
+    switch (line.type) {
+      case 'text':
+        this.text += String(line.text ?? '');
+        return [];
+      case 'tool_use': {
+        const callId = String(line.tool_call_id ?? `h${++this.seq}`);
+        const name = String(line.name ?? 'tool');
+        const input: Record<string, any> = line.input && typeof line.input === 'object' ? line.input : {};
+        const path = [input.path, input.file_path, input.file, input.target_file].find((v) => typeof v === 'string');
+        this.calls.set(callId, { name, path });
+        const call: ToolCall = { type: 'tool.call', turnId, callId, name };
+        if (typeof input.command === 'string') call.command = input.command;
+        return [...this.flush(false), call];                // text before a tool call is commentary
+      }
+      case 'tool_result': {
+        const callId = String(line.tool_call_id ?? [...this.calls.keys()].at(-1) ?? `h${++this.seq}`);
+        let output: unknown = line.output;
+        let exitCode: number | undefined;
+        if (typeof output === 'string' && output.trimStart().startsWith('{')) {
+          try {
+            const parsed = JSON.parse(output);
+            if (typeof parsed?.exit_code === 'number') exitCode = parsed.exit_code;
+            output = parsed?.output ?? parsed?.error ?? output;
+          } catch { /* not JSON */ }
+        }
+        const failed = line.is_error === true || (exitCode !== undefined && exitCode !== 0);
+        const result: ToolResult = { type: 'tool.result', turnId, callId, status: failed ? 'error' : 'ok' };
+        if (exitCode !== undefined) result.exitCode = exitCode;
+        const summary = firstLine(output);
+        if (summary) result.summary = summary;
+        const out: AgentEvent[] = [result];
+        const info = this.calls.get(callId);
+        if (!failed && info?.path && (WRITE_TOOLS.test(info.name) || DELETE_TOOLS.test(info.name))) {
+          out.push({ type: 'artifact', turnId, kind: DELETE_TOOLS.test(info.name) ? 'file_deleted' : 'file_changed', ref: refOf(this.cwd, info.path) });
+        }
+        return out;
+      }
+      case 'result': {
+        this.ended = true;
+        if (typeof line.session_id === 'string' && line.session_id) this.sessionId = line.session_id;
+        // the result's text is the whole reply; deltas may have been cut by a replay gap
+        if (typeof line.text === 'string' && line.text.trim()) this.text = line.text;
+        const status = line.exit_code === 0 ? 'completed' : line.exit_code === 130 ? 'interrupted' : 'failed';
+        return [...this.flush(true), { type: 'turn.completed', turnId, status, at: Date.now() }];
+      }
+      default:
+        return [];
+    }
+  }
+
+  /** Call when the process has exited: a run that never reported a result failed. */
+  finish(): AgentEvent[] {
+    if (this.ended) return [];
+    this.ended = true;
+    return [...this.flush(true), { type: 'turn.completed', turnId: this.turnId, status: 'failed', at: Date.now() }];
+  }
+}
+
+/** The state.db files that may hold a session: the profile's own store first. */
+function hermesDbs(env: AgentEnv, profile?: string): string[] {
+  const root = hermesHomePath(env.home, env.hermesHome);
+  return profile ? [join(root, 'profiles', safeName(profile, 'profile'), 'state.db'), join(root, 'state.db')] : [join(root, 'state.db')];
+}
+
+/** Hermes Agent: single-query turns (dangerous commands denied by default), history from state.db. */
+export const hermesAdapter: AgentAdapter = {
+  kind: 'hermes',
+  async runTurn(text, ctx) {
+    const mapper = new HermesStreamMapper(ctx.turnId, ctx.cwd);
+    try {
+      const args = hermesChatArgs(ctx.env.promptFile(text), { sessionId: ctx.id, profile: ctx.profile });
+      const { code, stderr } = await runProcess(ctx.env.bins.hermes ?? 'hermes', args, {
+        cwd: ctx.cwd,
+        onLine: (raw) => {
+          const [line] = jsonLines(raw);
+          if (!line) return;
+          if (line.type === 'text') ctx.onLine?.({ type: 'text', data: line.text } as GrokLine);
+          if (line.type === 'tool_use') ctx.onLine?.({ type: 'tool_call', toolName: line.name, rawInput: line.input } as GrokLine);
+          ctx.emit(mapper.push(line));
+        },
+      });
+      if (code !== 0) ctx.info(`hermes exited with ${code}${stderr.trim() ? ': ' + stderr.trim().split('\n')[0] : ''}`);
+    } catch (e) {
+      ctx.info(`could not run hermes: ${(e as Error).message}`);
+    } finally {
+      ctx.emit(mapper.finish());
+    }
+    return { sessionId: isSafeName(mapper.sessionId) ? mapper.sessionId : undefined };
+  },
+  async sample(prompt, ctx) {
+    const bin = ctx.env.bins.hermes ?? 'hermes';
+    const profile = ctx.ref?.profile;
+    const { code, stdout, stderr } = await runProcess(bin, hermesSampleArgs(ctx.env.promptFile(prompt), profile), {
+      cwd: ctx.env.scratch(), signal: ctx.signal,
+    });
+    const lines = jsonLines(stdout);
+    const result = lines.find((l) => l.type === 'result');
+    const sessionId = result?.session_id;
+    const cleanup = isSafeName(sessionId)
+      ? runProcess(bin, [...(profile ? ['-p', safeName(profile, 'profile')] : []), 'sessions', 'delete', '--yes', sessionId], { cwd: ctx.env.scratch() })
+        .then(() => {}, () => {})
+      : undefined;
+    if (!result || result.exit_code !== 0) {
+      void cleanup;
+      throw new Error(`hermes classification call failed (${code}): ${String(result?.error ?? stderr.trim().split('\n').at(-1) ?? '')}`);
+    }
+    const tokens = result.tokens ?? {};
+    return {
+      // a call that used a tool is void (SPEC 6)
+      text: lines.some((l) => l.type === 'tool_use') ? null : String(result.text ?? ''),
+      usage: { inputTokens: tokens.input, cachedInputTokens: tokens.cache_read, outputTokens: tokens.output },
+      cleanup,
+    };
+  },
+  readHistory(ref, env, maxTurns, makeTurnId, after) {
+    for (const db of hermesDbs(env, ref.profile)) {
+      const replay = readHermesHistory(db, ref.id, ref.cwd, maxTurns, makeTurnId, after);
+      if (replay) return replay;
+    }
+    return undefined;
+  },
+  fingerprint(ref, env) {
+    for (const db of hermesDbs(env, ref.profile)) {
+      const fingerprint = hermesFingerprint(db, ref.id);
+      if (fingerprint > 0) return fingerprint;
+    }
+    return 0;
+  },
+  advanced: (ref: AgentRef, env, fingerprint) => hermesDbs(env, ref.profile).some((db) => hermesAdvanced(db, ref.id, fingerprint)),
+};
 
 type Row = Record<string, any>;
 
@@ -181,13 +335,4 @@ export function hermesAdvanced(dbFile: string, sessionId: string, fingerprint: n
   } finally {
     try { db.close(); } catch { /* already closed */ }
   }
-}
-
-/** One finished one-shot run becomes the turn's final agent message (if any) plus its completion. */
-export function hermesTurnEvents(turnId: string, run: { code: number | null; stdout: string }): AgentEvent[] {
-  const text = run.stdout.trim();
-  const events: AgentEvent[] = [];
-  if (text) events.push({ type: 'message.agent', turnId, text, final: true });
-  events.push({ type: 'turn.completed', turnId, status: run.code === 0 ? 'completed' : 'failed', at: Date.now() });
-  return events;
 }

@@ -25,12 +25,17 @@ if (!browserPath) {
   process.exit(2);
 }
 const until = async <T>(what: string, probe: () => T | Promise<T>, ms = 15_000): Promise<NonNullable<T>> => {
+  let last: unknown;
   for (const end = Date.now() + ms; Date.now() < end;) {
-    const value = await probe();
-    if (value) return value as NonNullable<T>;
+    try {
+      const value = await probe();
+      if (value) return value as NonNullable<T>;
+    } catch (e) {
+      last = e;                                            // e.g. the page has no body yet: try again
+    }
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`timed out waiting for ${what}`);
+  throw new Error(`timed out waiting for ${what}${last ? ` (last error: ${(last as Error).message})` : ''}`);
 };
 
 // ---- a sidecar with a scripted host --------------------------------------------------------------

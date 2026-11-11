@@ -1,33 +1,78 @@
-// Hermes one-shot driving and history replay (the real CLI was probed live; fixtures mirror it).
+// Hermes single-query driving, classification calls and history replay (the real CLI was probed
+// live; fixtures mirror what it printed and stored).
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { hermesAdvanced, hermesTurnArgs, hermesTurnEvents, readHermesHistory } from '../src/hermes.ts';
+import { fileURLToPath } from 'node:url';
+import type { AgentEvent } from '../../core/src/index.ts';
+import { HermesStreamMapper, hermesAdvanced, hermesChatArgs, hermesSampleArgs, readHermesHistory } from '../src/hermes.ts';
 
-test('a bound turn resumes the session in one-shot mode', () => {
-  assert.deepEqual(hermesTurnArgs('继续', { sessionId: 'h-1' }), ['-z', '继续', '--resume', 'h-1']);
-  assert.deepEqual(hermesTurnArgs('继续', { sessionId: 'h-1', profile: 'coder' }),
-    ['-p', 'coder', '-z', '继续', '--resume', 'h-1']);
-  assert.deepEqual(hermesTurnArgs('你好', {}), ['-z', '你好']);
+const fixture = (name: string) => readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), 'utf8')
+  .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+test('turns run in single-query mode, never in auto-approving one-shot mode', () => {
+  assert.deepEqual(hermesChatArgs('p.txt', { sessionId: 'h-1' }),
+    ['chat', '--query-file', 'p.txt', '--oneshot', '--format', 'stream-json', '--resume', 'h-1']);
+  assert.deepEqual(hermesChatArgs('p.txt', { sessionId: 'h-1', profile: 'coder' }),
+    ['-p', 'coder', 'chat', '--query-file', 'p.txt', '--oneshot', '--format', 'stream-json', '--resume', 'h-1']);
+  assert.deepEqual(hermesChatArgs('p.txt', {}), ['chat', '--query-file', 'p.txt', '--oneshot', '--format', 'stream-json']);
+  for (const args of [hermesChatArgs('p.txt', { sessionId: 'h-1' }), hermesSampleArgs('p.txt')]) {
+    assert.ok(!args.includes('-z') && !args.includes('--yolo'), 'nothing approves on the user\'s behalf');
+  }
+});
+
+test('a classification call uses the default model, a side-effect-free toolset and a hidden source', () => {
+  assert.deepEqual(hermesSampleArgs('p.txt'),
+    ['chat', '--query-file', 'p.txt', '--oneshot', '--format', 'stream-json', '--source', 'tool', '--ignore-rules', '-t', 'clarify']);
+  assert.deepEqual(hermesSampleArgs('p.txt', 'coder').slice(0, 3), ['-p', 'coder', 'chat']);
+  assert.ok(!hermesSampleArgs('p.txt').includes('-m'), 'no model override: the host tool\'s default model');
 });
 
 test('a session id or profile that hermes would read as an option never reaches its command line', () => {
-  assert.throws(() => hermesTurnArgs('继续', { sessionId: '--yolo' }), /session id must be a plain name/);
-  assert.throws(() => hermesTurnArgs('继续', { sessionId: 'h-1', profile: '-x' }), /profile must be a plain name/);
-  assert.throws(() => hermesTurnArgs('继续', { sessionId: '../h-1' }), /session id must be a plain name/);
+  assert.throws(() => hermesChatArgs('p.txt', { sessionId: '--yolo' }), /session id must be a plain name/);
+  assert.throws(() => hermesChatArgs('p.txt', { sessionId: 'h-1', profile: '-x' }), /profile must be a plain name/);
+  assert.throws(() => hermesChatArgs('p.txt', { sessionId: '../h-1' }), /session id must be a plain name/);
+  assert.throws(() => hermesSampleArgs('p.txt', '--yolo'), /profile must be a plain name/);
 });
 
-test('one-shot output maps to a final agent message and a completed turn', () => {
-  const events = hermesTurnEvents('t1', { code: 0, stdout: '做完了。\n要不要跑一下测试？\n' });
-  assert.deepEqual(events.map((e) => e.type), ['message.agent', 'turn.completed']);
-  const msg = events[0]!;
-  assert.equal(msg.type === 'message.agent' && msg.text, '做完了。\n要不要跑一下测试？');
-  assert.equal(msg.type === 'message.agent' && msg.final, true);
-  const done = events[1]!;
-  assert.equal(done.type === 'turn.completed' && done.status, 'completed');
+test('a recorded single-query run maps to tool events with exit codes and one final message', () => {
+  const mapper = new HermesStreamMapper('t1', 'C:\\proj');
+  const events: AgentEvent[] = fixture('hermes-turn.jsonl').flatMap((line) => mapper.push(line));
+  events.push(...mapper.finish());
+  assert.deepEqual(events.map((e) => e.type), ['tool.call', 'tool.result', 'message.agent', 'turn.completed']);
+  const call = events[0]!;
+  assert.equal(call.type === 'tool.call' && call.command, 'ls -la');
+  const result = events[1]!;
+  assert.deepEqual(result.type === 'tool.result' && [result.status, result.exitCode, result.summary], ['ok', 0, 'total 4']);
+  const message = events[2]!;
+  assert.ok(message.type === 'message.agent' && message.final && message.text.startsWith('Tools are available.'), 'the result text is the final message');
+  assert.equal(events[3]!.type === 'turn.completed' && events[3]!.status, 'completed');
+  assert.equal(mapper.sessionId, 'local-0123456789abcdef');
+});
+
+test('a failed command, a write and a failed run map as such', () => {
+  const mapper = new HermesStreamMapper('t2', 'C:\\proj');
+  const events = [
+    { type: 'text', text: 'Running the tests.' },
+    { type: 'tool_use', name: 'terminal', tool_call_id: 'c1', input: { command: 'pytest -q' } },
+    { type: 'tool_result', name: 'terminal', tool_call_id: 'c1', output: JSON.stringify({ output: '2 failed', exit_code: 1, error: null }), is_error: false },
+    { type: 'tool_use', name: 'write_file', tool_call_id: 'c2', input: { path: 'C:\\proj\\src\\a.ts', content: 'x' } },
+    { type: 'tool_result', name: 'write_file', tool_call_id: 'c2', output: '{"ok": true}', is_error: false },
+    { type: 'result', session_id: 'local-1', exit_code: 1, text: '', error: 'provider error' },
+  ].flatMap((line) => mapper.push(line));
+  assert.deepEqual(events.map((e) => e.type),
+    ['message.agent', 'tool.call', 'tool.result', 'tool.call', 'tool.result', 'artifact', 'turn.completed']);
+  assert.equal(events[0]!.type === 'message.agent' && events[0]!.final, false, 'text before a tool call is commentary');
+  assert.deepEqual(events[2]!.type === 'tool.result' && [events[2]!.status, events[2]!.exitCode], ['error', 1]);
+  assert.equal(events[5]!.type === 'artifact' && events[5]!.ref, 'src/a.ts');
+  assert.equal(events[6]!.type === 'turn.completed' && events[6]!.status, 'failed');
+  assert.deepEqual(mapper.finish(), [], 'a run ends once');
+
+  const silent = new HermesStreamMapper('t3', 'C:\\proj');
+  assert.deepEqual(silent.finish().map((e) => e.type === 'turn.completed' && e.status), ['failed'], 'a run without a result failed');
 });
 
 test('history replay restores the last completed turns and detects later advancement', () => {
@@ -78,14 +123,4 @@ test('history replay restores the last completed turns and detects later advance
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test('a failed one-shot completes the turn as failed, with any partial text kept', () => {
-  const events = hermesTurnEvents('t2', { code: 1, stdout: '半截输出' });
-  assert.deepEqual(events.map((e) => e.type), ['message.agent', 'turn.completed']);
-  const done = events[1]!;
-  assert.equal(done.type === 'turn.completed' && done.status, 'failed');
-
-  const empty = hermesTurnEvents('t3', { code: 0, stdout: '  \n' });
-  assert.deepEqual(empty.map((e) => e.type), ['turn.completed']);
 });

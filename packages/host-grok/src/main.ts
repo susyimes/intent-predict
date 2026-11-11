@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-// Grok CLI with intent-predict: a line-based chat with Grok in headless mode; suggestions for your
-// next message appear on the surface page whose address is printed at start.
+// Agent CLIs with intent-predict: a line-based chat with Grok, Hermes, Codex or Kimi in headless
+// mode; suggestions for your next message appear on the surface page whose address is printed at start.
 //
-//   node packages/host-grok/src/main.ts [--cwd DIR] [--model ID] [--resume SESSION_ID] [--eagerness conservative|eager]
+//   node packages/host-grok/src/main.ts [--agent grok|hermes|codex|kimi] [--cwd DIR] [--model ID]
+//     [--resume SESSION_ID] [--eagerness conservative|eager]
 //     [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]
 //     [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]
 //
 // Everything after `--` goes to every `grok` turn, e.g. `-- --allow search_replace` to let it edit.
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
+import { AGENT_KINDS, isAgentKind } from './agent.ts';
+import type { AgentKind } from './agent.ts';
 import { GrokHost } from './host.ts';
 import { isSafeName } from './sessions.ts';
 
@@ -22,7 +25,8 @@ const flag = (name: string) => {
 };
 if (own.includes('--help')) {
   process.stdout.write(
-    'usage: main.ts [--cwd DIR] [--model ID] [--resume SESSION_ID] [--eagerness conservative|eager]\n'
+    'usage: main.ts [--agent grok|hermes|codex|kimi] [--cwd DIR] [--model ID] [--resume SESSION_ID]\n'
+    + '  [--eagerness conservative|eager]\n'
     + '  [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]\n'
     + '  [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]\n',
   );
@@ -52,6 +56,9 @@ if (cooldownTurnsAfterDismiss !== undefined
   && (!Number.isInteger(cooldownTurnsAfterDismiss) || cooldownTurnsAfterDismiss < 0)) {
   fail('--cooldown-turns must be a non-negative integer');
 }
+const agentRaw = flag('--agent') ?? 'grok';
+if (!isAgentKind(agentRaw)) fail(`--agent must be one of ${AGENT_KINDS.join(', ')}`);
+const agent = agentRaw as AgentKind;
 const resume = flag('--resume');
 if (resume !== undefined && !isSafeName(resume)) {
   fail(`--resume needs a session id (letters, digits, '.', '_' or '-', starting with a letter or digit)`);
@@ -66,7 +73,7 @@ const say = (s: string) => {
 };
 
 const host = new GrokHost({
-  cwd, grokArgs, model: flag('--model'), resume, logPath: flag('--log'),
+  cwd, agent, grokArgs, model: flag('--model'), resume, logPath: flag('--log'),
   eagerness,
   minConfidence: confidenceFlag('--min-confidence'),
   sideEffectMinConfidence: confidenceFlag('--side-effect-min-confidence'),
@@ -85,8 +92,9 @@ const host = new GrokHost({
 });
 
 await host.start();
-say(`intent-predict × Grok CLI   cwd: ${cwd}`);
-if (host.grokSessionId) say(dim(`已绑定 Grok 会话：${host.grokSessionId}（经此发送的消息续接该会话）`));
+const LABEL: Record<AgentKind, string> = { grok: 'Grok', hermes: 'Hermes', codex: 'Codex', kimi: 'Kimi' };
+say(`intent-predict × ${LABEL[host.agent]}   cwd: ${cwd}`);
+if (host.agentSessionId) say(dim(`已绑定 ${LABEL[host.agent]} 会话：${host.agentSessionId}（经此发送的消息续接该会话）`));
 {
   const gate = host.gateSettings;
   if (gate.eagerness === 'eager' || gate.minConfidence !== undefined || gate.sideEffectMinConfidence !== undefined
@@ -103,7 +111,7 @@ rl.prompt();
 rl.on('line', (line) => {
   const text = line.trim();
   if (!text) return rl.prompt();
-  if (host.busy) return say(dim('· Grok 还在运行，等它结束再发。'));
+  if (host.busy) return say(dim(`· ${LABEL[host.agent]} 还在运行，等它结束再发。`));
   void host.send(text).then(() => {
     say('');
     rl.prompt();

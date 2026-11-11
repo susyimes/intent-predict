@@ -2,9 +2,13 @@
 // intent-predict events, and use a second headless call as the `compact` sampler.
 import { spawn } from 'node:child_process';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
-import { isAbsolute, relative } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { AgentEvent, SampleResult, ToolCall, ToolKind, ToolResult } from '../../core/src/index.ts';
+import type { AgentAdapter, AgentEnv, AgentRef } from './agent.ts';
+import { resolveCommand, runProcess } from './proc.ts';
+import type { Bin } from './proc.ts';
+import { isSafeName, safeName } from './sessions.ts';
 
 export type GrokLine = Record<string, any>;
 
@@ -97,7 +101,7 @@ export class TurnMapper {
   }
 }
 
-export interface RunOptions { cwd: string; signal?: AbortSignal; onLine?: (line: GrokLine) => void; bin?: string }
+export interface RunOptions { cwd: string; signal?: AbortSignal; onLine?: (line: GrokLine) => void; bin?: Bin }
 
 /** Completed turns restored from a session store at bind time, plus where the store then stood. */
 export interface HistoryReplay {
@@ -254,7 +258,10 @@ export function readGrokHistory(
 /** Run `grok` and hand every JSON line of its stdout to `onLine`. Resolves with the whole stdout. */
 export function runGrok(args: string[], opts: RunOptions): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(opts.bin ?? 'grok', args, { cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, signal: opts.signal });
+    const command = resolveCommand(opts.bin ?? 'grok');
+    const child = spawn(command.command, [...command.prefix, ...args], {
+      cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, signal: opts.signal,
+    });
     let stdout = '';
     let stderr = '';
     createInterface({ input: child.stdout }).on('line', (line) => {
@@ -283,7 +290,7 @@ const SAMPLER_SYSTEM =
  * Grok has no ephemeral mode, so the call leaves a session behind; its id is returned for deletion.
  */
 export async function sampleWithGrok(
-  promptFile: string, opts: { cwd: string; model?: string; signal?: AbortSignal; bin?: string },
+  promptFile: string, opts: { cwd: string; model?: string; signal?: AbortSignal; bin?: Bin },
 ): Promise<SampleResult & { sessionId?: string }> {
   const args = [
     '--prompt-file', promptFile, '--output-format', 'json', '--max-turns', '1', '--no-subagents', '--no-plan',
@@ -308,10 +315,49 @@ export async function sampleWithGrok(
 }
 
 /** Best effort: remove a session Grok persisted for a sampler call. */
-export function deleteGrokSession(sessionId: string, bin = 'grok'): Promise<void> {
-  return new Promise((resolve) => {
-    const child = spawn(bin, ['sessions', 'delete', sessionId], { stdio: 'ignore', windowsHide: true });
-    child.once('error', () => resolve());
-    child.once('close', () => resolve());
-  });
+export function deleteGrokSession(sessionId: string, bin: Bin = 'grok'): Promise<void> {
+  return runProcess(bin, ['sessions', 'delete', safeName(sessionId, 'session id')], { cwd: process.cwd() }).then(() => {}, () => {});
 }
+
+const grokHistoryFile = (ref: AgentRef, env: AgentEnv) =>
+  join(env.home, '.grok', 'sessions', encodeURIComponent(ref.cwd), safeName(ref.id, 'session id'), 'updates.jsonl');
+
+/** Grok CLI: turns via `--resume` in streaming-json mode; unapproved tools are denied headlessly. */
+export const grokAdapter: AgentAdapter = {
+  kind: 'grok',
+  async runTurn(text, ctx) {
+    const mapper = new TurnMapper(ctx.turnId, ctx.cwd);
+    try {
+      const args = ['--prompt-file', ctx.env.promptFile(text), '--output-format', 'streaming-json', '--no-subagents'];
+      // never let a session id reach grok as an option: the turn fails instead
+      if (ctx.id) args.push('--resume', safeName(ctx.id, 'session id'));
+      if (ctx.env.grokModel) args.push('--model', ctx.env.grokModel);
+      args.push(...ctx.env.grokArgs);
+      const { code, stderr } = await runGrok(args, {
+        cwd: ctx.cwd, bin: ctx.env.bins.grok,
+        onLine: (line) => {
+          ctx.onLine?.(line);
+          ctx.emit(mapper.push(line));
+        },
+      });
+      if (code !== 0 || stderr.trim()) ctx.info(`grok exited with ${code}${stderr.trim() ? ': ' + stderr.trim().split('\n')[0] : ''}`);
+    } catch (e) {
+      ctx.info(`could not run grok: ${(e as Error).message}`);
+    } finally {
+      ctx.emit(mapper.finish());
+    }
+    return { sessionId: isSafeName(mapper.sessionId) ? mapper.sessionId : undefined };
+  },
+  async sample(prompt, ctx) {
+    const bin = ctx.env.bins.grok ?? 'grok';
+    const { sessionId, ...result } = await sampleWithGrok(ctx.env.promptFile(prompt), {
+      cwd: ctx.env.scratch(), model: ctx.env.grokModel, signal: ctx.signal, bin,
+    });
+    // Grok has no ephemeral mode: remove the session the call stored
+    return isSafeName(sessionId) ? { ...result, cleanup: deleteGrokSession(sessionId, bin) } : result;
+  },
+  readHistory: (ref, env, maxTurns, makeTurnId, after) =>
+    readGrokHistory(grokHistoryFile(ref, env), ref.id, ref.cwd, maxTurns, makeTurnId, after),
+  fingerprint: (ref, env) => grokFingerprint(grokHistoryFile(ref, env)),
+  advanced: (ref, env, fingerprint) => grokAdvanced(grokHistoryFile(ref, env), fingerprint),
+};

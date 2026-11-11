@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","model":"","session_id":""}
+{"type":"tool_use","name":"terminal","tool_call_id":"chatcmpl-tool-b4bad76d01daa1d1","input":{"command":"ls -la"}}
+{"type":"tool_result","name":"terminal","tool_call_id":"chatcmpl-tool-b4bad76d01daa1d1","output":"{\"output\": \"total 4\\ndrwxr-xr-x 1 user 1000 0 11月 11 18:46 ./\\ndrwxr-xr-x 1 user 1000 0 11月 11 18:47 ../\", \"exit_code\": 0, \"error\": null}","duration_ms":1300,"is_error":false}
+{"type":"text","text":"\n\nTools are available. The current directory is empty:```\nC:\\proj\n```\n\n`ls -la` shows only `.` and `..` — no files or subdirectories."}
+{"type":"result","session_id":"local-0123456789abcdef","exit_code":0,"text":"Tools are available. The current directory is empty:\n\n```\nC:\\proj\n```\n\n`ls -la` shows only `.` and `..` — no files or subdirectories.","tokens":{"input":3752,"output":120,"total":3872,"cache_read":0,"cache_write":0},"duration_ms":27000}
