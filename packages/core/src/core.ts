@@ -30,6 +30,7 @@ interface Session {
   live?: Prediction;                         // SPEC 5.1
   open?: { prediction: Prediction; copied: boolean; shownAt: number };   // outcome not finalized yet (5.4)
   delivered: number; cooldown: Map<string, number>; modelCalls: number[];
+  recent: UpdatedParams[];                  // last evaluations, for surfaces attaching later (SPEC 8)
   evaluation?: Evaluation; dispatching?: string; touched: number;
 }
 type Listeners = { updated: Array<(p: UpdatedParams) => void>; invalidated: Array<(p: InvalidatedParams) => void> };
@@ -85,6 +86,11 @@ export class Core {
     return [...this.sessions.values()].map((s) => (s.live ? { sessionId: s.id, live: s.live } : { sessionId: s.id }));
   }
 
+  /** A session's retained evaluations, oldest first, for a surface attaching after the fact. */
+  recent(sessionId: string): UpdatedParams[] {
+    return this.sessions.get(sessionId)?.recent ?? [];
+  }
+
   // ---- events (SPEC 4.1, 5.1, 5.4) ---------------------------------------
   observe(sessionId: string, events: unknown[]): void {
     const s = this.session(sessionId);
@@ -138,7 +144,7 @@ export class Core {
     if (!s) {
       s = {
         id, events: [], recentTurns: [], completedTurns: new Set(), turnCount: 0, state: {},
-        delivered: 0, cooldown: new Map(), modelCalls: [], touched: 0,
+        delivered: 0, cooldown: new Map(), modelCalls: [], recent: [], touched: 0,
       };
       this.sessions.set(id, s);
       const max = this.config.maxSessions ?? 64;
@@ -180,7 +186,10 @@ export class Core {
     if (trace.threshold !== undefined) record.threshold = trace.threshold;
     if (trace.samplerMode) record.samplerMode = trace.samplerMode;
     this.config.telemetry?.(record);
-    for (const l of this.listeners.updated) l({ sessionId: s.id, sourceTurnId: turnId, result, trace });
+    const params: UpdatedParams = { sessionId: s.id, sourceTurnId: turnId, result, trace, at: record.timestamp };
+    s.recent.push(params);
+    while (s.recent.length > 50) s.recent.shift();
+    for (const l of this.listeners.updated) l(params);
   }
 
   private abort(s: Session): void {

@@ -70,6 +70,8 @@ pip install jsonschema pyyaml && python tools/validate.py   # 规范、契约、
 ```bash
 node packages/host-grok/src/main.ts --cwd <你的项目> -- --allow search_replace
 # 终端里和 Grok 对话；启动时打印的网页地址里看「下一步建议」
+# 网页顶部的「选择会话」可嗅探本机活跃 AI 会话，并热绑定 Grok / Hermes 会话（绑定时还原近 3 轮；刷新页面同步外部新轮次）
+# 太难出建议时加 --eagerness eager；可用 --min-confidence/--side-effect-min-confidence/--alt-min-confidence/--cooldown-turns 细调
 npm run e2e:grok                # 在一次性目录里对真实 Grok 跑一遍端到端检查（花费几美分）
 npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自带网页
 ```
@@ -103,7 +105,7 @@ npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自�
 |---|---|
 | [SPEC.md](SPEC.md) | 行为规范（本阶段唯一的规范性文本） |
 | [spec/](spec/) | 数据结构的 JSON Schema：事件、场景包、预测、遥测、RPC |
-| [INTENTS.md](INTENTS.md) | 内置编程场景包的唯一来源；`packages/pack-coding/pack.json` 由它生成 |
+| [INTENTS.md](INTENTS.md) | 内置编程场景包的唯一来源；普通包与积极包的 `pack.json` 均由它生成 |
 | [eval/golden.jsonl](eval/golden.jsonl) | 黄金用例，覆盖全部抑制原因，含录制的模型输出 |
 | [tools/](tools/) | `reference.py` 参考求值器（测试基准，不是产品）、`validate.py` 一致性校验、`build_pack.py` |
 | [packages/core](packages/core) | 核心：信号、路由、规则、模型分类、门控、渲染、发送与结果规则 |

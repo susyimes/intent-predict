@@ -423,16 +423,21 @@ JSON-RPC 2.0. Between a host and an out-of-process core the transport is newline
 
 | From → to | Method | Kind | Purpose |
 |---|---|---|---|
-| Host → Core | `initialize` | request | Capabilities (`interactive`, `samplerModes`, `dispatchModes`, `surface`), packs, `policy`, `options`. The result MAY carry `surfaceUrl`, which the host SHOULD show to the user. |
+| Host → Core | `initialize` | request | Capabilities (`interactive`, `samplerModes`, `dispatchModes`, `surface`, `binding`), packs, `policy`, `options`. The result MAY carry `surfaceUrl`, which the host SHOULD show to the user. |
 | Host → Core | `session/observe` | notification | `{sessionId, events}`. |
 | Host or Surface → Core | `prediction/cancel` | notification | Abort the evaluation and invalidate the live prediction of a session. |
 | Core → Host | `sampler/sample` | request | §6. |
 | Core → Host | `sampler/cancel` | notification | `{sampleRequestId, sessionId}`. |
 | Core → Host | `dispatch/message`, `dispatch/command` | request | §5.3. |
-| Surface → Core | `surface/attach` | request | Start receiving predictions; returns the sessions and their live predictions. |
+| Surface → Core | `surface/attach` | request | Start receiving predictions; returns the sessions and their live predictions. Each session also carries its recent evaluations (`recent`, retained per session, capped; suppressed ones only for `inspector: true`), so a surface opened after an evaluation can still show it. |
 | Core → Surface | `prediction/updated` | notification | One evaluation result (§4.1). Plain surfaces receive delivered predictions; surfaces attached with `inspector: true` also receive suppressed results and `trace`. |
 | Core → Surface | `prediction/invalidated` | notification | §5.1. |
+| Core → Surface | `binding/changed` | notification | A binding took effect: `{bound, sessionId}`; attached surfaces refresh without reloading. |
 | Surface → Core | `prediction/act` | request | §5.2. |
+| Surface → Core | `binding/list`, `binding/bind` | request | Ask which of the host's existing agent sessions can be bound, and bind one. The core forwards both to a host that declared `binding`; other hosts answer `-32601`. |
+| Core → Host | `binding/list`, `binding/bind` | request | The forwarded calls. Discovery and binding are the host's alone; the core keeps no session registry of its own. |
+
+Binding points the host at one of its existing agent sessions. `binding/list` returns the currently bound session (or `null`) and the sessions the host discovered, each `{kind, id, cwd, title?, updatedAt?, running, bindable, profile?}`; kinds and discovery are host-defined and host-local, and only metadata crosses. `binding/bind {kind, id, cwd, profile?}` hot-switches the session the host drives: the host MUST fail it with `SESSION_BUSY` while a turn runs, MUST invalidate the live prediction, and observes post-bind turns under a fresh core session id. The host MAY replay the bound session's most recent completed turns as observed events under that id, so a suggestion can be offered at once (the count returns as `replayedTurns`); a host that replays MUST refuse a dispatch for a replayed turn once the bound session has advanced past the replay point (`TURN_MISMATCH`). When handling `binding/list` (which surfaces call on load and refresh), a replaying host MAY first restore completed turns added since its replay point and move that point forward; it MUST NOT restore the same turn twice. A surface MUST offer binding only when `surface/attach` reports `binding: true`, and MUST disable bind actions for entries with `bindable: false`. The attach result also carries the current `bound` session and the host's `activeSessionId` (listed in `sessions` even before its first turn), so a surface opened after a bind starts on the bound session.
 
 A host that declares `capabilities.surface` is treated as an attached surface on its own connection.
 

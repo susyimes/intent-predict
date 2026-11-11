@@ -15,6 +15,7 @@
   header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
   h1 { font-size:17px; margin:0; }
   h2 { font-size:14px; margin:20px 0 8px; color:var(--dim); font-weight:600; }
+  #bound { font-size:13px; color:var(--dim); overflow-wrap:anywhere; }
   .dot { width:9px; height:9px; border-radius:50%; background:var(--bad); display:inline-block; }
   .dot.on { background:#17b26a; }
   select, button, textarea { font:inherit; color:inherit; }
@@ -34,6 +35,8 @@
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   button:disabled { opacity:.5; cursor:not-allowed; }
   button:focus-visible, textarea:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  header a { color:var(--text); text-decoration:none; border:1px solid var(--line); border-radius:8px; padding:4px 10px; background:var(--panel); font-size:14px; }
+  header a:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
   .alts button { font-size:13px; padding:3px 10px; }
   .confirm { border:1px solid var(--warn); border-radius:8px; padding:10px; margin-top:10px; }
   .confirm pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:6px 0; font:inherit; }
@@ -52,6 +55,8 @@
     <h1>intent-predict</h1>
     <span><span id="dot" class="dot"></span> <span id="conn">未连接</span></span>
     <label>会话 <select id="session"></select></label>
+    <a id="bindLink" hidden>选择会话</a>
+    <span id="bound" hidden></span>
   </header>
 
   <section aria-live="polite">
@@ -78,8 +83,11 @@ const el = (tag, props = {}, ...children) => {
   node.append(...children.filter((c) => c !== null && c !== undefined));
   return node;
 };
+const KIND_LABEL = { grok: 'Grok', hermes: 'Hermes' };
 const sessions = new Map();   // sessionId -> { live, stale, log: [] }
 let current = null;
+let bound = null;
+let bindingSupported = false;
 let dispatchModes = [];
 let draft = { id: null, text: '', choice: null, alternative: null, confirming: false, status: '', bad: false };
 
@@ -238,7 +246,18 @@ function renderLog() {
   $('log').replaceChildren(...rows);
 }
 
+function renderBound() {
+  const node = $('bound');
+  node.hidden = !bindingSupported;
+  if (!bindingSupported) return;
+  node.textContent = bound
+    ? '当前绑定：' + (KIND_LABEL[bound.kind] || bound.kind) + (bound.profile ? ' · ' + bound.profile : '') + ' · ' + bound.id + ' · ' + bound.cwd
+    : '当前绑定：未绑定已有会话';
+  node.title = bound ? bound.id + '\n' + bound.cwd : '';
+}
+
 function render() {
+  renderBound();
   const select = $('session');
   select.replaceChildren(...[...sessions.keys()].map((id) => el('option', { value: id, textContent: id, selected: id === current })));
   renderCard();
@@ -248,8 +267,14 @@ function render() {
 function onNotification(msg) {
   const p = msg.params;
   const s = sessionOf(p.sessionId);
+  if (msg.method === 'binding/changed') {
+    bound = p.bound || null;
+    if (p.sessionId) current = p.sessionId;
+    render();
+    return;
+  }
   if (msg.method === 'prediction/updated') {
-    s.log.push({ ...p, at: Date.now() });
+    s.log.push({ ...p, at: p.at || Date.now() });
     if (p.result.type === 'completed' && p.result.prediction) { s.live = p.result.prediction; s.stale = null; }
   } else if (msg.method === 'prediction/invalidated' && s.live && s.live.id === p.predictionId) {
     s.stale = s.live;
@@ -264,7 +289,22 @@ $('session').addEventListener('change', (e) => { current = e.target.value; rende
   try {
     const attached = await rpc('surface/attach', { token, inspector: true });
     dispatchModes = attached.dispatchModes || [];
-    for (const s of attached.sessions) sessionOf(s.sessionId).live = s.live || null;
+    if (attached.binding) {
+      bindingSupported = true;
+      bound = attached.bound || null;
+      const link = $('bindLink');
+      link.href = '/sessions?t=' + encodeURIComponent(token);
+      link.hidden = false;
+    }
+    for (const s of attached.sessions) {
+      const st = sessionOf(s.sessionId);
+      st.live = s.live || null;
+      if (Array.isArray(s.recent)) for (const p of s.recent) st.log.push({ ...p, at: p.at || Date.now() });
+    }
+    if (attached.activeSessionId) {
+      sessionOf(attached.activeSessionId);
+      current = attached.activeSessionId;
+    }
   } catch (e) {
     $('conn').textContent = '连接失败：' + (e.message || e);
     return;

@@ -2,7 +2,9 @@
 // Grok CLI with intent-predict: a line-based chat with Grok in headless mode; suggestions for your
 // next message appear on the surface page whose address is printed at start.
 //
-//   node packages/host-grok/src/main.ts [--cwd DIR] [--model ID] [--log FILE] [--timeout MS] [-- <grok args>]
+//   node packages/host-grok/src/main.ts [--cwd DIR] [--model ID] [--resume SESSION_ID] [--eagerness conservative|eager]
+//     [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]
+//     [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]
 //
 // Everything after `--` goes to every `grok` turn, e.g. `-- --allow search_replace` to let it edit.
 import { createInterface } from 'node:readline';
@@ -18,8 +20,36 @@ const flag = (name: string) => {
   return i >= 0 ? own[i + 1] : undefined;
 };
 if (own.includes('--help')) {
-  process.stdout.write('usage: main.ts [--cwd DIR] [--model ID] [--log FILE] [--timeout MS] [-- <grok args>]\n');
+  process.stdout.write(
+    'usage: main.ts [--cwd DIR] [--model ID] [--resume SESSION_ID] [--eagerness conservative|eager]\n'
+    + '  [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]\n'
+    + '  [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]\n',
+  );
   process.exit(0);
+}
+const fail = (message: string): never => {
+  process.stderr.write(`${message}\n`);
+  process.exit(2);
+};
+const numberFlag = (name: string) => {
+  const raw = flag(name);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) fail(`${name} needs a number`);
+  return value;
+};
+const confidenceFlag = (name: string) => {
+  const value = numberFlag(name);
+  if (value !== undefined && (value < 0 || value > 1)) fail(`${name} must be between 0 and 1`);
+  return value;
+};
+const eagernessRaw = flag('--eagerness') ?? 'conservative';
+if (eagernessRaw !== 'conservative' && eagernessRaw !== 'eager') fail('--eagerness must be conservative or eager');
+const eagerness = eagernessRaw as 'conservative' | 'eager';
+const cooldownTurnsAfterDismiss = numberFlag('--cooldown-turns');
+if (cooldownTurnsAfterDismiss !== undefined
+  && (!Number.isInteger(cooldownTurnsAfterDismiss) || cooldownTurnsAfterDismiss < 0)) {
+  fail('--cooldown-turns must be a non-negative integer');
 }
 
 const cwd = resolve(flag('--cwd') ?? process.cwd());
@@ -31,7 +61,12 @@ const say = (s: string) => {
 };
 
 const host = new GrokHost({
-  cwd, grokArgs, model: flag('--model'), logPath: flag('--log'),
+  cwd, grokArgs, model: flag('--model'), resume: flag('--resume'), logPath: flag('--log'),
+  eagerness,
+  minConfidence: confidenceFlag('--min-confidence'),
+  sideEffectMinConfidence: confidenceFlag('--side-effect-min-confidence'),
+  altMinConfidence: confidenceFlag('--alt-min-confidence'),
+  cooldownTurnsAfterDismiss,
   timeoutMs: flag('--timeout') ? Number(flag('--timeout')) : undefined,
   onInfo: (m) => say(dim(`· ${m}`)),
   onLine: (line) => {
@@ -46,7 +81,16 @@ const host = new GrokHost({
 
 await host.start();
 say(`intent-predict × Grok CLI   cwd: ${cwd}`);
+if (host.grokSessionId) say(dim(`已绑定 Grok 会话：${host.grokSessionId}（经此发送的消息续接该会话）`));
+{
+  const gate = host.gateSettings;
+  if (gate.eagerness === 'eager' || gate.minConfidence !== undefined || gate.sideEffectMinConfidence !== undefined
+    || gate.altMinConfidence !== undefined || gate.cooldownTurnsAfterDismiss !== undefined) {
+    say(dim(`门控设置：eagerness=${gate.eagerness}，minConfidence=${gate.minConfidence ?? 'default'}，sideEffectMinConfidence=${gate.sideEffectMinConfidence ?? 'default'}，altMinConfidence=${gate.altMinConfidence ?? 'default'}，cooldownTurnsAfterDismiss=${gate.cooldownTurnsAfterDismiss ?? 'default'}`));
+  }
+}
 say(`打开这个页面看「下一步建议」：${host.surfaceUrl}`);
+if (host.surfaceUrl) say(dim(`选择要绑定的会话：${host.surfaceUrl.replace('/?t=', '/sessions?t=')}`));
 say(dim('输入消息后回车发送；空行忽略；Ctrl+C 退出。'));
 
 const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '› ' });

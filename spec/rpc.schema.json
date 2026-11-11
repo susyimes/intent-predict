@@ -36,6 +36,8 @@
         "initialize",
         "surface/attach",
         "prediction/act",
+        "binding/list",
+        "binding/bind",
         "sampler/sample",
         "dispatch/message",
         "dispatch/command"
@@ -48,7 +50,8 @@
         "prediction/cancel",
         "prediction/updated",
         "prediction/invalidated",
-        "sampler/cancel"
+        "sampler/cancel",
+        "binding/changed"
       ]
     },
     "JsonRpcRequest": {
@@ -119,6 +122,38 @@
             "properties": {
               "params": {
                 "$ref": "#/$defs/PredictionActParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "binding/list"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/BindingListParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "binding/bind"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/BindingBindParams"
               }
             }
           }
@@ -269,6 +304,22 @@
             "properties": {
               "params": {
                 "$ref": "#/$defs/SamplerCancelParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "binding/changed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/BindingChangedParams"
               }
             }
           }
@@ -500,6 +551,11 @@
               "type": "boolean",
               "default": false,
               "description": "True when this connection also acts as a surface: it receives prediction/updated and prediction/invalidated and may call prediction/act."
+            },
+            "binding": {
+              "type": "boolean",
+              "default": false,
+              "description": "True when the host answers binding/list and binding/bind, so a surface can point it at one of its existing agent sessions (SPEC 8)."
             }
           }
         },
@@ -643,6 +699,11 @@
         "trace": {
           "type": "object",
           "description": "Optional, implementation-defined diagnostics for inspector surfaces (matched scenario, threshold, redacted signals). Not part of conformance."
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Epoch ms when the evaluation completed."
         }
       },
       "description": "Reports one evaluation. A result with prediction null never invalidates a live prediction; only prediction/invalidated does."
@@ -712,6 +773,13 @@
               },
               "live": {
                 "$ref": "prediction.schema.json#/$defs/Prediction"
+              },
+              "recent": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/PredictionUpdatedParams"
+                },
+                "description": "The session's recent evaluations, oldest first, so a surface attaching after the fact can show them. Inspector attaches receive suppressed results as well; plain attaches only delivered ones."
               }
             }
           }
@@ -725,6 +793,26 @@
               "command"
             ]
           }
+        },
+        "binding": {
+          "type": "boolean",
+          "description": "True when the host declared the binding capability, so the surface may offer session binding."
+        },
+        "bound": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BindingRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The agent session the host currently drives, when known at attach time."
+        },
+        "activeSessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The core session id the host currently observes under; it may name a session with no turn yet, which 'sessions' then still lists."
         }
       }
     },
@@ -813,6 +901,170 @@
           ]
         }
       }
+    },
+    "BindingListParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "No parameters: the host returns everything it discovered; surfaces filter locally."
+    },
+    "BindingRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "cwd"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Host-defined session kind, e.g. 'grok'. A host binds only the kinds it can drive."
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The session's working directory; the host validates it before binding."
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Host-defined instance/profile name when the kind has them (e.g. a Hermes profile)."
+        }
+      }
+    },
+    "BindingSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "running",
+        "bindable"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Epoch ms of the latest known activity."
+        },
+        "running": {
+          "type": "boolean",
+          "description": "True when a live process is known to own the session; false when activity is inferred."
+        },
+        "bindable": {
+          "type": "boolean",
+          "description": "True when this host can bind the session with binding/bind."
+        },
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Host-defined instance/profile name when the kind has them; pass it back unchanged to binding/bind."
+        }
+      }
+    },
+    "BindingListResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current",
+        "sessions"
+      ],
+      "properties": {
+        "current": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BindingRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The agent session the host currently drives, or null when none is bound."
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BindingSession"
+          }
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The core session id under which the bound session's turns are observed."
+        }
+      }
+    },
+    "BindingBindParams": {
+      "$ref": "#/$defs/BindingRef"
+    },
+    "BindingBindResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bound",
+        "sessionId"
+      ],
+      "properties": {
+        "bound": {
+          "$ref": "#/$defs/BindingRef"
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The core session id under which post-bind turns are observed; binding starts fresh except for any replayed turns."
+        },
+        "replayedTurns": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Completed turns restored from the bound session's store at bind time and observed under sessionId."
+        }
+      }
+    },
+    "BindingChangedParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bound",
+        "sessionId"
+      ],
+      "properties": {
+        "bound": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/BindingRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The core session id under which post-bind turns are observed."
+        }
+      },
+      "description": "Pushed to attached surfaces when a binding takes effect, so an open surface refreshes without reloading."
     },
     "SamplerSampleParams": {
       "type": "object",

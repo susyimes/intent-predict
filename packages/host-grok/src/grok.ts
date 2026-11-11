@@ -1,6 +1,7 @@
 // Grok CLI plumbing: run a headless turn, map its `streaming-json` lines (ACP session updates) to
 // intent-predict events, and use a second headless call as the `compact` sampler.
 import { spawn } from 'node:child_process';
+import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { isAbsolute, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { AgentEvent, SampleResult, ToolCall, ToolKind, ToolResult } from '../../core/src/index.ts';
@@ -97,6 +98,158 @@ export class TurnMapper {
 }
 
 export interface RunOptions { cwd: string; signal?: AbortSignal; onLine?: (line: GrokLine) => void; bin?: string }
+
+/** Completed turns restored from a session store at bind time, plus where the store then stood. */
+export interface HistoryReplay {
+  turns: AgentEvent[][];
+  turnIds: string[];
+  /** Grok: byte offset just after the last included turn. Hermes: greatest messages.id included. */
+  fingerprint: number;
+}
+
+const TAIL_BYTES = 16 * 1024 * 1024;
+
+function readSegment(file: string, start: number): { buffer: Buffer; size: number } | undefined {
+  let size: number;
+  try {
+    size = statSync(file).size;
+  } catch {
+    return undefined;
+  }
+  if (start < 0 || start > size) return undefined;
+  const fd = openSync(file, 'r');
+  try {
+    const buffer = Buffer.alloc(size - start);
+    if (buffer.length) readSync(fd, buffer, 0, buffer.length, start);
+    return { buffer, size };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The session's current replay point: updates.jsonl size in bytes, or 0 when unreadable. */
+export function grokFingerprint(file: string): number {
+  try {
+    return statSync(file).size;
+  } catch {
+    return 0;
+  }
+}
+
+/** True when a new user turn started in updates.jsonl past the replay point. */
+export function grokAdvanced(file: string, fingerprint: number): boolean {
+  const segment = readSegment(file, fingerprint);
+  if (!segment || segment.buffer.length === 0) return false;
+  for (const line of segment.buffer.toString('utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      if ((JSON.parse(line)?.params?.update as Record<string, any> | undefined)?.sessionUpdate === 'user_message_chunk') return true;
+    } catch { /* ignore partial or non-update lines */ }
+  }
+  return false;
+}
+
+/**
+ * Restore the last `maxTurns` completed turns from a Grok session's updates.jsonl (ACP session
+ * updates, the same stream the TUI persisted). A trailing turn with no `turn_completed` is dropped.
+ */
+export function readGrokHistory(
+  file: string, sessionId: string, cwd: string, maxTurns: number, makeTurnId: () => string, afterOffset = 0,
+): HistoryReplay | undefined {
+  let size: number;
+  try {
+    size = statSync(file).size;
+  } catch {
+    return undefined;
+  }
+  if (afterOffset < 0 || afterOffset > size) return undefined;
+  const requestedStart = afterOffset > 0 ? afterOffset : Math.max(0, size - TAIL_BYTES);
+  const segment = readSegment(file, requestedStart);
+  if (!segment) return undefined;
+  const { buffer } = segment;
+  let pos = 0;
+  let offset = requestedStart;
+  if (afterOffset === 0 && requestedStart > 0) {
+    const nl = buffer.indexOf(10);
+    if (nl < 0) return undefined;
+    pos = nl + 1;
+    offset = requestedStart + pos;
+  }
+  type Upd = Record<string, any>;
+  const groups: Array<{ updates: Upd[]; end: number }> = [];
+  let group: Upd[] | undefined;
+  while (pos < buffer.length) {
+    const nl = buffer.indexOf(10, pos);
+    const lineEnd = nl >= 0 ? nl : buffer.length;
+    const nextOffset = nl >= 0 ? offset + (lineEnd - pos) + 1 : size;
+    const line = buffer.subarray(pos, lineEnd).toString('utf8').trim();
+    if (line) {
+      let u: Upd | undefined;
+      try {
+        u = (JSON.parse(line)?.params?.update ?? {}) as Upd;
+      } catch { /* ignore partial or non-update lines */ }
+      if (u) {
+        if (u.sessionUpdate === 'user_message_chunk' && !group) group = [];
+        if (group) {
+          group.push(u);
+          if (u.sessionUpdate === 'turn_completed') {
+            groups.push({ updates: group, end: nextOffset });
+            group = undefined;
+          }
+        }
+      }
+    }
+    if (nl < 0) break;
+    pos = nl + 1;
+    offset = nextOffset;
+  }
+  const picked = afterOffset > 0 ? groups : groups.slice(-maxTurns);
+  if (!picked.length) return undefined;
+  const turns: AgentEvent[][] = [];
+  const turnIds: string[] = [];
+  for (const pickedGroup of picked) {
+    const g = pickedGroup.updates;
+    const turnId = makeTurnId();
+    turnIds.push(turnId);
+    const userText = g.filter((u) => u.sessionUpdate === 'user_message_chunk').map((u) => String(u.content?.text ?? '')).join('');
+    const mapper = new TurnMapper(turnId, cwd);
+    const events: AgentEvent[] = [{ type: 'turn.started', turnId, at: Date.now() }];
+    if (userText) events.push({ type: 'message.user', turnId, text: userText });
+    const seenCalls = new Set<string>();
+    for (const u of g) {
+      switch (u.sessionUpdate) {
+        case 'agent_message_chunk':
+          events.push(...mapper.push({ type: 'text', data: String(u.content?.text ?? '') }));
+          break;
+        case 'tool_call': {
+          const id = String(u.toolCallId ?? '');
+          if (seenCalls.has(id)) break;
+          seenCalls.add(id);
+          const meta = (u._meta?.['x.ai/tool'] ?? {}) as Upd;
+          events.push(...mapper.push({
+            type: 'tool_call', toolCallId: id, toolName: meta.name ?? u.title,
+            kind: meta.kind ?? u.kind, rawInput: u.rawInput ?? {}, title: u.title,
+          }));
+          break;
+        }
+        case 'tool_call_update':
+          events.push(...mapper.push({
+            type: 'tool_call_update', toolCallId: u.toolCallId, status: u.status,
+            rawOutput: u.rawOutput, content: u.content, locations: u.locations,
+          }));
+          break;
+        case 'turn_completed':
+          events.push(...mapper.push({ type: 'end', sessionId, stopReason: u.stop_reason }));
+          break;
+        default:
+          break;
+      }
+    }
+    events.push(...mapper.finish());
+    turns.push(events);
+  }
+  return { turns, turnIds, fingerprint: picked[picked.length - 1]!.end };
+}
 
 /** Run `grok` and hand every JSON line of its stdout to `onLine`. Resolves with the whole stdout. */
 export function runGrok(args: string[], opts: RunOptions): Promise<{ code: number | null; stdout: string; stderr: string }> {

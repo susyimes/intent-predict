@@ -103,7 +103,7 @@ export interface Trace {
   /** Only with `debugTrace`: unredacted, never sent to a surface. */
   signals?: Signals; prompt?: string;
 }
-export interface UpdatedParams { sessionId: string; sourceTurnId: string; result: EvaluationResult; trace?: Trace }
+export interface UpdatedParams { sessionId: string; sourceTurnId: string; result: EvaluationResult; trace?: Trace; at?: number }
 export type InvalidationReason = 'turn_started' | 'resolved' | 'cancelled';
 export interface InvalidatedParams { sessionId: string; predictionId: string; reason: InvalidationReason }
 

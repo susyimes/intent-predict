@@ -4,7 +4,7 @@
 All must pass:
   1. spec/*.schema.json are valid Draft 2020-12 schemas (cross-file refs resolved offline).
   2. Every pack (INTENTS.md, examples/, eval/fixtures/) validates and passes the load-time rules.
-  3. packages/pack-coding/pack.json is exactly what tools/build_pack.py emits.
+  3. The generated coding pack JSON files are exactly what tools/build_pack.py emits.
   4. Templates of the shipped packs pass the authoring lint.
   5. eval/golden.jsonl is well formed, exercises every SuppressedReason, passes on the reference
      evaluator, and everything the evaluator emits validates against the schemas.
@@ -28,7 +28,7 @@ from jsonschema import Draft202012Validator  # noqa: E402
 from referencing import Registry, Resource  # noqa: E402
 
 import reference  # noqa: E402
-from build_pack import build, parse_intents  # noqa: E402
+from build_pack import build, build_eager, parse_intents  # noqa: E402
 
 failures = []
 
@@ -86,9 +86,14 @@ def main() -> int:
         errs = errors(fm, "scenario-pack.schema.json") + reference.pack_errors(fm)
         check(f"pack {rel}", not errs, "; ".join(errs[:4]))
 
-    # 3. generated pack
+    # 3. generated packs
     on_disk = json.loads(read("packages/pack-coding/pack.json"))
     check("pack.json equals build_pack output", build() == on_disk, "run: python tools/build_pack.py")
+    eager = build_eager()
+    on_disk_eager = json.loads(read("packages/pack-coding-eager/pack.json"))
+    check("eager pack.json equals build_pack eager output", eager == on_disk_eager, "run: python tools/build_pack.py")
+    eager_errs = errors(eager, "scenario-pack.schema.json") + reference.pack_errors(eager)
+    check("pack builtin/coding-eager (generated)", not eager_errs, "; ".join(eager_errs[:4]))
 
     # 4. authoring lint (fixtures are exempt: they exist to be odd)
     lint_errs = []

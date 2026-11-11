@@ -8,12 +8,13 @@ import type {
   ActParams, CoreConfig, DispatchMode, HostBridge, SampleResult, SamplerMode, ScenarioPack,
 } from '../../core/src/index.ts';
 import { RpcPeer } from './rpc.ts';
-import { startSurface } from './surface.ts';
+import { recentForSurface, startSurface } from './surface.ts';
 import type { SurfaceServer } from './surface.ts';
 
 export const PROTOCOL_VERSION = '0.5';
 const BUILTIN: Record<string, string> = {
   'builtin/coding': fileURLToPath(new URL('../../pack-coding/pack.json', import.meta.url)),
+  'builtin/coding-eager': fileURLToPath(new URL('../../pack-coding-eager/pack.json', import.meta.url)),
 };
 const OPTION_KEYS = [
   'enabled', 'blockedModes', 'settleMs', 'timeoutMs', 'samplerMode', 'modelBudget', 'maxPerSession',
@@ -106,7 +107,10 @@ export function startSidecar(opts: SidecarOptions): Sidecar {
       loadedPacks: packs.map((p) => ({ id: p.id, version: p.version, scenarioCount: p.scenarios.length })),
     };
     if (options.serveSurface !== false) {
-      surface = await startSurface(core, { port: opts.surfacePort });
+      surface = await startSurface(core, {
+        port: opts.surfacePort,
+        binding: caps.binding === true ? (method, params) => peer.request(method, params) : undefined,
+      });
       result.surfaceUrl = surface.url;
       log(`surface: ${surface.url}`);
     }
@@ -117,7 +121,13 @@ export function startSidecar(opts: SidecarOptions): Sidecar {
     async request(method, params) {
       switch (method) {
         case 'initialize': return initialize(params);
-        case 'surface/attach': return { sessions: initialized().snapshot(), dispatchModes: initialized().dispatchModes };
+        case 'surface/attach': {
+          const c = initialized();
+          return {
+            sessions: c.snapshot().map((s) => ({ ...s, recent: recentForSurface(c, s.sessionId, params.inspector === true) })),
+            dispatchModes: c.dispatchModes,
+          };
+        }
         case 'prediction/act': return { status: await initialized().act(params as unknown as ActParams) };
         default: throw new RpcError(-32601, `unknown method ${method}`);
       }
