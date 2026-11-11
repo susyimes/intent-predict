@@ -25,6 +25,8 @@ export class RpcPeer {
     this.handlers = handlers;
     this.idPrefix = idPrefix;
     this.onError = onError;
+    // the other side may be gone (EPIPE): report it instead of crashing the process
+    output.on('error', (e) => this.onError(`write failed: ${e.message}`));
     const lines = createInterface({ input, crlfDelay: Infinity });
     lines.on('line', (line) => {
       if (line.trim()) this.receive(line);
@@ -37,6 +39,8 @@ export class RpcPeer {
   }
 
   private write(message: Record<string, unknown>): void {
+    // e.g. the reply to a request that was still running when this side closed the connection
+    if (this.output.writableEnded || this.output.destroyed) return;
     this.output.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
   }
 

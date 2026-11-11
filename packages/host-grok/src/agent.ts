@@ -1,4 +1,4 @@
-// What the host needs from each agent CLI it can drive (Grok, Hermes, Codex, Kimi).
+// What the host needs from each agent CLI it can drive (Grok, Hermes, Codex, Kimi, Claude Code).
 //
 // Two rules hold for every adapter:
 //  - A driven turn goes through the agent's own permission flow. No adapter runs a turn in a mode
@@ -9,7 +9,7 @@ import type { AgentEvent, SampleResult } from '../../core/src/index.ts';
 import type { GrokLine, HistoryReplay } from './grok.ts';
 import type { Bin } from './proc.ts';
 
-export const AGENT_KINDS = ['grok', 'hermes', 'codex', 'kimi'] as const;
+export const AGENT_KINDS = ['grok', 'hermes', 'codex', 'kimi', 'claude'] as const;
 export type AgentKind = typeof AGENT_KINDS[number];
 export const isAgentKind = (value: unknown): value is AgentKind => (AGENT_KINDS as readonly unknown[]).includes(value);
 
@@ -67,4 +67,6 @@ export interface AgentAdapter {
   fingerprint(ref: AgentRef, env: AgentEnv): number;
   /** True when the user started a new turn in the session after `fingerprint`. */
   advanced(ref: AgentRef, env: AgentEnv, fingerprint: number): boolean;
+  /** Why the session cannot take a turn from this host right now (another process has it open), if so. */
+  busyElsewhere?(ref: AgentRef, env: AgentEnv): string | undefined;
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Agent CLIs with intent-predict: a line-based chat with Grok, Hermes, Codex or Kimi in headless
-// mode; suggestions for your next message appear on the surface page whose address is printed at start.
+// Agent CLIs with intent-predict: a line-based chat with Grok, Hermes, Codex, Kimi or Claude Code in
+// headless mode; suggestions for your next message appear on the surface page whose address is printed at start.
 //
-//   node packages/host-grok/src/main.ts [--agent grok|hermes|codex|kimi] [--cwd DIR] [--model ID]
+//   node packages/host-grok/src/main.ts [--agent grok|hermes|codex|kimi|claude] [--cwd DIR] [--model ID]
 //     [--resume SESSION_ID] [--eagerness conservative|eager]
 //     [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]
 //     [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]
@@ -25,7 +25,7 @@ const flag = (name: string) => {
 };
 if (own.includes('--help')) {
   process.stdout.write(
-    'usage: main.ts [--agent grok|hermes|codex|kimi] [--cwd DIR] [--model ID] [--resume SESSION_ID]\n'
+    'usage: main.ts [--agent grok|hermes|codex|kimi|claude] [--cwd DIR] [--model ID] [--resume SESSION_ID]\n'
     + '  [--eagerness conservative|eager]\n'
     + '  [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]\n'
     + '  [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]\n',
@@ -92,7 +92,7 @@ const host = new GrokHost({
 });
 
 await host.start();
-const LABEL: Record<AgentKind, string> = { grok: 'Grok', hermes: 'Hermes', codex: 'Codex', kimi: 'Kimi' };
+const LABEL: Record<AgentKind, string> = { grok: 'Grok', hermes: 'Hermes', codex: 'Codex', kimi: 'Kimi', claude: 'Claude Code' };
 say(`intent-predict × ${LABEL[host.agent]}   cwd: ${cwd}`);
 if (host.agentSessionId) say(dim(`已绑定 ${LABEL[host.agent]} 会话：${host.agentSessionId}（经此发送的消息续接该会话）`));
 {

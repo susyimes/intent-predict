@@ -50,8 +50,8 @@
     <h1>选择会话</h1>
     <a id="back" href="/">返回建议页</a>
   </header>
-  <p class="note">绑定立即生效，并还原该会话最近 3 个已完成轮次立即求值；绑定后在原工具里继续的轮次，刷新本页或建议页时会同步进来。此后经宿主发送的消息续接所选会话。带「绑定」按钮的会话可由当前宿主直接续接；其余是本机嗅探到的活跃 AI 会话，当前宿主还不能续接它们。</p>
-  <p class="warn" id="privacy"><b>建议由该会话自己的 Agent 挑：</b>绑定后，每次求值都会把所选会话最近几轮对话的节选（已脱敏）交给这个会话所属的 Agent（Grok、Hermes、Codex 或 Kimi），用它的默认模型挑建议；内容不会发给别家。经宿主发出的消息按该 Agent 自己的审批规则执行，宿主收到的权限请求一律拒绝；Grok 会话沿用启动宿主时给的权限参数（如 --allow）。</p>
+  <p class="note">绑定立即生效，并还原该会话最近 3 个已完成轮次立即求值；绑定后在原工具里继续的轮次，刷新本页或建议页时会同步进来。此后经宿主发送的消息续接所选会话。Claude Code 会话若仍在别的终端里开着，建议照常出现，但不能从这里发送（Claude 只让一个进程续接会话），可以复制建议贴过去。带「绑定」按钮的会话可由当前宿主直接续接；其余是本机嗅探到的活跃 AI 会话，当前宿主还不能续接它们。</p>
+  <p class="warn" id="privacy"><b>建议由该会话自己的 Agent 挑：</b>绑定后，每次求值都会把所选会话最近几轮对话的节选（已脱敏）交给这个会话所属的 Agent（Grok、Hermes、Codex、Kimi 或 Claude Code），用它的默认模型挑建议；内容不会发给别家。经宿主发出的消息按该 Agent 自己的审批规则执行，宿主收到的权限请求一律拒绝；Grok 会话沿用启动宿主时给的权限参数（如 --allow）。</p>
 
   <div id="current" class="current">正在读取当前绑定…</div>
 
@@ -74,6 +74,7 @@
         <option value="hermes">Hermes</option>
         <option value="codex">Codex</option>
         <option value="kimi">Kimi</option>
+        <option value="claude">Claude Code</option>
       </select>
       <input id="manualId" placeholder="会话 ID" aria-label="会话 ID">
       <input id="manualCwd" placeholder="该会话的工作目录，如 C:\Users\you" aria-label="工作目录">
@@ -82,7 +83,7 @@
     </div>
   </details>
 
-  <p class="note" id="foot">嗅探只读各工具在本机的会话元数据（登记表、标题、目录、修改时间），不读取对话内容；只有绑定之后，宿主才读取所选会话最近几轮的对话，用于还原和求值。Grok 的「运行中」来自其登记表并核对进程；其余以文件更新时间推断，可能包含刚结束的会话。</p>
+  <p class="note" id="foot">嗅探只读各工具在本机的会话元数据（登记表、标题、目录、修改时间），不读取对话内容；只有绑定之后，宿主才读取所选会话最近几轮的对话，用于还原和求值。Grok 和 Claude Code 的「运行中」来自它们的登记表并核对进程；其余以文件更新时间推断，可能包含刚结束的会话。</p>
 </main>
 <script>
 'use strict';
@@ -93,7 +94,7 @@ const el = (tag, props = {}, ...children) => {
   node.append(...children.filter((c) => c !== null && c !== undefined));
   return node;
 };
-const KIND = { grok: 'Grok', hermes: 'Hermes', codex: 'Codex', kimi: 'Kimi', 'claude-code': 'Claude Code', muse: 'Muse' };
+const KIND = { grok: 'Grok', hermes: 'Hermes', codex: 'Codex', kimi: 'Kimi', claude: 'Claude Code', muse: 'Muse' };
 let sessions = [];
 let current = null;
 

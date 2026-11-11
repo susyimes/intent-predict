@@ -31,7 +31,7 @@ O1 单会话  Phase 1（当前）
 | 1A 核心 | 信号、路由、两条确定性规则、模型分类、门控、槽位与模板、输出检查、建议有效期、发送规则、结果记录（TypeScript，`packages/core`） | 99 条黄金用例在 Python 参考求值器与 TypeScript 核心上都通过 |
 | 1B sidecar 与界面 | stdio JSON-RPC、反向采样与取消、发送派发；自带界面（单网页，HTTP + SSE，仅回环地址 + 每次启动随机 token + Host/Origin 校验） | `packages/sidecar/test`：协议全程、越权请求被拒、发送钉轮次且只发一次、采样取消、迟到回复被丢弃；`npm run smoke:webui` 在无头 Chrome 里渲染卡片、选备选、点发送 |
 | 1C 第一个真实宿主 | Grok CLI 适配：无头回合的事件映射、借 Grok 模型做 `compact` 采样、以续接会话的方式接收发送（`packages/host-grok`） | `npm run e2e:grok` 在 Grok CLI 1.0.77 上通过；录制回合的映射测试 |
-| 1C+ 更多宿主与会话绑定 | 同一宿主经适配器驱动 Hermes、Codex、Kimi；可绑定它们已有的会话、还原近几轮历史；建议由会话自己的 Agent 用默认模型挑；发出的消息走各自的审批规则，权限请求一律拒绝 | 单元测试（实测录下的事件格式、测试替身 ACP Agent 与假 codex）；对 Hermes 0.22、Codex 0.159、Kimi Code 2.5 的实机检查（见下） |
+| 1C+ 更多宿主与会话绑定 | 同一宿主经适配器驱动 Hermes、Codex、Kimi、Claude Code；可绑定它们已有的会话、还原近几轮历史；建议由会话自己的 Agent 用默认模型挑；发出的消息走各自的审批规则，权限请求一律拒绝 | 单元测试（实测录下的事件格式，测试替身 ACP Agent、假 codex 和假 claude）；对 Hermes 0.22、Codex 0.159、Kimi Code 2.5、Claude Code 2.1.322 的实机检查（见下） |
 
 端到端跑出来的事实（两次运行，每次 4 轮，结果一致，但不构成效果结论）：
 
@@ -48,6 +48,16 @@ O1 单会话  Phase 1（当前）
   - Codex 回答 `none`，不出建议。
 - 单轮耗时：Kimi 5–6 秒，Hermes 10–16 秒，Codex 16–23 秒。
 - 挑建议的调用没留下任何会话：Hermes 的隐藏会话数前后都是 0，Kimi 的会话数前后都是 483。检查自己建的会话：Hermes 和 Kimi 已删除；Codex 没有删除接口，留下了一个两轮的临时会话。
+
+Claude Code 2.1.322 的实机检查（同一天，在临时目录里）：
+
+- 和上面三家一样的三步都通过：新开会话发一轮、续接同一会话、另起宿主绑定并还原 2 轮。
+- 第二轮要求用 Write 建文件，被拒绝：文件没建出来，宿主报了被拒的工具。
+- Claude 用默认模型（opus）、低推理强度挑建议，每次约 4–5 秒。两次都选了 confirm，置信度 0.55 和 0.45，低于默认门槛 0.60，没有出建议。
+- 改用 eager 预设（门槛 0.35）后，它给出 "yes, go ahead with that"（0.6）。在网页上点发送后，这一轮经 `claude -p --resume` 续接了同一会话。Claude 在这一轮里想用 PowerShell 跑测试，因为需要审批被拒了。
+- 单轮 6–9 秒；发送的那一轮带一次被拒的工具调用，共 17 秒。
+- 会话在后台进程里开着时，宿主判定为忙，不发送；进程中途被停掉留下的半截轮次按"已中断"还原。
+- 挑建议的调用没有留下会话文件。测试会话都已删除，只删各自的转录和 `session-env/<id>`；不用 `claude purge`，原因见 docs/review-issues.md R44。
 
 ### 还没做：1D 数据验证（进入 Phase 2 的唯一门槛）
 
@@ -69,7 +79,7 @@ O1 单会话  Phase 1（当前）
 - 不执行任何东西：`tool` / `custom` 类动作只是元数据。
 - 不做在线学习：唯一会改变行为的用户反馈是显式关闭带来的冷却；相似度只记录。
 - 不做打字中的补全，不做跨会话记忆。
-- 不追求多宿主：下一个宿主等 1D 之后再接。
+- 不再追加宿主：Hermes、Codex、Kimi、Claude Code 是应用户要求接入的，此外的宿主等 1D 之后再接。
 
 ## Phase 2 之后（草案见 [docs/future.md](docs/future.md)）
 

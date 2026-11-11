@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { CLAUDE_SAMPLE_ARGS, claudeTurnArgs } from '../src/claude.ts';
 import { CODEX_SAMPLE_ARGS } from '../src/codex.ts';
 import { GrokHost } from '../src/host.ts';
 import type { GrokHostOptions } from '../src/host.ts';
@@ -14,9 +15,10 @@ import type { GrokHostOptions } from '../src/host.ts';
 const NO_BIN = 'intent-predict-no-such-bin';
 const FAKE_ACP = fileURLToPath(new URL('./fixtures/fake-acp-agent.mjs', import.meta.url));
 const FAKE_CODEX = fileURLToPath(new URL('./fixtures/fake-codex.mjs', import.meta.url));
+const FAKE_CLAUDE = fileURLToPath(new URL('./fixtures/fake-claude.mjs', import.meta.url));
 
 async function started(extra: Partial<GrokHostOptions> = {}) {
-  const host = new GrokHost({ cwd: process.cwd(), bin: NO_BIN, hermesBin: NO_BIN, codexBin: NO_BIN, kimiBin: NO_BIN, ...extra });
+  const host = new GrokHost({ cwd: process.cwd(), bin: NO_BIN, hermesBin: NO_BIN, codexBin: NO_BIN, kimiBin: NO_BIN, claudeBin: NO_BIN, ...extra });
   await host.start();
   const base = new URL(host.surfaceUrl!);
   const token = base.searchParams.get('t')!;
@@ -86,7 +88,7 @@ test('binding hot-switches the host to a Grok session and refuses other kinds', 
   const { host, rpc } = await started();
   try {
     const before = host.sessionId;
-    const refused = await rpc('binding/bind', { kind: 'claude-code', id: 'c-1', cwd: process.cwd() });
+    const refused = await rpc('binding/bind', { kind: 'muse', id: 'm-1', cwd: process.cwd() });
     assert.equal(refused.error.code, -32602);
     assert.equal(host.grokSessionId, undefined);
 
@@ -373,6 +375,92 @@ test('a bound Kimi session is replayed from its wire log and evaluated by Kimi i
     if (saved === undefined) delete process.env.KIMI_CODE_HOME;
     else process.env.KIMI_CODE_HOME = saved;
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** A Claude Code home (CLAUDE_CONFIG_DIR) holding one completed session in this cwd's project, and a log for the stand-in. */
+function seedClaudeHome() {
+  const root = mkdtempSync(join(tmpdir(), 'ip-claude-home-'));
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = root;
+  const log = join(root, 'claude.log');
+  writeFileSync(log, '');
+  const id = '68608922-0000-4000-8000-00000000abcd';
+  const project = join(root, 'projects', process.cwd().replace(/[^A-Za-z0-9]/g, '-'));
+  mkdirSync(project, { recursive: true });
+  const line = (o: object) => JSON.stringify({ sessionId: id, cwd: process.cwd(), isSidechain: false, ...o });
+  writeFileSync(join(project, `${id}.jsonl`), [
+    line({ type: 'user', message: { role: 'user', content: 'fix the login' }, turnOrigin: 'human', promptSource: 'typed' }),
+    line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: join(process.cwd(), 'src', 'login.ts') } }], stop_reason: 'tool_use' } }),
+    line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'e1', content: 'The file has been updated successfully.', is_error: false }] } }),
+    line({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Changed the login check.' }], stop_reason: 'end_turn' } }),
+    line({ type: 'system', subtype: 'turn_duration', durationMs: 1000 }),
+  ].join('\n') + '\n');
+  return {
+    root, id, log,
+    bin: { command: process.execPath, prefix: [FAKE_CLAUDE, log] },
+    calls: (): Array<{ args: string[]; input: string; cwd: string }> => readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)),
+    done: () => {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = saved;
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+test('a bound Claude Code session is replayed and evaluated by Claude itself; a send waits until no other process has it open', async () => {
+  const { root, id, bin, calls, done } = seedClaudeHome();
+  try {
+    const infos: string[] = [];
+    const { host, rpc } = await started({ claudeBin: bin, onInfo: (m) => infos.push(m) });
+    try {
+      const bound = await rpc('binding/bind', { kind: 'claude', id, cwd: process.cwd() });
+      assert.equal(bound.result.bound.kind, 'claude');
+      assert.equal(bound.result.replayedTurns, 1);
+      const evaluation = await firstEvaluation(rpc, host);
+      const p = evaluation.result.prediction;
+      assert.equal(p?.intent.id, 'run_tests', JSON.stringify(evaluation.result));
+      assert.deepEqual(calls().map((c) => c.args), [CLAUDE_SAMPLE_ARGS], 'Claude itself picked the suggestion, in a call that kept no session');
+
+      // the session is open in a Claude Code window (this test process stands in for it)
+      const registry = join(root, 'sessions', `${process.pid}.json`);
+      mkdirSync(join(root, 'sessions'), { recursive: true });
+      writeFileSync(registry, JSON.stringify({ pid: process.pid, sessionId: id, cwd: process.cwd(), kind: 'interactive', status: 'idle' }));
+      const send = () => rpc('prediction/act', { predictionId: p.id, action: 'send', text: p.text, confirmed: p.confirmBeforeSend || undefined });
+      assert.equal((await send()).result.status, 'busy');
+      assert.ok(infos.some((m) => /not sent: this Claude session is open in another Claude Code process/.test(m)), infos.join(' | '));
+      assert.equal(calls().length, 1, 'claude is not even started for the refused send');
+
+      rmSync(registry);
+      assert.equal((await send()).result.status, 'dispatched');
+      for (const end = Date.now() + 10_000; Date.now() < end && calls().length < 2;) await new Promise((r) => setTimeout(r, 50));
+      const turn = calls()[1]!;
+      assert.deepEqual(turn.args, claudeTurnArgs(id), 'the send continues the bound session');
+      assert.equal(turn.input, p.text);
+      assert.equal(turn.cwd, process.cwd());
+      await host.idle();
+    } finally {
+      await host.stop();
+    }
+  } finally {
+    done();
+  }
+});
+
+test('stopping the host while a classification call runs aborts the call and closes cleanly', async () => {
+  const claude = seedClaudeHome();
+  process.env.FAKE_CLAUDE_DELAY_MS = '4000';
+  try {
+    const { host, rpc } = await started({ claudeBin: claude.bin });
+    await rpc('binding/bind', { kind: 'claude', id: claude.id, cwd: process.cwd() });
+    for (const end = Date.now() + 10_000; Date.now() < end && !claude.calls().length;) await new Promise((r) => setTimeout(r, 25));
+    assert.deepEqual(claude.calls().map((c) => c.args), [CLAUDE_SAMPLE_ARGS], 'the classification call is running');
+    const t = Date.now();
+    await host.stop();                                     // its reply must not be written to a closed pipe
+    assert.ok(Date.now() - t < 3000, 'the running call was aborted, not waited out');
+  } finally {
+    delete process.env.FAKE_CLAUDE_DELAY_MS;
+    claude.done();
   }
 });
 

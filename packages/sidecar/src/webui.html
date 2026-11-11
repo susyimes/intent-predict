@@ -83,7 +83,7 @@ const el = (tag, props = {}, ...children) => {
   node.append(...children.filter((c) => c !== null && c !== undefined));
   return node;
 };
-const KIND_LABEL = { grok: 'Grok', hermes: 'Hermes', codex: 'Codex', kimi: 'Kimi' };
+const KIND_LABEL = { grok: 'Grok', hermes: 'Hermes', codex: 'Codex', kimi: 'Kimi', claude: 'Claude Code' };
 const sessions = new Map();   // sessionId -> { live, stale, log: [] }
 let current = null;
 let bound = null;
@@ -119,7 +119,7 @@ function resetDraft(p) {
 
 const STATUS = {
   dispatched: '已发送给 Agent。', recorded: '已记录。', stale: '这条建议已过期（会话已进入下一轮），没有发送。',
-  busy: 'Agent 正在运行，稍后再试。', confirmation_required: '需要先确认。',
+  busy: 'Agent 正在运行，或这个会话正在别处打开着；稍后再试，或复制后自己粘贴过去。', confirmation_required: '需要先确认。',
   unsupported: '这个宿主不支持从这里发送，请复制后自行粘贴。', failed: '发送失败。',
 };
 

@@ -109,9 +109,9 @@ v0.4 的规范写得比证据多：融合公式、先验、退避、三档展示
 - **发送**：`grok --resume <会话>` 把文本作为下一条用户消息。适配器核对 `expectedTurnId`、在回合进行中拒绝、对 `predictionId` 去重。
 - **权限**：无头模式下没被允许的工具调用会被拒绝并使该轮以 `cancelled` 结束，映射为 `interrupted`，核心不出建议。
 
-### 已接通：Hermes、Codex、Kimi
+### 已接通：Hermes、Codex、Kimi、Claude Code
 
-同一个宿主（`packages/host-grok`）通过适配器（`agent.ts`）驱动四家命令行。每家都守两条规矩：
+同一个宿主（`packages/host-grok`）通过适配器（`agent.ts`）驱动 Grok 之外的四家命令行。每家都守两条规矩：
 
 1. **发出的消息走该 Agent 自己的审批规则**：不用任何替用户批准的模式，Agent 发来的权限请求一律只拒绝这一次，不选"永远拒绝"，以免改动用户的设置。
 2. **建议由会话自己的 Agent 用它的默认模型挑**：调用时不带工具，结束后不在它的会话历史里留下任何东西。
@@ -123,16 +123,21 @@ v0.4 的规范写得比证据多：融合公式、先验、退避、三档展示
 | Hermes 0.22 | `hermes [-p 配置] chat --query-file F --oneshot --format stream-json --resume <id>`。不用 `-z`：它会自动批准危险命令 | 单次查询模式按 `approvals.single_query_mode` 处理，默认拒绝危险命令 | `chat --source tool --ignore-rules -t clarify`。不认识的工具集名会被拒绝，所以只放一个没有副作用的 `clarify`。调用完用 `sessions delete --yes` 删除 | `state.db` |
 | Codex 0.159 | `codex exec --json [resume <id>] -`，消息走标准输入 | `exec` 从不询问，能做什么由用户配置的沙箱决定，宿主不改 | `exec --ephemeral --sandbox read-only`，不写会话文件 | `~/.codex/sessions/…/rollout-*-<id>.jsonl` |
 | Kimi Code 2.5 | ACP：`kimi acp` → `session/resume` → `session/prompt`。不用 `-p`：它会把权限模式强制改成自动执行一切 | 会话保持自己的权限模式；在默认模式下，工作区内写文件本来就不用审批，其余的权限请求一律拒绝 | ACP 新建一个临时会话，用完 `session/delete` | 会话索引 + `wire.jsonl` |
+| Claude Code 2.1.322 | `claude -p --output-format stream-json --verbose --permission-prompts none [--resume <id>]`，消息走标准输入。别的进程开着这个会话时，Claude 拒绝续接，所以宿主先查它的会话登记表，开着就直接回 `SESSION_BUSY` | 哪些操作不用问，由会话自己的权限模式和规则决定；凡是需要询问的，`--permission-prompts none` 一律拒绝，因为无头模式下没人能批准。不用 `--dangerously-skip-permissions`，也不传任何 `--permission-mode` | `-p --no-session-persistence --tools "" --safe-mode --strict-mcp-config --effort low`，外加覆盖系统提示词。不写会话文件，不带工具、钩子、MCP 和 CLAUDE.md；用默认模型，只把推理强度调低 | `~/.claude/projects/<目录>/<id>.jsonl`（`CLAUDE_CONFIG_DIR` 可改） |
 
 还有几个实测时才发现的细节：
 - **启动方式**：Codex 和 Kimi 是 npm 装的 `.cmd` 包装脚本。Node 不经 shell 启动不了它们，而经过 shell 又会重新解析参数，所以 `proc.ts` 找出包装脚本背后的 JS 入口，用当前的 Node 直接运行。
 - **Kimi 会话索引**：Kimi 删除会话后，索引里还留着那一行，所以会话发现要核对会话目录是否还在。
 - **Kimi 工具调用的参数**：ACP 推送的工具调用要等后续更新才带上命令和路径，所以先缓存住，等它完成时再一起发出去。
 - **Codex 记录格式**：工具调用的格式比较杂，有 `exec_command`、`exec`、`apply_patch`、`js` 等。退出码要从输出文本里的 "Process exited with code N" 读；用户消息前还夹着 `<environment_context>` 这类注入内容，要跳过。
+- **Claude 转录**：大部分行是 Claude Code 自己的簿记（attachment、api-request、cost-state 等）。用户发的消息看 `turnOrigin`：`human`（在终端里输入的）和 `sdk`（经 `-p` 发的）开启新的一轮；后台任务的回报（`task_notification`）和自动续写都算原来那一轮的延续；子 Agent 的行带 `isSidechain`，跳过不读。一轮在以下情况结束：模型以 `end_turn` 收尾、出现 API 错误（合成的错误消息不当作 Agent 的回复）、或用户中断。命令失败时，结果以 "Exit code N" 开头。
+- **没有进程推进的半截轮次**：只有活着的 Claude 进程才能把一轮推进下去。会话登记表 `~/.claude/sessions/<pid>.json` 记着哪些进程开着哪个会话，`-p` 运行时也会登记。登记表里没有进程开着该会话时，末尾的半截轮次按"已中断"还原，否则它会一直挡住发送。
+- **清理测试会话**：不能用 `claude purge <目录>`。对没有自己项目条目的目录，它要删的是最近的上级目录的条目（实测是 `projects["C:/"]`）。
+- **Claude Code 自带"预测下一句"**：`--prompt-suggestions` 会在每轮结束后给出一条 `prompt_suggestion`。1D 做回放时可以拿它当对照。
 
 ### 尚未核实的宿主
 
-Codex app-server 的 `thread/sample`（[prior-art.md](prior-art.md) 钉过提交）天然对应 `fork` 采样，目前四家都只用 `compact`。Claude Code、Gemini CLI 等 Agent 能被发现，但还不能绑定，接入前需要像上面那样逐项实测。
+Codex app-server 的 `thread/sample`（[prior-art.md](prior-art.md) 钉过提交）天然对应 `fork` 采样；目前五家都只用 `compact`。Muse 的会话能被发现，但还不能绑定；Gemini CLI 等还没接入。接入前都需要像上面那样逐项实测。
 
 ## 7. 评估方法
 

@@ -7,6 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { discoverSessions } from '../src/sessions.ts';
 
+// every test here puts Claude Code's home under its fixture home
+delete process.env.CLAUDE_CONFIG_DIR;
 const iso = (ms: number) => new Date(ms).toISOString();
 
 test('discovers running Grok sessions and recently active Claude/Codex/Muse sessions', () => {
@@ -43,8 +45,9 @@ test('discovers running Grok sessions and recently active Claude/Codex/Muse sess
     assert.equal(grok?.title, '活着的会话');
     assert.equal(byId.has('g-dead'), false, 'a registered session whose process is gone is not active');
 
+    assert.equal(byId.get('c-recent')?.kind, 'claude');
     assert.equal(byId.get('c-recent')?.cwd, 'D:\\claude-proj');
-    assert.equal(byId.get('c-recent')?.bindable, false);
+    assert.equal(byId.get('c-recent')?.bindable, true, 'Claude Code sessions can be bound');
     assert.equal(byId.has('c-old'), false, 'sessions idle past the window are not active');
 
     const codex = byId.get('12345678-1234-1234-1234-1234567890ab');
@@ -53,6 +56,40 @@ test('discovers running Grok sessions and recently active Claude/Codex/Muse sess
 
     assert.equal(byId.get('m-live')?.kind, 'muse');
     assert.equal(found[0]?.id, 'g-alive', 'running sessions come first');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('Claude Code sessions: open ones from its registry (however idle), titles from the transcript, unsafe ids unbindable', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ip-claude-disc-'));
+  const now = Date.now();
+  const put = (rel: string, content: string, mtime = now) => {
+    const file = join(home, '.claude', rel);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, content, 'utf8');
+    utimesSync(file, new Date(mtime), new Date(mtime));
+  };
+  try {
+    const open = '68608922-a92b-427e-b90c-67c70942e7e4';
+    put(`projects/D--claude-live/${open}.jsonl`, [
+      { type: 'user', cwd: 'D:\\claude-live', sessionId: open, message: { content: 'hi' } },
+      { type: 'ai-title', aiTitle: '旧标题', sessionId: open },
+      { type: 'ai-title', aiTitle: '修登录', sessionId: open },
+    ].map((o) => JSON.stringify(o)).join('\n') + '\n', now - 20 * 3_600_000);
+    put(`sessions/${process.pid}.json`, JSON.stringify({ pid: process.pid, sessionId: open, cwd: 'D:\\claude-live', kind: 'interactive', status: 'idle' }));
+    put('sessions/999999.json', JSON.stringify({ pid: 999999, sessionId: 'c-closed', cwd: 'D:\\x', kind: 'interactive' }));
+    put('projects/D--x/c-closed.jsonl', '{"type":"user","cwd":"D:\\\\x"}\n');
+    put('projects/D--x/-flag.jsonl', '{"type":"user","cwd":"D:\\\\x"}\n');
+
+    const found = discoverSessions({ home, now, hermesHome: join(home, 'no-hermes') });
+    const byId = new Map(found.map((s) => [s.id, s]));
+    assert.deepEqual(byId.get(open), {
+      kind: 'claude', id: open, running: true, bindable: true, updatedAt: byId.get(open)?.updatedAt, cwd: 'D:\\claude-live', title: '修登录',
+    }, 'open in Claude Code, so listed although idle for 20 h; the latest title wins');
+    assert.equal(byId.get('c-closed')?.running, false, 'its process is gone');
+    assert.equal(byId.get('-flag')?.bindable, false);
+    assert.equal(found[0]?.id, open, 'open sessions come first');
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

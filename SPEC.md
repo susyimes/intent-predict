@@ -342,7 +342,7 @@ A surface MUST:
 `dispatch/message` and `dispatch/command` carry `expectedTurnId` (the prediction's `sourceTurnId`) and `predictionId`. A host that declares a dispatch mode MUST:
 
 1. Treat the input exactly as if the user had typed it: its normal approval and permission flow applies. The core adds no authority.
-2. Refuse with `SESSION_BUSY` while a turn is running. It MUST NOT queue the input.
+2. Refuse with `SESSION_BUSY` while a turn is running, including while another program holds the session open and may run one (an agent that lets only one process continue a session). It MUST NOT queue the input.
 3. Refuse with `TURN_MISMATCH` unless `expectedTurnId` is the session's latest completed turn.
 4. Be idempotent on `predictionId`: never create a second message for one prediction.
 

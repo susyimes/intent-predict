@@ -1,6 +1,6 @@
-// An intent-predict host for agent CLIs. It drives one session of Grok, Hermes, Codex or Kimi
-// headlessly, reports each turn's events to a sidecar, lends that session's own agent as the
-// `compact` sampler (its default model), and accepts user-approved sends as the session's next
+// An intent-predict host for agent CLIs. It drives one session of Grok, Hermes, Codex, Kimi or
+// Claude Code headlessly, reports each turn's events to a sidecar, lends that session's own agent as
+// the `compact` sampler (its default model), and accepts user-approved sends as the session's next
 // prompt. The per-agent details live in the adapters (agent.ts).
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
@@ -13,6 +13,7 @@ import type { AgentEvent } from '../../core/src/index.ts';
 import { RpcPeer } from '../../sidecar/src/rpc.ts';
 import { AGENT_KINDS, isAgentKind } from './agent.ts';
 import type { AgentAdapter, AgentEnv, AgentKind, AgentRef } from './agent.ts';
+import { claudeAdapter } from './claude.ts';
 import { codexAdapter } from './codex.ts';
 import { grokAdapter } from './grok.ts';
 import type { GrokLine } from './grok.ts';
@@ -23,7 +24,9 @@ import { discoverSessions, isSafeName, safeName } from './sessions.ts';
 
 const SIDECAR = fileURLToPath(new URL('../../sidecar/src/main.ts', import.meta.url));
 
-export const ADAPTERS: Record<AgentKind, AgentAdapter> = { grok: grokAdapter, hermes: hermesAdapter, codex: codexAdapter, kimi: kimiAdapter };
+export const ADAPTERS: Record<AgentKind, AgentAdapter> = {
+  grok: grokAdapter, hermes: hermesAdapter, codex: codexAdapter, kimi: kimiAdapter, claude: claudeAdapter,
+};
 
 export interface GateSettings {
   eagerness: 'conservative' | 'eager';
@@ -49,11 +52,12 @@ export interface GrokHostOptions {
   timeoutMs?: number;
   packs?: string[];
   surfacePort?: number;
-  /** The agent CLIs (default: grok, hermes, codex, kimi on PATH). */
+  /** The agent CLIs (default: grok, hermes, codex, kimi, claude on PATH). */
   bin?: Bin;
   hermesBin?: Bin;
   codexBin?: Bin;
   kimiBin?: Bin;
+  claudeBin?: Bin;
   /** Prediction gate preset: conservative (default) or eager (lower floors and prompt). */
   eagerness?: GateSettings['eagerness'];
   minConfidence?: number;
@@ -93,6 +97,8 @@ export class GrokHost {
   private bindSeq = 0;
   private synced?: AgentRef & { fingerprint: number };
   private drivingTurns = 0;
+  private stopping = false;
+  private readonly inflight = new Set<Promise<unknown>>();
 
   constructor(opts: GrokHostOptions) {
     const eagerness = opts.eagerness ?? 'conservative';
@@ -126,7 +132,7 @@ export class GrokHost {
     this.env = {
       home: homedir(),
       hermesHome: opts.hermesHome,
-      bins: { grok: opts.bin, hermes: opts.hermesBin, codex: opts.codexBin, kimi: opts.kimiBin },
+      bins: { grok: opts.bin, hermes: opts.hermesBin, codex: opts.codexBin, kimi: opts.kimiBin, claude: opts.claudeBin },
       grokModel: opts.model,
       grokArgs: opts.grokArgs ?? [],
       scratch: () => this.scratch,
@@ -161,7 +167,12 @@ export class GrokHost {
     const child = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true });
     this.sidecar = child;
     this.peer = new RpcPeer(child.stdout!, child.stdin!, {
-      request: (method, params) => this.onRequest(method, params),
+      request: (method, params) => {
+        const handled = this.onRequest(method, params);
+        this.inflight.add(handled);
+        handled.then(() => this.inflight.delete(handled), () => this.inflight.delete(handled));
+        return handled;
+      },
       notify: (method) => {
         if (method === 'sampler/cancel') this.sampling?.abort();
       },
@@ -280,6 +291,7 @@ export class GrokHost {
 
   /** Requests the sidecar makes of the host (SPEC 5.3, 6, 8). */
   private async onRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (this.stopping) throw new RpcError(method === 'sampler/sample' ? SAMPLER_ABORTED : SESSION_BUSY, 'the host is stopping');
     if (method === 'binding/list') {
       // Surfaces call this on load and refresh; first catch up with external turns of the bound session.
       this.syncBoundHistory();
@@ -311,6 +323,12 @@ export class GrokHost {
     if (this.boundAdvanced()) {
       this.syncBoundHistory();
       throw new RpcError(TURN_MISMATCH, 'the bound session has advanced since the replay point');
+    }
+    const ref = this.bound();
+    const elsewhere = ref ? ADAPTERS[ref.kind].busyElsewhere?.(ref, this.env) : undefined;
+    if (elsewhere) {
+      this.info(`not sent: ${elsewhere}`);
+      throw new RpcError(SESSION_BUSY, elsewhere);
     }
     // dispatch/message: exactly like a message the user typed; never queued, never twice
     const id = String(params.predictionId);
@@ -373,8 +391,10 @@ export class GrokHost {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;                                  // refuse new requests from here on
     this.sampling?.abort();
     await this.idle();
+    await Promise.allSettled([...this.inflight]);          // e.g. a sample that was running: its reply goes out first
     await Promise.all(this.cleanups);
     this.sidecar?.stdin?.end();
     await new Promise<void>((resolve) => (this.sidecar && this.sidecar.exitCode === null ? this.sidecar.once('exit', () => resolve()) : resolve()));

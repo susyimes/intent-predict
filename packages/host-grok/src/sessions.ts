@@ -1,16 +1,16 @@
 // Sniff out active AI sessions on this machine from each harness's local store, so the bundled
 // surface can offer them for binding. Discovery reads metadata only (ids, cwds, titles,
-// timestamps) and never conversation bodies. Only Grok registers its live sessions; elsewhere
-// "active" means recent activity in the store. Grok, Hermes, Codex and Kimi sessions are bindable
-// from this host when their ids are plain names (see isSafeName): their turns are driven
-// headlessly by the adapters in grok.ts, hermes.ts, codex.ts and kimi.ts.
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+// timestamps) and never conversation bodies. Grok and Claude Code register their live sessions;
+// elsewhere "active" means recent activity in the store. Grok, Hermes, Codex, Kimi and Claude Code
+// sessions are bindable from this host when their ids are plain names (see isSafeName): their turns
+// are driven headlessly by the adapters in grok.ts, hermes.ts, codex.ts, kimi.ts and claude.ts.
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 
-export type SessionKind = 'grok' | 'hermes' | 'codex' | 'kimi' | 'claude-code' | 'muse';
+export type SessionKind = 'grok' | 'hermes' | 'codex' | 'kimi' | 'claude' | 'muse';
 
 export interface DiscoveredSession {
   kind: SessionKind;
@@ -53,6 +53,16 @@ function head(file: string, bytes: number): string {
   try {
     const buffer = Buffer.alloc(bytes);
     return buffer.subarray(0, readSync(fd, buffer, 0, bytes, 0)).toString('utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+function tail(file: string, bytes: number): string {
+  const fd = openSync(file, 'r');
+  try {
+    const start = Math.max(0, fstatSync(fd).size - bytes);
+    const buffer = Buffer.alloc(bytes);
+    return buffer.subarray(0, readSync(fd, buffer, 0, bytes, start)).toString('utf8');
   } finally {
     closeSync(fd);
   }
@@ -151,11 +161,55 @@ const mtimeOf = (file: string): number | undefined => {
   }
 };
 
-/** Claude Code: ~/.claude/projects/<bucket>/<session>.jsonl; cwd rides on early entries. */
+/** Claude Code's home: CLAUDE_CONFIG_DIR, else ~/.claude. */
+export function claudeHome(home: string): string {
+  return process.env.CLAUDE_CONFIG_DIR ?? join(home, '.claude');
+}
+
+export interface ClaudeLiveSession { pid: number; kind?: string; status?: string; name?: string; cwd?: string }
+
+/**
+ * Claude Code sessions that a live process has open, by session id: the registry Claude Code keeps
+ * in <claude home>/sessions/<pid>.json (interactive and background sessions alike). Claude refuses
+ * to resume such a session from another process.
+ */
+export function claudeLiveSessions(root: string): Map<string, ClaudeLiveSession> {
+  const live = new Map<string, ClaudeLiveSession>();
+  let names: string[];
+  try {
+    names = readdirSync(join(root, 'sessions'));
+  } catch {
+    return live;
+  }
+  for (const name of names) {
+    if (!/^\d+\.json$/.test(name)) continue;
+    const entry = jsonFile(join(root, 'sessions', name));
+    if (typeof entry?.sessionId !== 'string' || typeof entry.pid !== 'number' || !alive(entry.pid)) continue;
+    const session: ClaudeLiveSession = { pid: entry.pid };
+    for (const key of ['kind', 'status', 'name', 'cwd'] as const) if (typeof entry[key] === 'string' && entry[key]) session[key] = entry[key];
+    live.set(entry.sessionId, session);
+  }
+  return live;
+}
+
+/** Claude Code's folder name for a project: every character other than a letter or digit becomes '-'. */
+export const claudeProjectDir = (cwd: string): string => cwd.replace(/[^A-Za-z0-9]/g, '-');
+
+/** Claude Code: <claude home>/projects/<project>/<session>.jsonl; cwd rides on early entries, the title on late ones. */
 function claudeSessions(home: string, cutoff: number, limit: number): DiscoveredSession[] {
-  const files = recentFiles(join(home, '.claude', 'projects'), 1, (n) => n.endsWith('.jsonl'), cutoff, limit);
+  const root = claudeHome(home);
+  const live = claudeLiveSessions(root);
+  const files = recentFiles(join(root, 'projects'), 1, (n) => n.endsWith('.jsonl'), cutoff, limit);
+  // a session open in Claude Code right now counts however long it has been idle
+  for (const [id, s] of live) {
+    if (!isSafeName(id) || files.some((f) => basename(f, '.jsonl') === id)) continue;
+    const file = s.cwd ? join(root, 'projects', claudeProjectDir(s.cwd), `${id}.jsonl`) : undefined;
+    if (file && existsSync(file)) files.push(file);
+  }
   return files.map((file) => {
+    const id = basename(file, '.jsonl');
     let cwd: string | undefined;
+    let title: string | undefined;
     try {
       for (const line of head(file, 65_536).split('\n').slice(0, 40)) {
         if (!line.trim()) continue;
@@ -163,10 +217,21 @@ function claudeSessions(home: string, cutoff: number, limit: number): Discovered
         if (typeof value === 'string' && value) { cwd = value; break; }
       }
     } catch { /* metadata is best effort */ }
-    const session: DiscoveredSession = {
-      kind: 'claude-code', id: basename(file, '.jsonl'), running: false, bindable: false, updatedAt: mtimeOf(file),
-    };
+    try {
+      for (const line of tail(file, 65_536).split('\n')) {
+        if (!line.includes('"ai-title"')) continue;
+        try {
+          const value = JSON.parse(line);
+          if (value?.type === 'ai-title' && typeof value.aiTitle === 'string' && value.aiTitle) title = value.aiTitle;
+        } catch { /* a line cut by the tail window */ }
+      }
+    } catch { /* metadata is best effort */ }
+    const open = live.get(id);
+    const session: DiscoveredSession = { kind: 'claude', id, running: !!open, bindable: isSafeName(id), updatedAt: mtimeOf(file) };
+    cwd ??= open?.cwd;
     if (cwd) session.cwd = cwd;
+    title ??= open?.name;
+    if (title) session.title = title;
     return session;
   });
 }
