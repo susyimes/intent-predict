@@ -468,6 +468,11 @@
           "maximum": 1,
           "default": 0.15
         },
+        "optionSets": {
+          "type": "boolean",
+          "default": true,
+          "description": "Offer an option set when the model's first choice is below minConfidence but it and its runner-ups together reach it (SPEC 4.6)."
+        },
         "redact": {
           "type": "string",
           "enum": [

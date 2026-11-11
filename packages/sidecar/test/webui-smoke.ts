@@ -47,7 +47,10 @@ createInterface({ input: sidecar.stdout }).on('line', (line) => {
   const m: Json = JSON.parse(line);
   if (m.id === 1) surfaceUrl = m.result.surfaceUrl;
   if (m.method === 'sampler/sample') {
-    const reply = { intent: 'confirm', confidence: 0.9, slots: {}, runnerUps: [{ intent: 'ask_tradeoffs', confidence: 0.2 }] };
+    // t1: a confident suggestion with an alternative; t2: neither option is likely enough alone, together they are
+    const reply = m.params.expectedTurnId === 't1'
+      ? { intent: 'confirm', confidence: 0.9, slots: {}, runnerUps: [{ intent: 'ask_tradeoffs', confidence: 0.2 }] }
+      : { intent: 'confirm', confidence: 0.4, slots: {}, runnerUps: [{ intent: 'ask_tradeoffs', confidence: 0.25 }] };
     write({ id: m.id, result: { text: JSON.stringify(reply) } });
   }
   if (m.method === 'dispatch/message') {
@@ -59,14 +62,14 @@ write({
   id: 1, method: 'initialize',
   params: { protocolVersion: '0.5', client: { name: 'smoke', version: '0' }, capabilities: { samplerModes: ['compact'], dispatchModes: ['message'] }, options: { settleMs: 0 } },
 });
-const observeTurn = () => write({
+const observeTurn = (turnId = 't1', agent = `<img src=x onerror="document.title='pwned'"> 我打算把重试次数从 3 次改成 5 次，可以吗？`) => write({
   method: 'session/observe',
   params: {
     sessionId: 'demo',
     events: [
-      { type: 'turn.started', turnId: 't1', at: 1 }, { type: 'message.user', turnId: 't1', text: '继续处理这个任务' },
-      { type: 'message.agent', turnId: 't1', text: `<img src=x onerror="document.title='pwned'"> 我打算把重试次数从 3 次改成 5 次，可以吗？`, final: true },
-      { type: 'turn.completed', turnId: 't1', status: 'completed', at: 2 },
+      { type: 'turn.started', turnId, at: 1 }, { type: 'message.user', turnId, text: '继续处理这个任务' },
+      { type: 'message.agent', turnId, text: agent, final: true },
+      { type: 'turn.completed', turnId, status: 'completed', at: 2 },
     ],
   },
 });
@@ -129,6 +132,26 @@ try {
   assert.equal(await page(`[...document.querySelectorAll('button')].some((b) => b.textContent === '发给 Agent')`), false, 'a resolved card offers no send button');
   assert.equal(dispatches.length, 1);
   console.log('  ✔ picking the alternative and clicking Send dispatched exactly that text, pinned to t1, once');
+
+  // an option set: the options are equals, none is preselected, and nothing can go out before a pick
+  observeTurn('t2', '重试次数有两种改法：直接改成 5 次，或者按网络状况动态调整。先按第一种改吗？');
+  await until('the option set', () => page(`document.body.innerText.includes('合计把握 0.65')`)).catch(async (e) => {
+    throw new Error(`${e.message}; the page shows: ${JSON.stringify(await page('document.body.innerText'))}`);
+  });
+  const options = await page(`[...document.querySelectorAll('.card .choices label')].map((l) => l.textContent)`);
+  assert.equal(options.length, 2);
+  assert.ok(options[0].startsWith('可以，按这个方案继续') && options[1].startsWith('先说说这样做的利弊'), JSON.stringify(options));
+  assert.equal(await page(`[...document.querySelectorAll('.card .choices input')].some((r) => r.checked)`), false, 'no option is preselected');
+  assert.equal(await page(`document.querySelector('.card textarea').value`), '');
+  const disabled = (label: string) => page(`[...document.querySelectorAll('button')].find((b) => b.textContent === ${JSON.stringify(label)}).disabled`);
+  assert.equal(await disabled('发给 Agent'), true, 'nothing to send before a pick');
+  assert.equal(await disabled('复制'), true, 'nothing to copy before a pick');
+  await page(`[...document.querySelectorAll('.card .choices label')].find((l) => l.textContent.startsWith('先说说这样做的利弊')).querySelector('input').click()`);
+  assert.equal(await page(`document.querySelector('.card textarea').value`), '先说说这样做的利弊');
+  await clickButton('发给 Agent');
+  await until('the second dispatch', () => dispatches.length === 2);
+  assert.deepEqual({ ...dispatches[1], predictionId: '<id>' }, { sessionId: 'demo', text: '先说说这样做的利弊', expectedTurnId: 't2', predictionId: '<id>' });
+  console.log('  ✔ an option set shows its options as equals with none preselected; the picked one was dispatched, pinned to t2');
   ws.close();
   console.log(`webui smoke passed in ${browserPath}`);
 } catch (e) {

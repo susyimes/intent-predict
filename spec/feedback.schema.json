@@ -109,6 +109,10 @@
           "maximum": 1,
           "description": "Confidence threshold that applied to this evaluation, when the gate was reached."
         },
+        "optionSet": {
+          "const": true,
+          "description": "Present when the delivered prediction is an option set (SPEC 4.6)."
+        },
         "samplerMode": {
           "type": "string",
           "enum": [

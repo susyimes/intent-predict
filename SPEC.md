@@ -268,9 +268,17 @@ Reply with a single JSON object only:
 For the selected intent, in this order:
 
 1. Its session key `<packId>/<scenarioId>#<intentId>` is in cooldown (§5.2) → `in_cooldown`.
-2. Model path only: `confidence` below the effective threshold (§3.3: `sideEffectMinConfidence` for `side_effect`, else `minConfidence`) → `below_min_confidence`.
+2. Model path only: `confidence` below the effective threshold (§3.3: `sideEffectMinConfidence` for `side_effect`, else `minConfidence`) → an option set, if one forms (below); otherwise `below_min_confidence`.
 
 The model's self-reported confidence is used as is. It is not calibrated and no margin, prior or bonus is applied in this version; that is a deliberate baseline (see docs/future.md).
+
+**Option sets.** When the model's first choice is not likely enough on its own but it and its runner-ups together are, they are offered side by side as equal options. This step is skipped when `options.optionSets` is `false`.
+
+- A *member* is the selected intent or a kept runner-up (§4.5 step 8) that meets all of these: its confidence ≥ `options.altMinConfidence`; its risk is not `side_effect`; it is not in cooldown; it passes §4.7. The selected intent must itself be a member.
+- Walk the members in order — the selected intent first, then the runner-ups as the model listed them — and stop as soon as their confidences add up to the effective `minConfidence`. Sums are compared with a tolerance of 1e-9.
+- If the sum is reached with at least two members, the prediction is an **option set**: the selected intent is its primary, the other members walked are its `alternatives`, and `optionSet` is `true`. Otherwise → `below_min_confidence`.
+
+A set therefore has two or three options, and no more than it needs to reach the threshold. The default prompt asks for probabilities that add up to at most 1, so the sum reads as the model's probability that the user's next message is one of the options.
 
 ### 4.7 Slots, rendering, output checks
 
@@ -294,7 +302,8 @@ Any failure above → `slot_validation_failed`.
 ### 4.8 Prediction assembly
 
 - `risk` is the intent's declared risk. `confirmBeforeSend` is `true` exactly when `risk` is `side_effect`.
-- `alternatives` (model path only): for each kept runner-up, in order, include it when its confidence ≥ `options.altMinConfidence` (default 0.15), its risk is not `side_effect`, it is not in cooldown, and it passes §4.7. A runner-up that fails is dropped silently; it never suppresses the prediction.
+- `alternatives` (model path only): for an option set, its other members (§4.6). Otherwise, for each kept runner-up, in order, include it when its confidence ≥ `options.altMinConfidence` (default 0.15), its risk is not `side_effect`, it is not in cooldown, and it passes §4.7. A runner-up that fails is dropped silently; it never suppresses the prediction.
+- `optionSet` is present, with the value `true`, exactly on an option set.
 - `passThrough` mirrors the intent, on the prediction and on each alternative. When it is true on any of them, `context.excerpt` MUST be set: the redacted final agent message, cut to its last 300 characters and prefixed with `…` when cut.
 - `qualifiedIntentId` is `<packId>@<packVersion>/<scenarioId>#<intentId>`.
 
@@ -319,7 +328,7 @@ Nothing else invalidates a prediction. In particular an evaluation that ends wit
 A surface reports a user action with `prediction/act`; the result carries `status`.
 
 - **`copy`** → `recorded`, also for a prediction that is no longer live. A live prediction stays live.
-- **`dismiss`** → `stale` if the prediction is not live. Otherwise `recorded`; invalidated (`resolved`); the intent's session key enters cooldown: it is suppressed (`in_cooldown`) in the next `options.cooldownTurnsAfterDismiss` (default 3) evaluated turns of the session.
+- **`dismiss`** → `stale` if the prediction is not live. Otherwise `recorded`; invalidated (`resolved`); the intent's session key enters cooldown — for an option set, every option's key, since the user turned all of them down: it is suppressed (`in_cooldown`) in the next `options.cooldownTurnsAfterDismiss` (default 3) evaluated turns of the session.
 - **`send`**, checked in this order:
   1. The prediction is not live → `stale`.
   2. `choice` / `alternative`, when present, must name an existing choice / alternative (otherwise JSON-RPC error `-32602`); the *selected item* is that one, else the primary.
@@ -335,6 +344,7 @@ A surface MUST:
 - for `passThrough` predictions, show `context.excerpt` (and each choice's `label`) next to the suggestion and inside any confirmation step;
 - set `confirmed: true` only after a separate confirmation step that states what will be sent to which session;
 - not preselect a choice unless `preferredChoice` is present;
+- for an option set, present the primary and its alternatives as equal options and preselect none of them: the text to send stays empty until the user picks one;
 - display only what the core gives it (which is already redacted).
 
 ### 5.3 Dispatch contract (host)
@@ -504,6 +514,7 @@ Timing is logical: the settle delay is skipped and `timeout: true` stands for th
 | `minConfidence` | 0.60 | `policy` (host, pack, scenario) |
 | `sideEffectMinConfidence` | 0.80 | `policy` (host, pack, scenario) |
 | `altMinConfidence` | 0.15 | `options` |
+| `optionSets` | `true` | `options` |
 | `cooldownTurnsAfterDismiss` | 3 | `options` |
 | `maxPerSession` | unlimited | `options` |
 | `modelBudget.maxCallsPerHour` | unlimited | `options` |

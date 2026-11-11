@@ -108,12 +108,19 @@ async function rpc(method, params) {
   return msg.result;
 }
 
+// Options of an option set (SPEC 4.6): the primary and its alternatives, as equals. null otherwise.
+const setOptions = (p) => (p && p.optionSet
+  ? [{ alternative: null, intentId: p.intent.id, text: p.text, confidence: p.intent.confidence },
+    ...p.alternatives.map((a) => ({ alternative: a.intentId, intentId: a.intentId, text: a.text, confidence: a.confidence }))]
+  : null);
+// nothing is preselected for a choice list without a recommended item, or for an option set
+const needsPick = (p) => !!p && ((p.choices && p.preferredChoice === undefined) || !!p.optionSet);
+
 function resetDraft(p) {
-  const needsPick = p && p.choices && p.preferredChoice === undefined;
   draft = {
-    id: p ? p.id : null, text: p && !needsPick ? p.text : '',
+    id: p ? p.id : null, text: p && !needsPick(p) ? p.text : '',
     choice: p && p.choices && p.preferredChoice !== undefined ? p.preferredChoice : null,
-    alternative: null, confirming: false, status: '', bad: false,
+    alternative: null, picked: false, confirming: false, status: '', bad: false,
   };
 }
 
@@ -153,10 +160,13 @@ function renderCard() {
   const live = s.live === p;
   if (live && draft.id !== p.id) resetDraft(p);
   const card = el('div', { className: 'card' + (live ? '' : ' stale') });
+  const options = setOptions(p);
 
-  const conf = p.intent.confidence === null ? '规则命中' : '置信度 ' + p.intent.confidence.toFixed(2);
+  const conf = p.intent.confidence === null ? '规则命中'
+    : options ? '合计把握 ' + options.reduce((sum, o) => sum + o.confidence, 0).toFixed(2)
+    : '置信度 ' + p.intent.confidence.toFixed(2);
   card.append(el('div', { className: 'meta' },
-    el('span', { className: 'tag', textContent: p.intent.id }),
+    el('span', { className: 'tag', textContent: options ? options.map((o) => o.intentId).join(' / ') : p.intent.id }),
     el('span', { className: 'tag', textContent: p.scenarioId }),
     el('span', { className: 'tag', textContent: conf }),
     p.risk === 'side_effect' ? el('span', { className: 'tag risk', textContent: '有外部副作用' }) : null,
@@ -166,8 +176,22 @@ function renderCard() {
     card.append(el('div', { className: 'context' }, el('b', { textContent: 'Agent 刚才说（节选）：' }), p.context.excerpt));
   }
   if (!live) {
-    card.append(el('div', { textContent: p.text }));
+    card.append(el('div', { textContent: options ? options.map((o) => o.text).join(' / ') : p.text }));
     return box.append(card);
+  }
+
+  if (options) {
+    card.append(el('div', { className: 'status', textContent: '单看哪一项都没有把握，但下一句多半是其中之一。选一项：' }));
+    const group = el('div', { className: 'choices', role: 'radiogroup' });
+    for (const o of options) {
+      const radio = el('input', { type: 'radio', name: 'option', checked: draft.picked && draft.alternative === o.alternative });
+      radio.addEventListener('change', () => {
+        Object.assign(draft, { alternative: o.alternative, choice: null, picked: true, text: o.text, confirming: false });
+        render();
+      });
+      group.append(el('label', {}, radio, el('span', {}, o.text, el('small', { textContent: o.intentId + ' · ' + o.confidence.toFixed(2) }))));
+    }
+    card.append(group);
   }
 
   if (p.choices) {
@@ -183,14 +207,19 @@ function renderCard() {
     card.append(group);
   }
 
-  const area = el('textarea', { value: draft.text, placeholder: p.choices ? '先在上面选一项' : '', ariaLabel: '将要发送的内容' });
-  area.addEventListener('input', () => { draft.text = area.value; draft.confirming = false; sendBtn.disabled = !draft.text.trim(); });
+  const area = el('textarea', { value: draft.text, placeholder: p.choices || options ? '先在上面选一项' : '', ariaLabel: '将要发送的内容' });
+  area.addEventListener('input', () => {
+    draft.text = area.value;
+    draft.confirming = false;
+    sendBtn.disabled = !draft.text.trim();
+    copyBtn.disabled = needsPick(p) && !draft.text.trim();
+  });
   card.append(area);
   if (p.action?.type === 'command') {
     card.append(el('div', { className: 'status', textContent: '不改字直接发送时，将作为命令 ' + p.action.command + ' 执行。' }));
   }
 
-  if (p.alternatives.length) {
+  if (p.alternatives.length && !options) {
     const alts = el('div', { className: 'row alts' }, el('span', { className: 'status', textContent: '或者：' }));
     for (const a of p.alternatives) {
       const b = el('button', { textContent: a.text, title: a.intentId });
@@ -208,7 +237,7 @@ function renderCard() {
   sendBtn.addEventListener('click', () => {
     if (needsConfirm) { draft.confirming = true; render(); } else act('send');
   });
-  const copyBtn = el('button', { textContent: '复制' });
+  const copyBtn = el('button', { textContent: '复制', disabled: needsPick(p) && !draft.text.trim() });
   copyBtn.addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(draft.text || p.text); } catch { /* clipboard may be unavailable */ }
     act('copy');
@@ -235,7 +264,10 @@ function renderCard() {
 function renderLog() {
   const rows = (sessions.get(current)?.log || []).slice(-50).reverse().map((e) => {
     const r = e.result;
-    const outcome = r.type === 'failed' ? '内部错误：' + r.error : r.prediction ? '给出 ' + r.prediction.intent.id : '抑制：' + r.suppressedReason;
+    const shown = r.prediction && (r.prediction.optionSet
+      ? [r.prediction.intent.id, ...r.prediction.alternatives.map((a) => a.intentId)].join(' / ') + '（选项组）'
+      : r.prediction.intent.id);
+    const outcome = r.type === 'failed' ? '内部错误：' + r.error : r.prediction ? '给出 ' + shown : '抑制：' + r.suppressedReason;
     const t = e.trace || {};
     const conf = t.confidence === undefined || t.confidence === null ? '—' : t.confidence.toFixed(2) + (t.threshold === undefined ? '' : ' / ' + t.threshold.toFixed(2));
     return el('tr', {},

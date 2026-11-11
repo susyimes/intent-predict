@@ -87,6 +87,8 @@ export interface Prediction {
   action?: ActionDescriptor;
   choices?: Choice[]; preferredChoice?: number;
   alternatives: Alternative[];
+  /** An option set (SPEC 4.6): the primary and its alternatives are equal options, none preselected. */
+  optionSet?: true;
   source: 'rule' | 'model';
   createdAt: number; usage?: Usage;
 }
@@ -99,6 +101,8 @@ export type EvaluationResult =
 export interface Trace {
   scenarioId?: string; catalog?: string[]; selected?: string; source?: 'rule' | 'model';
   confidence?: number | null; threshold?: number; samplerMode?: SamplerMode;
+  /** The intents of an option set, primary first. */
+  optionSet?: string[];
   signalsJson?: string;
   /** Only with `debugTrace`: unredacted, never sent to a surface. */
   signals?: Signals; prompt?: string;
@@ -113,6 +117,7 @@ export interface EvaluationRecord {
   result: 'delivered' | 'suppressed' | 'failed'; suppressedReason?: SuppressedReason;
   predictionId?: string; qualifiedIntentId?: string; scenarioId?: string; source?: 'rule' | 'model';
   confidence?: number | null; threshold?: number; samplerMode?: SamplerMode; usage?: Usage;
+  optionSet?: true;
 }
 export type Selected =
   | { kind: 'primary' } | { kind: 'choice'; index: number } | { kind: 'alternative'; intentId: string };
@@ -148,6 +153,8 @@ export interface Options {
   enabled: boolean; blockedModes: string[]; settleMs: number; timeoutMs: number; samplerMode: SamplerMode;
   modelBudget?: { maxCallsPerHour: number }; maxPerSession?: number;
   cooldownTurnsAfterDismiss: number; altMinConfidence: number; redact: 'default' | 'strict';
+  /** Offer an option set when the first choice alone is below minConfidence (SPEC 4.6). */
+  optionSets: boolean;
 }
 export interface CoreConfig {
   policy?: Partial<GatePolicy>;

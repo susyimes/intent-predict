@@ -44,9 +44,13 @@ const evaluationOf = (turnId: string) =>
 const describe = (n: Json) => {
   const r = n.params.result;
   const t = n.params.trace ?? {};
-  const what = r.prediction
-    ? `suggests "${r.prediction.text}" (${r.prediction.intent.id}, ${r.prediction.source}${r.prediction.intent.confidence === null ? '' : ' ' + r.prediction.intent.confidence})`
-    : `no suggestion: ${r.suppressedReason}${t.confidence !== undefined && t.confidence !== null ? ` (model said ${t.selected} at ${t.confidence}, needs ${t.threshold})` : ''}`;
+  const p = r.prediction;
+  const what = !p
+    ? `no suggestion: ${r.suppressedReason}${t.confidence !== undefined && t.confidence !== null ? ` (model said ${t.selected} at ${t.confidence}, needs ${t.threshold})` : ''}`
+    : p.optionSet
+      ? `offers an option set (together ≥ ${t.threshold}): ${[{ text: p.text, intentId: p.intent.id, confidence: p.intent.confidence }, ...p.alternatives]
+        .map((o: Json) => `"${o.text}" (${o.intentId} ${o.confidence})`).join(' | ')}`
+      : `suggests "${p.text}" (${p.intent.id}, ${p.source}${p.intent.confidence === null ? '' : ' ' + p.intent.confidence})`;
   return `${n.params.sourceTurnId}  scenario=${t.scenarioId ?? '—'}  ${what}`;
 };
 const PLUMBING_FAILURES = ['sampler_error', 'timeout', 'invalid_model_output', 'unknown_intent', 'no_sampler', 'prompt_too_large'];
@@ -54,6 +58,19 @@ const checks: string[] = [];
 const ok = (what: string) => {
   checks.push(what);
   say(`  ✔ ${what}`);
+};
+/** When the model was unsure and an option set came out, check what SPEC 4.6 promises about it. */
+const checkOptionSet = (n: Json) => {
+  const p = n.params.result.prediction;
+  if (!p?.optionSet) return;
+  const options = [{ intentId: p.intent.id, confidence: p.intent.confidence, risk: p.risk }, ...p.alternatives];
+  const total = options.reduce((sum: number, o: Json) => sum + o.confidence, 0);
+  assert.ok(options.length >= 2 && options.length <= 3, `an option set has 2-3 options, got ${options.length}`);
+  assert.equal(new Set(options.map((o: Json) => o.intentId)).size, options.length, 'options are distinct intents');
+  assert.ok(options.every((o: Json) => o.risk !== 'side_effect'), 'no side-effect intent in a set');
+  assert.ok(p.intent.confidence < n.params.trace.threshold && total >= n.params.trace.threshold - 1e-9, 'alone below, together at or above the threshold');
+  assert.equal(p.confirmBeforeSend, false);
+  ok(`${n.params.sourceTurnId}: an option set of ${options.length}, ${p.intent.confidence} alone, ${total.toFixed(2)} together (threshold ${n.params.trace.threshold})`);
 };
 
 let failed = false;
@@ -84,6 +101,7 @@ try {
   assert.match(readFileSync(join(project, 'math.js'), 'utf8'), /a \+ b/, 'Grok did not fix the file');
   const e1 = await evaluationOf('t1');
   say('    ' + describe(e1));
+  checkOptionSet(e1);
   const s1 = JSON.parse(e1.params.trace.signalsJson);
   assert.equal(e1.params.trace.scenarioId, 'coding.after_edit');
   assert.ok(s1['lastTurn.filesChanged'] >= 1 && s1['lastTurn.checkRuns'] === 0, JSON.stringify(s1));
@@ -107,6 +125,7 @@ try {
   }
   const e2 = await evaluationOf('t2');
   say('    ' + describe(e2));
+  checkOptionSet(e2);
   const s2 = JSON.parse(e2.params.trace.signalsJson);
   assert.ok(!PLUMBING_FAILURES.includes(e2.params.result.suppressedReason), `sampler path broke: ${e2.params.result.suppressedReason}`);
   if (s2['lastTurn.checkRuns'] >= 1) {
@@ -122,6 +141,7 @@ try {
     'Which one should I do next?\n1. Add a subtract function to math.js\n2. Add one more test for add');
   const e3 = await evaluationOf('t3');
   say('    ' + describe(e3));
+  checkOptionSet(e3);
   const p3 = e3.params.result.prediction;
   assert.ok(p3, `expected the options rule to fire, got ${e3.params.result.suppressedReason}`);
   assert.equal(p3.intent.id, 'choose_option');
@@ -142,6 +162,7 @@ try {
   await host.idle();
   const e4 = await evaluationOf('t4');
   say('    ' + describe(e4));
+  checkOptionSet(e4);
 
   // ---- telemetry --------------------------------------------------------------------------------
   await host.stop();

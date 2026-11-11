@@ -14,7 +14,7 @@ import { cpLength, cut, cutStart, isNum, redact, similarity } from './text.ts';
 export const DEFAULT_POLICY: GatePolicy = { minConfidence: 0.6, sideEffectMinConfidence: 0.8 };
 export const DEFAULT_OPTIONS: Options = {
   enabled: true, blockedModes: ['plan'], settleMs: 150, timeoutMs: 4000, samplerMode: 'compact',
-  cooldownTurnsAfterDismiss: 3, altMinConfidence: 0.15, redact: 'default',
+  cooldownTurnsAfterDismiss: 3, altMinConfidence: 0.15, redact: 'default', optionSets: true,
 };
 const MAX_TURNS = 50;
 const MAX_EVENTS = 500;
@@ -185,6 +185,7 @@ export class Core {
     if (trace.confidence !== undefined) record.confidence = trace.confidence;
     if (trace.threshold !== undefined) record.threshold = trace.threshold;
     if (trace.samplerMode) record.samplerMode = trace.samplerMode;
+    if (result.type === 'completed' && result.prediction?.optionSet) record.optionSet = true;
     this.config.telemetry?.(record);
     const params: UpdatedParams = { sessionId: s.id, sourceTurnId: turnId, result, trace, at: record.timestamp };
     s.recent.push(params);
@@ -426,36 +427,69 @@ export class Core {
       runnerUps = runnerUps.slice(0, 2);
     }
 
+    // A runner-up that may be offered next to the primary (4.6 option sets, 4.8 alternatives); one that
+    // fails is dropped silently, it never suppresses the prediction.
+    const offerable = (ru: (typeof runnerUps)[number]): Alternative | undefined => {
+      const it = byId.get(ru.intent)!;
+      if (ru.confidence < opts.altMinConfidence || it.risk === 'side_effect' || cooling(it)) return undefined;
+      try {
+        const slots = ru.slots !== null && typeof ru.slots === 'object' ? (ru.slots as Record<string, unknown>) : {};
+        const alt = renderItem(it, resolveSlots(it, sig, slots, convo), locale);
+        return { intentId: it.id, confidence: ru.confidence, ...alt, risk: it.risk, passThrough: !!it.passThrough };
+      } catch (e) {
+        if (!(e instanceof Suppress)) throw e;
+        return undefined;
+      }
+    };
+
     // 4.6 gate
     trace.selected = selected.id;
     trace.source = source;
     trace.confidence = confidence;
     if (cooling(selected)) throw new Suppress('in_cooldown');
+    let set: { primary: ReturnType<typeof renderItem>; alternatives: Alternative[] } | undefined;
     if (source === 'model') {
       const name = selected.risk === 'side_effect' ? 'sideEffectMinConfidence' : 'minConfidence';
       const threshold = Math.max(this.policy[name], pack.policy?.[name] ?? 0, scn.policy?.[name] ?? 0);
       trace.threshold = threshold;
-      if (confidence! < threshold) throw new Suppress('below_min_confidence');
+      if (confidence! < threshold) {
+        // an option set: the first choice and as few runner-ups as it takes to reach the threshold together
+        const reached = (sum: number) => sum >= threshold - 1e-9;
+        let first: ReturnType<typeof renderItem> | undefined;
+        const others: Alternative[] = [];
+        let sum = confidence!;
+        if (opts.optionSets && selected.risk !== 'side_effect' && confidence! >= opts.altMinConfidence) {
+          try {
+            first = renderItem(selected, resolveSlots(selected, sig, modelSlots, convo), locale);
+          } catch (e) {
+            if (!(e instanceof Suppress)) throw e;
+          }
+          for (const ru of first ? runnerUps : []) {
+            if (reached(sum)) break;
+            const member = offerable(ru);
+            if (member) {
+              others.push(member);
+              sum += member.confidence;
+            }
+          }
+        }
+        if (!first || !others.length || !reached(sum)) throw new Suppress('below_min_confidence');
+        set = { primary: first, alternatives: others };
+        trace.optionSet = [selected.id, ...others.map((o) => o.intentId)];
+      }
     }
 
     // 4.7 slots, rendering, output checks
-    const primary = choices
-      ? { slots: choices[preferred ?? 0]!.slots, text: choices[preferred ?? 0]!.text, action: undefined }
-      : renderItem(selected, resolveSlots(selected, sig, modelSlots, convo), locale);
+    const primary = set
+      ? set.primary
+      : choices
+        ? { slots: choices[preferred ?? 0]!.slots, text: choices[preferred ?? 0]!.text, action: undefined }
+        : renderItem(selected, resolveSlots(selected, sig, modelSlots, convo), locale);
 
     // 4.8 assembly
-    const alternatives: Alternative[] = [];
-    for (const ru of runnerUps) {
-      const it = byId.get(ru.intent)!;
-      if (ru.confidence < opts.altMinConfidence || it.risk === 'side_effect' || cooling(it)) continue;
-      try {
-        const slots = ru.slots !== null && typeof ru.slots === 'object' ? (ru.slots as Record<string, unknown>) : {};
-        const alt = renderItem(it, resolveSlots(it, sig, slots, convo), locale);
-        alternatives.push({ intentId: it.id, confidence: ru.confidence, ...alt, risk: it.risk, passThrough: !!it.passThrough });
-      } catch (e) {
-        if (!(e instanceof Suppress)) throw e;             // a runner-up that fails is dropped silently
-      }
-    }
+    const alternatives: Alternative[] = set
+      ? set.alternatives
+      : runnerUps.map(offerable).filter((a): a is Alternative => a !== undefined);
 
     const prediction: Prediction = {
       id: this.config.newId?.() ?? `p-${Date.now().toString(36)}-${++this.seq}`,
@@ -468,6 +502,7 @@ export class Core {
       alternatives, source, createdAt: this.now(),
     };
     if (primary.action) prediction.action = primary.action;
+    if (set) prediction.optionSet = true;
     if (choices) {
       prediction.choices = choices;
       if (preferred !== undefined) prediction.preferredChoice = preferred;
@@ -490,7 +525,10 @@ export class Core {
     const p = s.live?.id === params.predictionId ? s.live : undefined;
     if (!p) return 'stale';
     if (params.action === 'dismiss') {
-      s.cooldown.set(`${p.packId}/${p.scenarioId}#${p.intent.id}`, s.turnCount + this.options.cooldownTurnsAfterDismiss);
+      // the user turned down every option of a set, not just the first
+      for (const id of [p.intent.id, ...(p.optionSet ? p.alternatives.map((a) => a.intentId) : [])]) {
+        s.cooldown.set(`${p.packId}/${p.scenarioId}#${id}`, s.turnCount + this.options.cooldownTurnsAfterDismiss);
+      }
       this.finalize(s, 'dismissed');
       this.invalidate(s, 'resolved');
       return 'recorded';

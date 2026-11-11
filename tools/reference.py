@@ -34,6 +34,7 @@ DEFAULT_OPTIONS = {
     "cooldownTurnsAfterDismiss": 3,
     "altMinConfidence": 0.15,
     "redact": "default",
+    "optionSets": True,
 }
 KNOWN_EVENTS = {
     "turn.started", "message.user", "message.agent", "tool.call",
@@ -886,36 +887,59 @@ class Core:
                     runner_ups.append(ru)
             runner_ups = runner_ups[:2]
 
+        def offerable(ru):
+            """A runner-up that may be offered next to the primary (4.6 option sets, 4.8 alternatives)."""
+            it = by_id[ru["intent"]]
+            if ru["confidence"] < opts["altMinConfidence"] or it["risk"] == "side_effect" or cooling(it):
+                return None
+            try:
+                alt = render_item(it, resolve_slots(it, sig, ru.get("slots") if isinstance(ru.get("slots"), dict) else {}, convo), locale)
+            except Suppress:
+                return None
+            return {"intentId": it["id"], "confidence": ru["confidence"], **alt,
+                    "risk": it["risk"], "passThrough": bool(it.get("passThrough"))}
+
         # 4.6 gate
         self.trace["selected"] = selected["id"]
         if cooling(selected):
             raise Suppress("in_cooldown")
+        option_set = None
         if source == "model":
             name = "sideEffectMinConfidence" if selected["risk"] == "side_effect" else "minConfidence"
             threshold = max(self.policy[name], pack.get("policy", {}).get(name, 0), scn.get("policy", {}).get(name, 0))
             self.trace["threshold"] = threshold
             if confidence < threshold:
-                raise Suppress("below_min_confidence")
+                # an option set: the first choice and as few runner-ups as it takes to reach the threshold together
+                reached = lambda total: total >= threshold - 1e-9  # noqa: E731
+                first, others, total = None, [], confidence
+                if opts["optionSets"] and selected["risk"] != "side_effect" and confidence >= opts["altMinConfidence"]:
+                    try:
+                        first = render_item(selected, resolve_slots(selected, sig, model_slots, convo), locale)
+                    except Suppress:
+                        first = None
+                    for ru in runner_ups if first else []:
+                        if reached(total):
+                            break
+                        member = offerable(ru)
+                        if member:
+                            others.append(member)
+                            total += member["confidence"]
+                if not first or not others or not reached(total):
+                    raise Suppress("below_min_confidence")
+                option_set = (first, others)
+                self.trace["optionSet"] = [selected["id"]] + [o["intentId"] for o in others]
 
         # 4.7 slots, rendering, output checks
-        if choices:
+        if option_set:
+            primary = option_set[0]
+        elif choices:
             primary = choices[preferred or 0]
             primary = {"slots": primary["slots"], "text": primary["text"]}
         else:
             primary = render_item(selected, resolve_slots(selected, sig, model_slots, convo), locale)
 
         # 4.8 assembly
-        alternatives = []
-        for ru in runner_ups:
-            it = by_id[ru["intent"]]
-            if ru["confidence"] < opts["altMinConfidence"] or it["risk"] == "side_effect" or cooling(it):
-                continue
-            try:
-                alt = render_item(it, resolve_slots(it, sig, ru.get("slots") if isinstance(ru.get("slots"), dict) else {}, convo), locale)
-            except Suppress:
-                continue
-            alternatives.append({"intentId": it["id"], "confidence": ru["confidence"], **alt,
-                                 "risk": it["risk"], "passThrough": bool(it.get("passThrough"))})
+        alternatives = option_set[1] if option_set else [a for a in map(offerable, runner_ups) if a]
 
         self.seq += 1
         prediction = {
@@ -930,6 +954,8 @@ class Core:
         }
         if "action" in primary:
             prediction["action"] = primary["action"]
+        if option_set:
+            prediction["optionSet"] = True
         if choices:
             prediction["choices"] = choices
             if preferred is not None:
@@ -953,8 +979,10 @@ class Core:
         if not live:
             return "stale", None, []
         if action == "dismiss":
-            key = f"{p['packId']}/{p['scenarioId']}#{p['intent']['id']}"
-            s.cooldown[key] = len(s.completed) + self.options["cooldownTurnsAfterDismiss"]
+            # the user turned down every option of a set, not just the first
+            for intent_id in [p["intent"]["id"]] + ([a["intentId"] for a in p["alternatives"]] if p.get("optionSet") else []):
+                s.cooldown[f"{p['packId']}/{p['scenarioId']}#{intent_id}"] = \
+                    len(s.completed) + self.options["cooldownTurnsAfterDismiss"]
             return "recorded", None, [self._finalize(s, "dismissed")] + self._invalidate(s, "resolved")
 
         item, selected, needs_confirm = p, {"kind": "primary"}, p["confirmBeforeSend"]

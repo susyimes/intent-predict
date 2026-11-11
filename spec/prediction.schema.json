@@ -272,6 +272,10 @@
             "$ref": "#/$defs/Alternative"
           }
         },
+        "optionSet": {
+          "const": true,
+          "description": "Present only on an option set (SPEC 4.6): the primary was not likely enough on its own, it and its alternatives together are. Surfaces show them as equal options and preselect none."
+        },
         "source": {
           "type": "string",
           "enum": [
