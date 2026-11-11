@@ -2,9 +2,13 @@
 
 **intent-predict** 在一轮 agent 回复结束后，预测用户下一条消息——不是续写一句自由文本，而是从当前场景的**封闭意图目录里选一项，或者什么都不给**。它与宿主无关：宿主只负责上报会话事件、借出自己的模型；建议显示在一个独立的界面上；不经用户亲手点发送，什么都不会发出去。
 
-> **当前状态：v0.5**——规范重写为只覆盖第一阶段（单会话观察 × 纯建议），并附带 Phase 1 参考实现。
+> **当前状态：v0.5，Phase 1（单会话观察 × 纯建议）**。规范只覆盖这一阶段，附带参考实现，以及一个能驱动 Grok、Hermes、Codex、Kimi、Claude Code 五家命令行的宿主。
 >
-> - 已验证：99 条黄金用例在两套独立实现（Python 参考求值器、TypeScript 核心）上全部通过；sidecar 协议测试；自带网页在无头 Chrome 里实际操作通过；对本机 Grok CLI 1.0.77 的端到端跑通（事件、信号、借模型采样、从界面发送）。
+> - 已验证：
+>   - 99 条黄金用例在两套独立实现（Python 参考求值器、TypeScript 核心）上全部通过。
+>   - sidecar 协议、会话绑定和五个 Agent 适配器都有单元测试，用的是实测录下的事件格式和测试替身。
+>   - 自带网页在无头 Chrome 里实际操作通过。
+>   - 对 Grok CLI 1.0.77 的端到端检查通过；对 Hermes 0.22、Codex 0.159、Kimi Code 2.5、Claude Code 2.1.322 的实机检查也都通过。
 > - **没验证**：预测得准不准。还没有任何回放数据，默认阈值都是占位值。这是进入下一阶段前必须补的一项，见 [ROADMAP.md](ROADMAP.md)。
 
 ## 一个例子
@@ -52,7 +56,9 @@ flowchart LR
   C -->|"dispatch/message（钉在所属轮次，只发一次）"| H
 ```
 
-本仓库自带一个界面（本机回环地址上的一个网页，零宿主 UI 改动）。界面是协议里的一个角色，不是限制：宿主想在自己的输入框里呈现建议，用同一套消息即可。
+会话绑定（`binding/list`、`binding/bind`）由界面发起，经核心转给宿主。宿主据此改为驱动本机上某个已有的 Agent 会话。
+
+本仓库自带一个界面，是本机回环地址上的两个网页：「下一步建议」页显示建议，「选择会话」页用来绑定会话。宿主自己的 UI 不用改。界面只是协议里的一个角色，不是限制：宿主想在自己的输入框里呈现建议，用同一套消息即可。
 
 ## 跑起来
 
@@ -60,20 +66,46 @@ flowchart LR
 
 ```bash
 npm install                     # 唯一的运行时依赖是 yaml
-npm test                        # 黄金用例一致性 + sidecar 协议 + Grok 事件映射
+npm test                        # 黄金用例一致性、sidecar 协议、会话绑定、五个 Agent 适配器（全用测试替身，不调真模型）
 npm run typecheck
 pip install jsonschema pyyaml && python tools/validate.py   # 规范、契约、用例、文档互相一致
 ```
 
-用本机的 Agent 命令行当宿主试用（Grok、Hermes、Codex、Kimi、Claude Code 任选，需已登录）：
+### 用本机的 Agent 当宿主
+
+先装好并登录要用的 Agent 命令行，然后：
 
 ```bash
-node packages/host-grok/src/main.ts --agent grok --cwd <你的项目> -- --allow search_replace
-# --agent 也可以是 hermes / codex / kimi / claude；终端里和它对话，启动时打印的网页地址里看「下一步建议」
-# 网页顶部的「选择会话」可嗅探本机活跃 AI 会话，并热绑定 Grok / Hermes / Codex / Kimi / Claude Code 会话
-#   （绑定时还原近 3 轮；刷新页面同步外部新轮次；建议由该会话自己的 Agent 用默认模型挑）
-# 发出的消息按该 Agent 自己的审批规则执行，宿主收到的权限请求一律拒绝；`--` 后的 --allow 只对 Grok 有效
-# 太难出建议时加 --eagerness eager；可用 --min-confidence/--side-effect-min-confidence/--alt-min-confidence/--cooldown-turns 细调
+node packages/host-grok/src/main.ts --agent claude --cwd <你的项目>
+# --agent 可选 grok（默认）/ hermes / codex / kimi / claude
+# 续接已有会话：--resume <会话 ID>
+# --model 只对 Grok 有效；其余几家都用各自的默认模型
+# 建议太少时加 --eagerness eager；还可用 --min-confidence、--side-effect-min-confidence、--alt-min-confidence、--cooldown-turns 细调
+```
+
+启动后在终端里和 Agent 对话，终端会打印两个网页地址：
+
+- **「下一步建议」页**：每轮结束后显示建议卡片，可以先改字。点「发给 Agent」才会作为你的下一条消息发出，也可以只复制。
+- **「选择会话」页**：列出本机活跃的 AI 会话。绑定后，宿主改为驱动这个会话：
+  - 先还原最近 3 轮，并立即求值；
+  - 之后你在原工具里继续的轮次，刷新页面就会同步进来；
+  - 经宿主发出的消息续接这个会话。
+
+五家的接法如下，实测细节见 [docs/design.md](docs/design.md)。
+
+| Agent | 宿主怎么驱动它 | 谁来挑建议 | 发出的消息怎么审批 |
+|---|---|---|---|
+| Grok | 无头模式，`--resume` 续接 | Grok 自己。不带工具，推理强度调低，用完删掉临时会话 | 没被允许的工具调用一律拒绝。`--` 后面的参数原样传给每一轮，如 `-- --allow search_replace` |
+| Hermes | `hermes chat --oneshot`。不用 `-z`，因为它会自动批准危险命令 | Hermes 自己。只给没有副作用的 `clarify` 工具集，用完删除会话 | 按 Hermes 的单次查询审批设置处理，默认拒绝危险命令 |
+| Codex | `codex exec --json resume <id>` | Codex 自己。`--ephemeral` 加只读沙箱，不写会话文件 | `exec` 从不询问，能做什么由你配置的沙箱决定 |
+| Kimi | ACP（`kimi acp`）。不用 `-p`，因为它会强制自动执行一切 | Kimi 自己。用临时 ACP 会话，用完删除 | 会话保持自己的权限模式，权限请求一律拒绝 |
+| Claude Code | `claude -p --resume <id> --permission-prompts none` | Claude 自己。用默认模型，推理强度调低，不带工具、钩子和 MCP，不写会话文件 | 会话自己的权限规则决定哪些操作不用问，需要询问的一律拒绝 |
+
+挑建议时，宿主把会话最近几轮的节选（已脱敏）交给这个会话自己的 Agent，用它的默认模型来挑，内容不会发给别家。
+
+Claude Code 会话如果还在别的终端里开着，就不能从网页发送，因为 Claude 只允许一个进程续接会话。这时建议照常出现，可以复制后贴过去。
+
+```bash
 npm run e2e:grok                # 在一次性目录里对真实 Grok 跑一遍端到端检查（花费几美分）
 npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自带网页
 ```
@@ -87,7 +119,8 @@ npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自�
 - **宁缺毋滥**：任何守卫命中、未识别场景、模型异常、校验失败、超时，结果都是不给建议，并记录 24 种 `SuppressedReason` 之一。
 - **发送必须是用户的显式动作，且钉在所属轮次**：过期的「可以，继续」到不了另一个提问；同一条建议最多发一次；有外部副作用的意图多一步确认。
 - **「照你说的办」类意图特殊对待**：agent 的提议看起来涉及推送、发布、删除时，这类一键同意不会被提供；提供时必须连同 agent 的原话一起显示。
-- **零配置借用宿主模型**：不需要为它单独配 API Key。
+- **零配置借用宿主模型**：不需要单独配 API Key。绑定的会话由它自己的 Agent 用默认模型挑建议；这次调用不带工具，也不在会话里留下记录。
+- **不替用户批准任何事**：宿主驱动的轮次走该 Agent 自己的审批规则，不用任何自动批准的模式，Agent 发来的权限请求一律拒绝。
 - **场景包只能收紧阈值**：仓库里带来的 `INTENTS.md` 不能把门槛调得比宿主更松，且必须显式启用。
 
 ## 和 Codex composer predictions 的区别
@@ -95,7 +128,7 @@ npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自�
 | | Codex composer predictions | intent-predict |
 |---|---|---|
 | 预测什么 | 一句开放文本 | 封闭目录中的一项或 `none`，附槽位与可选动作 |
-| 在哪用 | Codex 桌面版 | 任意宿主（已接通 Grok CLI），经 sidecar 的 JSON-RPC 接入 |
+| 在哪用 | Codex 桌面版 | 任意宿主，经 sidecar 的 JSON-RPC 接入；已接通 Grok、Hermes、Codex、Kimi、Claude Code 的命令行 |
 | 何时出现 | 策略未公开 | 写在规范里：守卫、场景路由、置信度门槛、冷却 |
 | 如何评估 | 接受率 | 可回放的分类指标；接受率只是其中之一 |
 
@@ -111,9 +144,10 @@ npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自�
 | [eval/golden.jsonl](eval/golden.jsonl) | 黄金用例，覆盖全部抑制原因，含录制的模型输出 |
 | [tools/](tools/) | `reference.py` 参考求值器（测试基准，不是产品）、`validate.py` 一致性校验、`build_pack.py` |
 | [packages/core](packages/core) | 核心：信号、路由、规则、模型分类、门控、渲染、发送与结果规则 |
-| [packages/sidecar](packages/sidecar) | stdio JSON-RPC 服务 + 自带界面（单个网页，HTTP + SSE，仅回环地址） |
-| [packages/host-grok](packages/host-grok) | Grok CLI 宿主适配：事件映射、采样、发送 |
-| [ROADMAP.md](ROADMAP.md) · [docs/design.md](docs/design.md) · [docs/future.md](docs/future.md) | 阶段计划 · 设计理由与决策 · 后续阶段的非规范草案 |
+| [packages/sidecar](packages/sidecar) | stdio JSON-RPC 服务 + 自带界面（「下一步建议」与「选择会话」两个网页，HTTP + SSE，仅回环地址） |
+| [packages/host-grok](packages/host-grok) | Agent 命令行宿主（包名沿用最初的 Grok 宿主）：Grok、Hermes、Codex、Kimi、Claude Code 五个适配器，负责驱动回合、还原历史、借模型挑建议、接收发送；以及本机会话的嗅探与绑定 |
+| [ROADMAP.md](ROADMAP.md) · [docs/design.md](docs/design.md) · [docs/future.md](docs/future.md) | 阶段计划与实测记录 · 设计理由与决策 · 后续阶段的非规范草案 |
+| [docs/diagrams.md](docs/diagrams.md) · [docs/review-issues.md](docs/review-issues.md) · [docs/prior-art.md](docs/prior-art.md) | 说明图 · 审查和实测中发现的问题及处理 · 同类产品调研 |
 
 ## 许可证
 
