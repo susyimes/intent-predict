@@ -120,3 +120,29 @@ test('discovers Hermes sessions from its SQLite store, including named profiles'
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('sessions whose id or profile could act as an option are listed but not bindable', () => {
+  const home = mkdtempSync(join(tmpdir(), 'ip-sessions-unsafe-'));
+  const hermesHome = join(home, 'hermes');
+  const now = Date.now();
+  const s = Math.floor(now / 1000);
+  try {
+    const registry = join(home, '.grok', 'active_sessions.json');
+    mkdirSync(dirname(registry), { recursive: true });
+    writeFileSync(registry, JSON.stringify([
+      { session_id: '--always-approve', pid: process.pid, cwd: 'D:\\work', opened_at: iso(now) },
+      { session_id: 'g-plain', pid: process.pid, cwd: 'D:\\work', opened_at: iso(now) },
+    ]));
+    makeHermesDb(join(hermesHome, 'state.db'), [['--yolo', null, 'D:\\x', s - 60, s - 60, 0]], []);
+    makeHermesDb(join(hermesHome, 'profiles', '-bad', 'state.db'), [['hp-2', null, 'D:\\y', s - 60, s - 60, 0]], []);
+
+    const byId = new Map(discoverSessions({ home, now, hermesHome }).map((x) => [x.id, x]));
+    assert.equal(byId.get('--always-approve')?.bindable, false);
+    assert.equal(byId.get('g-plain')?.bindable, true);
+    assert.equal(byId.get('--yolo')?.bindable, false);
+    assert.equal(byId.get('hp-2')?.profile, '-bad');
+    assert.equal(byId.get('hp-2')?.bindable, false, 'a profile that could act as an option makes its sessions unbindable');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

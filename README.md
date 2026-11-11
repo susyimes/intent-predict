@@ -70,7 +70,7 @@ pip install jsonschema pyyaml && python tools/validate.py   # 规范、契约、
 ```bash
 node packages/host-grok/src/main.ts --cwd <你的项目> -- --allow search_replace
 # 终端里和 Grok 对话；启动时打印的网页地址里看「下一步建议」
-# 网页顶部的「选择会话」可嗅探本机活跃 AI 会话，并热绑定 Grok / Hermes 会话（绑定时还原近 3 轮；刷新页面同步外部新轮次）
+# 网页顶部的「选择会话」可嗅探本机活跃 AI 会话，并热绑定 Grok / Hermes 会话（绑定时还原近 3 轮；刷新页面同步外部新轮次；求值时这些轮次的节选会发给 Grok 的模型）
 # 太难出建议时加 --eagerness eager；可用 --min-confidence/--side-effect-min-confidence/--alt-min-confidence/--cooldown-turns 细调
 npm run e2e:grok                # 在一次性目录里对真实 Grok 跑一遍端到端检查（花费几美分）
 npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自带网页

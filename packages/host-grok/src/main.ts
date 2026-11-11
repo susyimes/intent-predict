@@ -10,6 +10,7 @@
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { GrokHost } from './host.ts';
+import { isSafeName } from './sessions.ts';
 
 const argv = process.argv.slice(2);
 const split = argv.indexOf('--');
@@ -51,6 +52,10 @@ if (cooldownTurnsAfterDismiss !== undefined
   && (!Number.isInteger(cooldownTurnsAfterDismiss) || cooldownTurnsAfterDismiss < 0)) {
   fail('--cooldown-turns must be a non-negative integer');
 }
+const resume = flag('--resume');
+if (resume !== undefined && !isSafeName(resume)) {
+  fail(`--resume needs a session id (letters, digits, '.', '_' or '-', starting with a letter or digit)`);
+}
 
 const cwd = resolve(flag('--cwd') ?? process.cwd());
 const dim = (s: string) => `\u001b[2m${s}\u001b[0m`;
@@ -61,7 +66,7 @@ const say = (s: string) => {
 };
 
 const host = new GrokHost({
-  cwd, grokArgs, model: flag('--model'), resume: flag('--resume'), logPath: flag('--log'),
+  cwd, grokArgs, model: flag('--model'), resume, logPath: flag('--log'),
   eagerness,
   minConfidence: confidenceFlag('--min-confidence'),
   sideEffectMinConfidence: confidenceFlag('--side-effect-min-confidence'),

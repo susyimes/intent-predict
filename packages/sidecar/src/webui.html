@@ -266,13 +266,16 @@ function render() {
 
 function onNotification(msg) {
   const p = msg.params;
-  const s = sessionOf(p.sessionId);
   if (msg.method === 'binding/changed') {
     bound = p.bound || null;
-    if (p.sessionId) current = p.sessionId;
+    if (p.sessionId) {
+      sessionOf(p.sessionId);
+      current = p.sessionId;
+    }
     render();
     return;
   }
+  const s = sessionOf(p.sessionId);
   if (msg.method === 'prediction/updated') {
     s.log.push({ ...p, at: p.at || Date.now() });
     if (p.result.type === 'completed' && p.result.prediction) { s.live = p.result.prediction; s.stale = null; }

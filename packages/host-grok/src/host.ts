@@ -4,14 +4,14 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { INVALID_PARAMS, RpcError, SAMPLER_ABORTED, SESSION_BUSY, TURN_MISMATCH } from '../../core/src/index.ts';
 import type { AgentEvent } from '../../core/src/index.ts';
 import { RpcPeer } from '../../sidecar/src/rpc.ts';
 import { TurnMapper, deleteGrokSession, grokAdvanced, grokFingerprint, readGrokHistory, runGrok, sampleWithGrok } from './grok.ts';
 import { hermesAdvanced, hermesFingerprint, hermesTurnArgs, hermesTurnEvents, readHermesHistory, runHermes } from './hermes.ts';
-import { discoverSessions, hermesHomePath } from './sessions.ts';
+import { discoverSessions, hermesHomePath, isSafeName, safeName } from './sessions.ts';
 import type { GrokLine } from './grok.ts';
 
 const SIDECAR = fileURLToPath(new URL('../../sidecar/src/main.ts', import.meta.url));
@@ -64,7 +64,7 @@ export class GrokHost {
   lastCompletedTurn: string | undefined;
   busy = false;
   private readonly opts: GrokHostOptions;
-  private readonly scratch = mkdtempSync(join(tmpdir(), 'intent-predict-'));
+  private scratchDir: string | undefined;
   private sidecar: ChildProcess | undefined;
   private peer: RpcPeer | undefined;
   private sampling: AbortController | undefined;
@@ -106,10 +106,14 @@ export class GrokHost {
       cooldownTurnsAfterDismiss: opts.cooldownTurnsAfterDismiss ?? (eager ? 0 : undefined),
     };
     this.opts = opts;
-    this.grokSessionId = opts.resume;
+    this.grokSessionId = opts.resume === undefined ? undefined : safeName(opts.resume, 'resume');
     this.cwdNow = opts.cwd;
   }
   private info(message: string) { this.opts.onInfo?.(message); }
+  /** Prompt files and the sampler's working directory; created on first use, removed by stop(). */
+  private get scratch(): string {
+    return (this.scratchDir ??= mkdtempSync(join(tmpdir(), 'intent-predict-')));
+  }
 
   async start(): Promise<void> {
     const args = [SIDECAR, 'serve', '--stdio'];
@@ -165,9 +169,11 @@ export class GrokHost {
   private bind(params: Record<string, unknown>): { bound: BoundRef; sessionId: string; replayedTurns: number } {
     const { kind, id, cwd, profile } = params;
     if (kind !== 'grok' && kind !== 'hermes') throw new RpcError(INVALID_PARAMS, 'this host can only bind grok or hermes sessions');
-    if (typeof id !== 'string' || !id) throw new RpcError(INVALID_PARAMS, 'binding/bind needs an id');
-    if (typeof cwd !== 'string' || !cwd) throw new RpcError(INVALID_PARAMS, 'binding/bind needs a cwd');
-    if (profile !== undefined && (typeof profile !== 'string' || !profile)) throw new RpcError(INVALID_PARAMS, 'profile must be a non-empty string');
+    // ids and profiles reach `grok --resume` / `hermes -p` and store paths: plain names only
+    const plain = "a plain name (letters, digits, '.', '_' or '-', starting with a letter or digit)";
+    if (!isSafeName(id)) throw new RpcError(INVALID_PARAMS, `the session id must be ${plain}`);
+    if (profile !== undefined && !isSafeName(profile)) throw new RpcError(INVALID_PARAMS, `the profile must be ${plain}`);
+    if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw new RpcError(INVALID_PARAMS, 'binding/bind needs an absolute cwd');
     let isDir = false;
     try {
       isDir = statSync(cwd).isDirectory();
@@ -189,17 +195,20 @@ export class GrokHost {
     this.synced = { kind, id, cwd, profile: kind === 'hermes' ? profile : undefined, fingerprint: 0 };
     const replayedTurns = this.syncBoundHistory();
     this.info(`bound to ${kind} session ${id} (cwd: ${cwd})`);
+    if (kind === 'hermes') {
+      this.info("evaluation uses Grok's model: excerpts of this Hermes session's recent turns (redacted) are sent to Grok");
+    }
     return { bound: this.bound()!, sessionId: this.sessionId, replayedTurns };
   }
 
   private grokHistoryFile(cwd: string, id: string): string {
-    return join(homedir(), '.grok', 'sessions', encodeURIComponent(cwd), id, 'updates.jsonl');
+    return join(homedir(), '.grok', 'sessions', encodeURIComponent(cwd), safeName(id, 'session id'), 'updates.jsonl');
   }
 
   private hermesDbCandidates(profile?: string): string[] {
     const root = hermesHomePath(homedir(), this.opts.hermesHome);
     return profile
-      ? [join(root, 'profiles', profile, 'state.db'), join(root, 'state.db')]
+      ? [join(root, 'profiles', safeName(profile, 'profile'), 'state.db'), join(root, 'state.db')]
       : [join(root, 'state.db')];
   }
 
@@ -365,8 +374,8 @@ export class GrokHost {
       }
       this.observe(events);
     };
-    const args = hermesTurnArgs(text, { sessionId: this.hermesSessionId, profile: this.hermesProfile });
     try {
+      const args = hermesTurnArgs(text, { sessionId: this.hermesSessionId, profile: this.hermesProfile });
       const { code, stdout, stderr } = await runHermes(args, { cwd: this.cwdNow, bin: this.opts.hermesBin });
       if (stdout.trim()) this.opts.onLine?.({ type: 'text', data: stdout });
       if (code !== 0 || stderr.trim()) this.info(`hermes exited with ${code}${stderr.trim() ? ': ' + stderr.trim().split('\n')[0] : ''}`);
@@ -392,11 +401,12 @@ export class GrokHost {
         }
         this.observe(events);
       };
-      const args = ['--prompt-file', this.promptFile(text), '--output-format', 'streaming-json', '--no-subagents'];
-      if (this.grokSessionId) args.push('--resume', this.grokSessionId);
-      if (this.opts.model) args.push('--model', this.opts.model);
-      args.push(...(this.opts.grokArgs ?? []));
       try {
+        const args = ['--prompt-file', this.promptFile(text), '--output-format', 'streaming-json', '--no-subagents'];
+        // never let a session id reach grok as an option: the turn fails instead
+        if (this.grokSessionId) args.push('--resume', safeName(this.grokSessionId, 'session id'));
+        if (this.opts.model) args.push('--model', this.opts.model);
+        args.push(...(this.opts.grokArgs ?? []));
         const { code, stderr } = await runGrok(args, {
           cwd: this.cwdNow, bin: this.opts.bin,
           onLine: (line) => {
@@ -404,7 +414,7 @@ export class GrokHost {
             forward(mapper.push(line));
           },
         });
-        if (mapper.sessionId) this.grokSessionId = mapper.sessionId;
+        if (isSafeName(mapper.sessionId)) this.grokSessionId = mapper.sessionId;
         if (code !== 0 || stderr.trim()) this.info(`grok exited with ${code}${stderr.trim() ? ': ' + stderr.trim().split('\n')[0] : ''}`);
       } catch (e) {
         this.info(`could not run grok: ${(e as Error).message}`);
@@ -422,6 +432,6 @@ export class GrokHost {
     await Promise.all(this.cleanups);
     this.sidecar?.stdin?.end();
     await new Promise<void>((resolve) => (this.sidecar && this.sidecar.exitCode === null ? this.sidecar.once('exit', () => resolve()) : resolve()));
-    rmSync(this.scratch, { recursive: true, force: true });
+    if (this.scratchDir) rmSync(this.scratchDir, { recursive: true, force: true });
   }
 }

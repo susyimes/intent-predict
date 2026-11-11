@@ -14,6 +14,12 @@ test('a bound turn resumes the session in one-shot mode', () => {
   assert.deepEqual(hermesTurnArgs('你好', {}), ['-z', '你好']);
 });
 
+test('a session id or profile that hermes would read as an option never reaches its command line', () => {
+  assert.throws(() => hermesTurnArgs('继续', { sessionId: '--yolo' }), /session id must be a plain name/);
+  assert.throws(() => hermesTurnArgs('继续', { sessionId: 'h-1', profile: '-x' }), /profile must be a plain name/);
+  assert.throws(() => hermesTurnArgs('继续', { sessionId: '../h-1' }), /session id must be a plain name/);
+});
+
 test('one-shot output maps to a final agent message and a completed turn', () => {
   const events = hermesTurnEvents('t1', { code: 0, stdout: '做完了。\n要不要跑一下测试？\n' });
   assert.deepEqual(events.map((e) => e.type), ['message.agent', 'turn.completed']);

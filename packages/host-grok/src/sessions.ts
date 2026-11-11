@@ -2,7 +2,8 @@
 // surface can offer them for binding. Discovery reads metadata only (ids, cwds, titles,
 // timestamps) and never conversation bodies. Only Grok registers its live sessions; elsewhere
 // "active" means recent activity in the store. Grok and Hermes sessions are bindable from this
-// host: their turns are driven headlessly (`grok --resume`, `hermes -z --resume`).
+// host when their ids are plain names (see isSafeName): their turns are driven headlessly
+// (`grok --resume`, `hermes -z --resume`).
 import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -69,6 +70,24 @@ const epoch = (value: unknown): number | undefined => {
   return Number.isFinite(ms) ? ms : undefined;
 };
 
+/**
+ * Session ids and profile names end up on command lines (`grok --resume <id>`, `hermes -p <profile>`)
+ * and in store paths. A leading `-` would be parsed as a flag (`grok --resume --always-approve`
+ * resumes the latest session and approves every tool), and separators or `..` would leave the
+ * store, so only plain names are accepted.
+ */
+const PLAIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+export function isSafeName(value: unknown): value is string {
+  return typeof value === 'string' && PLAIN_NAME.test(value) && !value.includes('..');
+}
+/** Returns `value` when it is a plain name, and throws otherwise. */
+export function safeName(value: string, what: string): string {
+  if (!isSafeName(value)) {
+    throw new Error(`${what} must be a plain name (letters, digits, '.', '_' or '-', starting with a letter or digit): ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
 /** Grok: the live registry at ~/.grok/active_sessions.json, enriched from each summary.json. */
 function grokSessions(home: string): DiscoveredSession[] {
   let registry: unknown;
@@ -83,10 +102,11 @@ function grokSessions(home: string): DiscoveredSession[] {
     const id = entry?.session_id;
     const cwd = entry?.cwd;
     if (typeof id !== 'string' || typeof cwd !== 'string' || typeof entry?.pid !== 'number' || !alive(entry.pid)) continue;
-    const summary = jsonFile(join(home, '.grok', 'sessions', encodeURIComponent(cwd), id, 'summary.json'));
+    const plain = isSafeName(id);
+    const summary = plain ? jsonFile(join(home, '.grok', 'sessions', encodeURIComponent(cwd), id, 'summary.json')) : undefined;
     const title = summary?.generated_title ?? summary?.session_summary;
     const session: DiscoveredSession = {
-      kind: 'grok', id, cwd, running: true, bindable: true,
+      kind: 'grok', id, cwd, running: true, bindable: plain,
       updatedAt: epoch(summary?.last_active_at ?? summary?.updated_at) ?? epoch(entry.opened_at),
     };
     if (typeof title === 'string' && title) session.title = title;
@@ -231,6 +251,7 @@ function hermesDbSessions(dbFile: string, profile: string | undefined, cutoffSec
       if (typeof r.title === 'string' && r.title) session.title = r.title;
       const named = profile ?? (typeof r.profile_name === 'string' && r.profile_name && r.profile_name !== 'default' ? r.profile_name : undefined);
       if (named) session.profile = named;
+      session.bindable = isSafeName(session.id) && (!named || isSafeName(named));
       return session;
     });
   } finally {

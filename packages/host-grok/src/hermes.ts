@@ -6,13 +6,14 @@ import { spawn } from 'node:child_process';
 import { isAbsolute, relative } from 'node:path';
 import type { AgentEvent, ToolCall, ToolResult } from '../../core/src/index.ts';
 import type { HistoryReplay } from './grok.ts';
-import { loadSqlite } from './sessions.ts';
+import { loadSqlite, safeName } from './sessions.ts';
 
+/** Throws when the session id or profile could be read as an option (see isSafeName). */
 export function hermesTurnArgs(text: string, opts: { sessionId?: string; profile?: string }): string[] {
   const args: string[] = [];
-  if (opts.profile) args.push('-p', opts.profile);
+  if (opts.profile) args.push('-p', safeName(opts.profile, 'profile'));
   args.push('-z', text);
-  if (opts.sessionId) args.push('--resume', opts.sessionId);
+  if (opts.sessionId) args.push('--resume', safeName(opts.sessionId, 'session id'));
   return args;
 }
 

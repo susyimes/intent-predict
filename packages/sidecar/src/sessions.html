@@ -17,6 +17,8 @@
   a { color:var(--accent); text-decoration:none; }
   a:hover { text-decoration:underline; }
   .note { color:var(--dim); font-size:13px; margin:0 0 12px; }
+  .warn { font-size:13px; margin:0 0 12px; padding:8px 12px; border:1px solid var(--warn); border-radius:10px; background:var(--panel); }
+  .warn b { color:var(--warn); }
   .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
   .bar input[type="search"] { flex:1 1 240px; }
   input, button, select { font:inherit; color:inherit; }
@@ -49,6 +51,7 @@
     <a id="back" href="/">返回建议页</a>
   </header>
   <p class="note">绑定立即生效，并还原该会话最近 3 个已完成轮次立即求值；绑定后在原工具里继续的轮次，刷新本页或建议页时会同步进来。此后经宿主发送的消息续接所选会话。带「绑定」按钮的会话可由当前宿主直接续接；其余是本机嗅探到的活跃 AI 会话，当前宿主还不能续接它们。</p>
+  <p class="warn" id="privacy"><b>内容会发给 Grok：</b>求值用的是 Grok（xAI）的模型。绑定后，每次求值都会把所选会话最近几轮对话的节选（已脱敏）发给 Grok。绑定 Hermes 会话时，这些内容会发往 Grok，而不只是 Hermes 自己用的模型服务商。绑定 Grok 会话后，经宿主发出的轮次在该会话的目录里运行，沿用启动宿主时给 Grok 的权限参数（如 --allow）。</p>
 
   <div id="current" class="current">正在读取当前绑定…</div>
 
@@ -77,7 +80,7 @@
     </div>
   </details>
 
-  <p class="note" id="foot">嗅探只读各工具在本机的会话元数据（登记表、标题、目录、修改时间），不读取对话内容。Grok 的「运行中」来自其登记表并核对进程；其余以文件更新时间推断，可能包含刚结束的会话。</p>
+  <p class="note" id="foot">嗅探只读各工具在本机的会话元数据（登记表、标题、目录、修改时间），不读取对话内容；只有绑定之后，宿主才读取所选会话最近几轮的对话，用于还原和求值。Grok 的「运行中」来自其登记表并核对进程；其余以文件更新时间推断，可能包含刚结束的会话。</p>
 </main>
 <script>
 'use strict';
@@ -121,7 +124,8 @@ async function bind(kind, id, cwd, profile) {
     current = bound;
     setStatus('已绑定到 ' + (KIND[bound.kind] || bound.kind) + ' 会话 ' + bound.id + '。' + (res.replayedTurns
       ? '已还原近 ' + res.replayedTurns + ' 轮并开始求值，稍候回建议页看建议（其间不要在原工具里给该会话发新消息，否则发送会被拒）。'
-      : '未能还原历史（无已完成轮次或读不到存储）；经宿主发送一轮后回建议页看建议。'));
+      : '未能还原历史（无已完成轮次或读不到存储）；经宿主发送一轮后回建议页看建议。')
+      + (bound.kind === 'hermes' ? '求值时，这个 Hermes 会话最近几轮的节选会发给 Grok 的模型。' : ''));
     render();
   } catch (e) {
     setStatus('绑定失败：' + (e.message || e), true);
