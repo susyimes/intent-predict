@@ -11,12 +11,12 @@ Catalog (pick one id):
 {{#each intents}}
 - {{id}}: {{description}}{{#if slots}} (slots: {{slots_spec}}){{/if}}{{#if examples}} e.g. {{examples}}{{/if}}
 {{/each}}
-- none: nothing above fits, or you are not confident.
+- none: nothing above is likely to be the user's next message.
 
 Rules:
 1. Predict what THE USER would type next, not what you think they should do.
 2. Read the last lines of the assistant's message first; if it explicitly offers a next step, prefer the matching intent.
-3. Prefer "none" over a guess. A wrong suggestion costs more than no suggestion.
+3. Give honest probabilities. When you hesitate between intents, pick the most likely one and list the others as runner-ups; do not hide the guess behind "none" and do not round it up. Whether anything is shown is decided from your probabilities.
 4. Fill "slots" only with values that literally appear in the conversation.
 5. "confidence" is your probability that the user's next message has this intent. You may list up to 2 runner-ups; all probabilities together must not exceed 1.
 

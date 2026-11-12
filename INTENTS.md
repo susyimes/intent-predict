@@ -241,14 +241,14 @@ Predict the user's NEXT message in this coding session by choosing strictly from
 {{#each intents}}
 - `{{id}}`: {{description}}{{#if slots}} (slots: {{slots_spec}}){{/if}}{{#if examples}} — e.g. {{examples}}{{/if}}
 {{/each}}
-- `none`: nothing above fits, or you are not confident.
+- `none`: nothing above is likely to be the user's next message.
 
 ## Rules
 
 1. **User perspective**: predict what THE USER would type next, not what you think they should do. The test: would the user think "I was just about to type that"?
 2. **Explicit offers first**: read the last lines of the assistant's message. If it explicitly offers a next step, prefer the matching intent.
 3. **No approval of risky actions**: if the assistant is asking to confirm a destructive action or an external side effect (push, publish, deploy, delete), return `"none"`.
-4. **Prefer none**: a wrong suggestion costs far more than no suggestion.
+4. **Honest probabilities**: when you hesitate between intents, pick the most likely one and list the others in `"runnerUps"`. Do not hide a guess behind `"none"` and do not round it up: whether anything is shown is decided from your probabilities.
 5. **Slots**: fill `"slots"` only with values that literally appear in the conversation.
 6. **Confidence**: `"confidence"` is your probability that the user's next message has this intent. You may list up to 2 runner-up intents in `"runnerUps"`; all probabilities together must not exceed 1.
 

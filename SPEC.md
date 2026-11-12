@@ -227,12 +227,12 @@ Catalog (pick one id):
 {{#each intents}}
 - {{id}}: {{description}}{{#if slots}} (slots: {{slots_spec}}){{/if}}{{#if examples}} e.g. {{examples}}{{/if}}
 {{/each}}
-- none: nothing above fits, or you are not confident.
+- none: nothing above is likely to be the user's next message.
 
 Rules:
 1. Predict what THE USER would type next, not what you think they should do.
 2. Read the last lines of the assistant's message first; if it explicitly offers a next step, prefer the matching intent.
-3. Prefer "none" over a guess. A wrong suggestion costs more than no suggestion.
+3. Give honest probabilities. When you hesitate between intents, pick the most likely one and list the others as runner-ups; do not hide the guess behind "none" and do not round it up. Whether anything is shown is decided from your probabilities.
 4. Fill "slots" only with values that literally appear in the conversation.
 5. "confidence" is your probability that the user's next message has this intent. You may list up to 2 runner-ups; all probabilities together must not exceed 1.
 
@@ -275,7 +275,7 @@ The model's self-reported confidence is used as is. It is not calibrated and no 
 **Option sets.** When the model's first choice is not likely enough on its own but it and its runner-ups together are, they are offered side by side as equal options. This step is skipped when `options.optionSets` is `false`.
 
 - A *member* is the selected intent or a kept runner-up (§4.5 step 8) that meets all of these: its confidence ≥ `options.altMinConfidence`; its risk is not `side_effect`; it is not in cooldown; it passes §4.7. The selected intent must itself be a member.
-- Walk the members in order — the selected intent first, then the runner-ups as the model listed them — and stop as soon as their confidences add up to the effective `minConfidence`. Sums are compared with a tolerance of 1e-9.
+- Walk the members in order — the selected intent first, then the runner-ups from the most to the least likely (ties in the order the model listed them) — and stop as soon as their confidences add up to the effective `minConfidence`. Sums are compared with a tolerance of 1e-9.
 - If the sum is reached with at least two members, the prediction is an **option set**: the selected intent is its primary, the other members walked are its `alternatives`, and `optionSet` is `true`. Otherwise → `below_min_confidence`.
 
 A set therefore has two or three options, and no more than it needs to reach the threshold. The default prompt asks for probabilities that add up to at most 1, so the sum reads as the model's probability that the user's next message is one of the options.

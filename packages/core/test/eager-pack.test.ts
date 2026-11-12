@@ -35,11 +35,13 @@ test('the eager pack admits a 0.4-confidence selection that the default pack sup
   const normal = await evaluate('../../pack-coding/pack.json', 0.6);
   assert.equal(normal.out.result.type === 'completed' && normal.out.result.prediction, null);
   assert.equal(normal.out.result.type === 'completed' && !normal.out.result.prediction && normal.out.result.suppressedReason, 'below_min_confidence');
-  assert.match(normal.prompt, /Prefer none/);
+  // the default prompt asks for honest probabilities (unsure guesses become runner-ups, not `none`); the gate decides
+  assert.match(normal.prompt, /Honest probabilities/);
+  assert.doesNotMatch(normal.prompt, /Prefer none|not confident/);
 
   const eager = await evaluate('../../pack-coding-eager/pack.json', 0.35);
   assert.equal(eager.out.result.type === 'completed' && eager.out.result.prediction?.intent.id, 'run_tests');
   assert.equal(eager.out.trace?.threshold, 0.35);
   assert.match(eager.prompt, /Prefer the best fit/);
-  assert.doesNotMatch(eager.prompt, /\*\*Prefer none\*\*/);
+  assert.doesNotMatch(eager.prompt, /\*\*Prefer none\*\*|Honest probabilities/);
 });

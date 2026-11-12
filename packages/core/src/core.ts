@@ -441,41 +441,48 @@ export class Core {
         return undefined;
       }
     };
+    type Rendered = ReturnType<typeof renderItem>;
+    /**
+     * 4.6 option set: the first choice plus the most likely offerable runner-ups, as few as it takes for
+     * their confidences to reach `threshold` together. Undefined when no such set of 2-3 exists.
+     */
+    const optionSet = (it: IntentSpec, conf: number, threshold: number): { primary: Rendered; alternatives: Alternative[] } | undefined => {
+      if (!opts.optionSets || it.risk === 'side_effect' || conf < opts.altMinConfidence) return undefined;
+      let primary: Rendered;
+      try {
+        primary = renderItem(it, resolveSlots(it, sig, modelSlots, convo), locale);
+      } catch (e) {
+        if (!(e instanceof Suppress)) throw e;
+        return undefined;
+      }
+      const reached = (sum: number) => sum >= threshold - 1e-9;
+      const alternatives: Alternative[] = [];
+      let sum = conf;
+      for (const ru of [...runnerUps].sort((a, b) => b.confidence - a.confidence)) {   // stable: ties keep the model's order
+        if (reached(sum)) break;
+        const member = offerable(ru);
+        if (member) {
+          alternatives.push(member);
+          sum += member.confidence;
+        }
+      }
+      return alternatives.length && reached(sum) ? { primary, alternatives } : undefined;
+    };
 
     // 4.6 gate
     trace.selected = selected.id;
     trace.source = source;
     trace.confidence = confidence;
     if (cooling(selected)) throw new Suppress('in_cooldown');
-    let set: { primary: ReturnType<typeof renderItem>; alternatives: Alternative[] } | undefined;
+    let set: { primary: Rendered; alternatives: Alternative[] } | undefined;
     if (source === 'model') {
       const name = selected.risk === 'side_effect' ? 'sideEffectMinConfidence' : 'minConfidence';
       const threshold = Math.max(this.policy[name], pack.policy?.[name] ?? 0, scn.policy?.[name] ?? 0);
       trace.threshold = threshold;
       if (confidence! < threshold) {
-        // an option set: the first choice and as few runner-ups as it takes to reach the threshold together
-        const reached = (sum: number) => sum >= threshold - 1e-9;
-        let first: ReturnType<typeof renderItem> | undefined;
-        const others: Alternative[] = [];
-        let sum = confidence!;
-        if (opts.optionSets && selected.risk !== 'side_effect' && confidence! >= opts.altMinConfidence) {
-          try {
-            first = renderItem(selected, resolveSlots(selected, sig, modelSlots, convo), locale);
-          } catch (e) {
-            if (!(e instanceof Suppress)) throw e;
-          }
-          for (const ru of first ? runnerUps : []) {
-            if (reached(sum)) break;
-            const member = offerable(ru);
-            if (member) {
-              others.push(member);
-              sum += member.confidence;
-            }
-          }
-        }
-        if (!first || !others.length || !reached(sum)) throw new Suppress('below_min_confidence');
-        set = { primary: first, alternatives: others };
-        trace.optionSet = [selected.id, ...others.map((o) => o.intentId)];
+        set = optionSet(selected, confidence!, threshold);
+        if (!set) throw new Suppress('below_min_confidence');
+        trace.optionSet = [selected.id, ...set.alternatives.map((a) => a.intentId)];
       }
     }
 

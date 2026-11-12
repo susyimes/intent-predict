@@ -5,7 +5,7 @@
 > **当前状态：v0.5，Phase 1（单会话观察 × 纯建议）**。规范只覆盖这一阶段，附带参考实现，以及一个能驱动 Grok、Hermes、Codex、Kimi、Claude Code 五家命令行的宿主。
 >
 > - 已验证：
->   - 110 条黄金用例在两套独立实现（Python 参考求值器、TypeScript 核心）上全部通过。
+>   - 111 条黄金用例在两套独立实现（Python 参考求值器、TypeScript 核心）上全部通过。
 >   - sidecar 协议、会话绑定和五个 Agent 适配器都有单元测试，用的是实测录下的事件格式和测试替身。
 >   - 自带网页在无头 Chrome 里实际操作通过。
 >   - 对 Grok CLI 1.0.77 的端到端检查通过；对 Hermes 0.22、Codex 0.159、Kimi Code 2.5、Claude Code 2.1.322 的实机检查也都通过。

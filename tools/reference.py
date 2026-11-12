@@ -507,12 +507,12 @@ Catalog (pick one id):
 {{#each intents}}
 - {{id}}: {{description}}{{#if slots}} (slots: {{slots_spec}}){{/if}}{{#if examples}} e.g. {{examples}}{{/if}}
 {{/each}}
-- none: nothing above fits, or you are not confident.
+- none: nothing above is likely to be the user's next message.
 
 Rules:
 1. Predict what THE USER would type next, not what you think they should do.
 2. Read the last lines of the assistant's message first; if it explicitly offers a next step, prefer the matching intent.
-3. Prefer "none" over a guess. A wrong suggestion costs more than no suggestion.
+3. Give honest probabilities. When you hesitate between intents, pick the most likely one and list the others as runner-ups; do not hide the guess behind "none" and do not round it up. Whether anything is shown is decided from your probabilities.
 4. Fill "slots" only with values that literally appear in the conversation.
 5. "confidence" is your probability that the user's next message has this intent. You may list up to 2 runner-ups; all probabilities together must not exceed 1.
 
@@ -899,6 +899,26 @@ class Core:
             return {"intentId": it["id"], "confidence": ru["confidence"], **alt,
                     "risk": it["risk"], "passThrough": bool(it.get("passThrough"))}
 
+        def form_option_set(it, conf, threshold):
+            """4.6: the first choice plus the most likely offerable runner-ups, as few as it takes for their
+            confidences to reach `threshold` together. None when no such set of 2-3 exists."""
+            if not opts["optionSets"] or it["risk"] == "side_effect" or conf < opts["altMinConfidence"]:
+                return None
+            try:
+                first = render_item(it, resolve_slots(it, sig, model_slots, convo), locale)
+            except Suppress:
+                return None
+            reached = lambda total: total >= threshold - 1e-9  # noqa: E731
+            others, total = [], conf
+            for ru in sorted(runner_ups, key=lambda r: -r["confidence"]):  # stable: ties keep the model's order
+                if reached(total):
+                    break
+                member = offerable(ru)
+                if member:
+                    others.append(member)
+                    total += member["confidence"]
+            return (first, others) if others and reached(total) else None
+
         # 4.6 gate
         self.trace["selected"] = selected["id"]
         if cooling(selected):
@@ -909,25 +929,10 @@ class Core:
             threshold = max(self.policy[name], pack.get("policy", {}).get(name, 0), scn.get("policy", {}).get(name, 0))
             self.trace["threshold"] = threshold
             if confidence < threshold:
-                # an option set: the first choice and as few runner-ups as it takes to reach the threshold together
-                reached = lambda total: total >= threshold - 1e-9  # noqa: E731
-                first, others, total = None, [], confidence
-                if opts["optionSets"] and selected["risk"] != "side_effect" and confidence >= opts["altMinConfidence"]:
-                    try:
-                        first = render_item(selected, resolve_slots(selected, sig, model_slots, convo), locale)
-                    except Suppress:
-                        first = None
-                    for ru in runner_ups if first else []:
-                        if reached(total):
-                            break
-                        member = offerable(ru)
-                        if member:
-                            others.append(member)
-                            total += member["confidence"]
-                if not first or not others or not reached(total):
+                option_set = form_option_set(selected, confidence, threshold)
+                if not option_set:
                     raise Suppress("below_min_confidence")
-                option_set = (first, others)
-                self.trace["optionSet"] = [selected["id"]] + [o["intentId"] for o in others]
+                self.trace["optionSet"] = [selected["id"]] + [o["intentId"] for o in option_set[1]]
 
         # 4.7 slots, rendering, output checks
         if option_set:

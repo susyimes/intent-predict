@@ -72,9 +72,9 @@ def build_eager() -> dict:
     pack["description"] = "Eager variant of the built-in coding scenarios: lower floors and a less none-biased prompt."
     pack["policy"] = {"minConfidence": 0.10, "sideEffectMinConfidence": 0.50}
     replacements = [
-        ("- `none`: nothing above fits, or you are not confident.", "- `none`: nothing above plausibly fits."),
+        ("- `none`: nothing above is likely to be the user's next message.", "- `none`: nothing above plausibly fits."),
         (
-            "4. **Prefer none**: a wrong suggestion costs far more than no suggestion.",
+            '4. **Honest probabilities**: when you hesitate between intents, pick the most likely one and list the others in `"runnerUps"`. Do not hide a guess behind `"none"` and do not round it up: whether anything is shown is decided from your probabilities.',
             "4. **Prefer the best fit**: when a catalog intent plausibly matches the user's likely next message, choose it even under uncertainty; use `none` only when no intent plausibly fits.",
         ),
     ]

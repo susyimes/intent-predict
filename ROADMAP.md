@@ -28,8 +28,8 @@ O1 单会话  Phase 1（当前）
 | 分段 | 内容 | 证据 |
 |---|---|---|
 | 契约 | SPEC v0.5、5 份 JSON Schema、内置场景包（7 个场景）、黄金用例（覆盖全部 24 种抑制原因，含录制的模型输出与会话流程） | `python tools/validate.py` 全过 |
-| 1A 核心 | 信号、路由、两条确定性规则、模型分类、门控、槽位与模板、输出检查、建议有效期、发送规则、结果记录（TypeScript，`packages/core`） | 110 条黄金用例在 Python 参考求值器与 TypeScript 核心上都通过 |
-| 1A+ 选项组 | 首选单独不够把握、但它和备选合起来够时，平级给出 2–3 个选项；不预选，关掉时整组进入冷却；`options.optionSets: false` 可关闭 | 11 条新黄金用例在两套实现上通过（原有用例结果不变）；`npm run smoke:webui` 覆盖选项组的展示与发送；Grok 端到端检查（见下） |
+| 1A 核心 | 信号、路由、两条确定性规则、模型分类、门控、槽位与模板、输出检查、建议有效期、发送规则、结果记录（TypeScript，`packages/core`） | 111 条黄金用例在 Python 参考求值器与 TypeScript 核心上都通过 |
+| 1A+ 选项组 | 首选单独不够把握、但它和备选合起来够时，平级给出 2–3 个选项；不预选，关掉时整组进入冷却；`options.optionSets: false` 可关闭 | 12 条新黄金用例在两套实现上通过（原有用例结果不变）；`npm run smoke:webui` 覆盖选项组的展示与发送；Grok 端到端检查（见下） |
 | 1B sidecar 与界面 | stdio JSON-RPC、反向采样与取消、发送派发；自带界面（单网页，HTTP + SSE，仅回环地址 + 每次启动随机 token + Host/Origin 校验） | `packages/sidecar/test`：协议全程、越权请求被拒、发送钉轮次且只发一次、采样取消、迟到回复被丢弃；`npm run smoke:webui` 在无头 Chrome 里渲染卡片、选备选、选选项组中的一项、点发送 |
 | 1C 第一个真实宿主 | Grok CLI 适配：无头回合的事件映射、借 Grok 模型做 `compact` 采样、以续接会话的方式接收发送（`packages/host-grok`） | `npm run e2e:grok` 在 Grok CLI 1.0.77 上通过；录制回合的映射测试 |
 | 1C+ 更多宿主与会话绑定 | 同一宿主经适配器驱动 Hermes、Codex、Kimi、Claude Code；可绑定它们已有的会话、还原近几轮历史；建议由会话自己的 Agent 用默认模型挑；发出的消息走各自的审批规则，权限请求一律拒绝 | 单元测试（实测录下的事件格式，测试替身 ACP Agent、假 codex 和假 claude）；对 Hermes 0.22、Codex 0.159、Kimi Code 2.5、Claude Code 2.1.322 的实机检查（见下） |
@@ -65,7 +65,14 @@ Claude Code 2.1.322 的实机检查（同一天，在临时目录里）：
 - `npm run e2e:grok` 通过（7 项检查）。这一遍没有出现选项组：第 4 轮 Grok 选了 run_tests，置信度 0.58，离门槛只差 0.02，但没有给出够格的备选。
 - 直接让 Grok 给几个改完代码的轮次挑建议，它会给备选。例如 run_tests 0.62 加 continue_task 0.18：首选已经过线，于是照常给出单条建议外加一个备选。
 - 把宿主门槛调到 0.70 后，Grok 的 run_tests 0.58 加 continue_task 0.22（合计 0.80）组成了选项组，网页上并列显示两项。
-- Grok 常把 `none` 列为首选，同时也列出备选，例如 none 0.46、备选合计 0.40。按规范这种情况不出建议，备选也不看。要不要改，等 1D 的数据。
+- Grok 常把 `none` 列为首选，同时也列出备选，例如 none 0.46、备选合计 0.40。原因在提示词：它要求模型"没把握就答 none"（R45）。
+
+改提示词之后（同一天，默认门槛 0.60）：
+
+- 同一个改完代码的轮次，改之前 Grok 回 none 0.46；改之后回 continue_task 0.46 加 run_tests 0.32，组成了选项组。
+- `npm run e2e:grok` 通过（8 项检查）。第 4 轮出现了选项组：run_tests 0.46 加 continue_task 0.27，合计 0.73。
+- 有把握时照常给单条建议（run_tests 0.62）。Agent 问"你倾向哪种"这类开放选择时，用户的回答不在目录里，Grok 仍答 none（0.58），这是对的。
+- 这些只是几轮的观察，不构成效果结论。默认门槛和"选项组算不算命中"都要等 1D 的数据。
 
 ### 还没做：1D 数据验证（进入 Phase 2 的唯一门槛）
 
