@@ -18,7 +18,7 @@ const BUILTIN: Record<string, string> = {
 };
 const OPTION_KEYS = [
   'enabled', 'blockedModes', 'settleMs', 'timeoutMs', 'samplerMode', 'modelBudget', 'maxPerSession',
-  'cooldownTurnsAfterDismiss', 'altMinConfidence', 'redact', 'optionSets',
+  'cooldownTurnsAfterDismiss', 'altMinConfidence', 'redact', 'optionSets', 'mode', 'minCandidateConfidence',
 ] as const;
 
 export interface SidecarOptions {

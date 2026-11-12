@@ -153,7 +153,7 @@ test('a Codex classification call is ephemeral and read-only; a call that used a
   const w = workspace();
   try {
     const sample = await codexAdapter.sample('[INTENT PREDICTION] pick one', { env: w.env, signal: new AbortController().signal });
-    assert.equal(sample.text, '{"intent":"run_tests","confidence":0.9,"slots":{}}');
+    assert.equal(sample.text, '{"candidates":[{"text":"跑一下测试","confidence":0.6}]}');
     assert.deepEqual(sample.usage, { inputTokens: 100, cachedInputTokens: 0, outputTokens: 10 });
     const [call] = w.calls();
     assert.deepEqual(call!.args, CODEX_SAMPLE_ARGS);

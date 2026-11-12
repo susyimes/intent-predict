@@ -153,7 +153,7 @@ test('a Kimi classification call is a throwaway session on the default model, de
   const w = workspace();
   try {
     const sample = await kimiAdapter.sample('[INTENT PREDICTION] pick one', { env: w.env, signal: new AbortController().signal });
-    assert.equal(sample.text, '{"intent":"run_tests","confidence":0.9,"slots":{}}');
+    assert.equal(sample.text, '{"candidates":[{"text":"跑一下测试","confidence":0.6}]}');
     await sample.cleanup;
     const methods = w.requests().map((r) => r.method);
     assert.deepEqual(methods, ['initialize', 'session/new', 'session/prompt', 'session/delete']);

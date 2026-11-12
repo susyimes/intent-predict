@@ -21,7 +21,7 @@ function replay(fixture: string, userText: string): AgentEvent[] {
   return events;
 }
 async function evaluate(events: AgentEvent[]): Promise<UpdatedParams> {
-  const core = new Core([pack], {}, { options: { settleMs: 0 }, debugTrace: true });
+  const core = new Core([pack], {}, { options: { settleMs: 0, mode: 'catalog' }, debugTrace: true });
   const out: UpdatedParams[] = [];
   core.on('updated', (p) => out.push(p));
   core.observe('s', events);

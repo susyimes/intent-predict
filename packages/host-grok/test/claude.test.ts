@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import type { AgentEvent } from '../../core/src/index.ts';
 import type { AgentEnv } from '../src/agent.ts';
 import {
-  CLAUDE_SAMPLE_ARGS, ClaudeStreamMapper, claudeAdapter, claudeAdvanced, claudePromptText, claudeTranscript, claudeTurnArgs, readClaudeHistory,
+  CLAUDE_SAMPLE_ARGS, ClaudeStreamMapper, claudeAdapter, claudeSampleArgs, claudeAdvanced, claudePromptText, claudeTranscript, claudeTurnArgs, readClaudeHistory,
 } from '../src/claude.ts';
 
 const FAKE = fileURLToPath(new URL('./fixtures/fake-claude.mjs', import.meta.url));
@@ -205,6 +205,11 @@ test('turn and classification arguments: message on stdin, nothing approves on t
   assert.deepEqual(CLAUDE_SAMPLE_ARGS.slice(CLAUDE_SAMPLE_ARGS.indexOf('--tools'), CLAUDE_SAMPLE_ARGS.indexOf('--tools') + 2), ['--tools', ''], 'no tools at all');
   for (const flag of ['--no-session-persistence', '--safe-mode', '--strict-mcp-config']) assert.ok(CLAUDE_SAMPLE_ARGS.includes(flag), flag);
   assert.ok(!CLAUDE_SAMPLE_ARGS.includes('--model'), 'no model override');
+  assert.ok(!CLAUDE_SAMPLE_ARGS.includes('--effort'), 'the agent\'s own reasoning effort unless the user chose otherwise');
+  const low = claudeSampleArgs('low');
+  assert.deepEqual(low.slice(low.indexOf('--effort'), low.indexOf('--effort') + 2), ['--effort', 'low']);
+  assert.deepEqual(low.slice(-2), CLAUDE_SAMPLE_ARGS.slice(-2), 'the system prompt still comes last');
+  assert.equal(claudeSampleArgs(), CLAUDE_SAMPLE_ARGS);
 });
 
 test('a session\'s transcript is found in its project folder, or anywhere; unsafe ids are refused', () => {
@@ -279,7 +284,7 @@ test('a Claude classification call keeps nothing and runs no tools; a call that 
   const w = workspace();
   try {
     const sample = await claudeAdapter.sample('[INTENT PREDICTION] pick one', { env: w.env, signal: new AbortController().signal });
-    assert.equal(sample.text, '{"intent":"run_tests","confidence":0.9,"slots":{}}');
+    assert.equal(sample.text, '{"candidates":[{"text":"跑一下测试","confidence":0.6}]}');
     assert.deepEqual(sample.usage, { inputTokens: 125, cachedInputTokens: 20, outputTokens: 10 });
     assert.equal(sample.cleanup, undefined, 'nothing to delete: the call kept no session');
     const [call] = w.calls();

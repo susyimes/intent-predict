@@ -35,7 +35,14 @@ DEFAULT_OPTIONS = {
     "altMinConfidence": 0.15,
     "redact": "default",
     "optionSets": True,
+    "mode": "open",
+    "minCandidateConfidence": 0.15,
 }
+# open mode (4.9): how much conversation the agent sees, and the most it writes back
+OPEN_TURNS, OPEN_PROMPT_CHARS, MAX_CANDIDATES, MAX_CANDIDATE_CHARS = 6, 24_000, 3, 1000
+CATALOG_LIMITS = {"user": 500, "agent": 1500, "tools": 6}
+OPEN_LIMITS = {"user": 2000, "agent": 4000, "tools": 12}
+CONTROL_RE = re.compile(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]")
 KNOWN_EVENTS = {
     "turn.started", "message.user", "message.agent", "tool.call",
     "tool.result", "artifact", "state", "turn.completed",
@@ -499,6 +506,23 @@ def render_item(intent: dict, slots: dict, locale: str) -> dict:
 # --------------------------------------------------------------------------
 # Prompt (4.5)
 # --------------------------------------------------------------------------
+OPEN_PROMPT = """[NEXT MESSAGE PREDICTION — do not continue the task. Do not call tools.]
+Below are the latest turns of a session between a user and an AI agent. Predict the message THE USER will send next.
+
+Write up to 3 candidates, each exactly as the user would type it: in the user's language and tone, about as long as their earlier messages. Make the candidates meaningfully different from each other. For each candidate give your probability that the user's next message means essentially the same. The probabilities together must not exceed 1. If nothing plausible comes to mind, return an empty list.
+
+Set "sideEffect": true on a candidate that would have the agent do something with effects outside the workspace, such as pushing, publishing, deploying, sending or deleting.
+
+User locale: {{user.locale}}
+{{#if compact}}
+Recent conversation (oldest first):
+{{transcript}}
+{{/if}}
+Signals: {{signals_json}}
+
+Reply with a single JSON object only:
+{"candidates":[{"text":"...","confidence":0.0,"sideEffect":false}]}"""
+
 DEFAULT_PROMPT = """[INTENT PREDICTION — do not continue the task. Do not call tools.]
 Predict the user's NEXT message in this session by choosing from a fixed catalog.
 
@@ -539,7 +563,9 @@ def signals_json(signals: dict) -> str:
     return json.dumps({k: v for k, v in obj.items() if v is not None}, ensure_ascii=False, separators=(",", ":"))
 
 
-def transcript(session, turn_ids: list, strict: bool) -> str:
+def transcript(session, turn_ids: list, strict: bool, limits: dict = None) -> str:
+    limits = limits or CATALOG_LIMITS
+
     def cut(s, n):
         return s if len(s) <= n else s[:n] + "…"
 
@@ -549,7 +575,7 @@ def transcript(session, turn_ids: list, strict: bool) -> str:
         results = {e["callId"]: e for e in evs if e["type"] == "tool.result"}
         for e in evs:
             if e["type"] == "message.user":
-                lines.append("User: " + cut(redact(e["text"], strict), 500))
+                lines.append("User: " + cut(redact(e["text"], strict), limits["user"]))
         tools = []
         for c in (e for e in evs if e["type"] == "tool.call"):
             r = results.get(c["callId"])
@@ -561,12 +587,13 @@ def transcript(session, turn_ids: list, strict: bool) -> str:
             if r.get("summary"):
                 line += ": " + redact(r["summary"], strict)
             tools.append(line[:200])
-        if len(tools) > 6:
-            tools = tools[:2] + [f"Tool: … ({len(tools) - 6} more)"] + tools[-4:]
+        if len(tools) > limits["tools"]:
+            head = limits["tools"] // 3
+            tools = tools[:head] + [f"Tool: … ({len(tools) - limits['tools']} more)"] + tools[-(limits["tools"] - head):]
         lines += tools
         final = redact(final_agent_text(evs), strict)
         if final:
-            lines.append("Assistant: " + ("…" + final[-1500:] if len(final) > 1500 else final))
+            lines.append("Assistant: " + ("…" + final[-limits["agent"]:] if len(final) > limits["agent"] else final))
     return "\n".join(lines)
 
 
@@ -620,6 +647,21 @@ def similarity(a: str, b: str) -> float:
 # --------------------------------------------------------------------------
 # Core
 # --------------------------------------------------------------------------
+def parse_reply(text: str):
+    """A sampler reply: JSON, optionally inside one ```json fence; no salvage of partial output (4.5 step 8)."""
+    body = text.strip()
+    fenced = re.fullmatch(r"```(?:json)?[ \t]*\n([\s\S]*?)\n?```", body)
+    try:
+        return json.loads(fenced.group(1) if fenced else body)
+    except ValueError:
+        raise Suppress("invalid_model_output") from None
+
+
+def render_open_prompt(signals: dict, mode: str, transcript_text: str, template: str = OPEN_PROMPT) -> str:
+    """4.9: the open-mode prompt; no scenario and no catalog, only the conversation and its signals."""
+    return render_prompt(template, {"id": "", "description": ""}, [], signals, mode, transcript_text, False)
+
+
 class Session:
     def __init__(self, sid: str):
         self.id = sid
@@ -703,13 +745,15 @@ class Core:
         opened, s.open = s.open, None
         p = opened["prediction"]
         record = {"record": "outcome", "timestamp": s.clock, "sessionId": s.id, "predictionId": p["id"],
-                  "qualifiedIntentId": p["qualifiedIntentId"], "outcome": outcome,
-                  "copied": opened["copied"], **extra}
+                  **({"mode": "open"} if p.get("mode") == "open" else {"qualifiedIntentId": p["qualifiedIntentId"]}),
+                  "outcome": outcome, "copied": opened["copied"], **extra}
         return ("outcome", record)
 
     @staticmethod
     def _similarity(opened, text):
         p = opened["prediction"]
+        if p.get("mode") == "open":
+            return round(max(similarity(c["text"], text) for c in p["candidates"]), 4)
         items = [p] + p.get("choices", []) + p["alternatives"]
         cands = [i["text"] for i in items]
         cands += [(i["action"]["command"] + " " + i["action"].get("args", "")).strip()
@@ -753,9 +797,11 @@ class Core:
             (s.state.get("pendingApproval") is True or s.state.get("pendingInput") is True
              or bool(turn_calls and tool_kind(turn_calls[-1]) == "ask_user"
                      and turn_calls[-1]["callId"] not in answered), "pending_interaction"),
-            (status == "interrupted", "interrupted_turn"),
-            (status == "failed" and not any("failed" in scn.get("triggerOnTurnStatuses", ["completed"])
-                                            for _, scn in scenarios), "failed_turn_unhandled"),
+            # catalog mode only: in open mode the agent sees an interrupted or failed turn like any other (4.9)
+            (opts["mode"] == "catalog" and status == "interrupted", "interrupted_turn"),
+            (opts["mode"] == "catalog" and status == "failed"
+             and not any("failed" in scn.get("triggerOnTurnStatuses", ["completed"]) for _, scn in scenarios),
+             "failed_turn_unhandled"),
             (s.state.get("mode") in opts["blockedModes"], "mode_blocked"),
             (s.state.get("incognito") is True, "incognito"),
             ("maxPerSession" in opts and s.delivered >= opts["maxPerSession"], "max_per_session_reached"),
@@ -763,6 +809,8 @@ class Core:
         for tripped, reason in guards:
             if tripped:
                 raise Suppress(reason)
+        if opts["mode"] == "open":
+            return self._open_pipeline(s, turn_id, at, sig)
 
         # 4.3 routing and catalog
         eligible = [(pack, scn) for pack, scn in scenarios
@@ -970,6 +1018,89 @@ class Core:
             prediction["context"] = {"excerpt": "…" + final[-300:] if len(final) > 300 else final}
         return prediction
 
+    def _sampled_text(self, s, at):
+        """One sampler call as the case scripts it; None while the reply is pending."""
+        s.model_calls.append(at)
+        if self.sampler.get("pending"):
+            return None
+        if self.sampler.get("timeout"):
+            raise Suppress("timeout")
+        if "error" in self.sampler:
+            raise Suppress("sampler_error")
+        text = None if self.sampler.get("replyNull") else \
+            (self.replies.pop(0) if self.replies else self.sampler.get("reply"))
+        if not text:
+            raise Suppress("invalid_model_output")
+        return text
+
+    def _open_pipeline(self, s, turn_id, at, sig):
+        """4.9: the session's own agent writes the user's likely next messages; the usable ones are kept."""
+        opts = self.options
+        strict = opts["redact"] == "strict"
+        if self.sampler == "none":
+            raise Suppress("no_sampler")
+        budget = opts.get("modelBudget")
+        if budget and sum(1 for t in s.model_calls if at - t < 3_600_000) >= budget["maxCallsPerHour"]:
+            raise Suppress("budget_exhausted")
+        mode = self.sampler.get("mode", "compact")
+        fits = lambda p: len(p.encode("utf-8")) <= 4000 if mode == "fork" else len(p) <= OPEN_PROMPT_CHARS  # noqa: E731
+        turns = s.completed[-OPEN_TURNS:]
+        build = lambda: render_open_prompt(sig, mode, transcript(s, turns, strict, OPEN_LIMITS))  # noqa: E731
+        prompt = build()
+        while not fits(prompt) and mode == "compact" and turns:
+            turns = turns[1:]
+            prompt = build()
+        self.trace["prompt"] = prompt
+        if not fits(prompt):
+            raise Suppress("prompt_too_large")
+        text = self._sampled_text(s, at)
+        if text is None:
+            return None
+        reply = parse_reply(text)
+        if not isinstance(reply, dict) or not isinstance(reply.get("candidates"), list):
+            raise Suppress("invalid_model_output")
+        if not reply["candidates"]:
+            raise Suppress("model_none")
+
+        usable = []
+        for c in reply["candidates"]:
+            if not isinstance(c, dict) or not isinstance(c.get("text"), str) \
+                    or not (is_num(c.get("confidence")) and 0 <= c["confidence"] <= 1):
+                continue
+            body = c["text"].strip()
+            if not body or len(body) > MAX_CANDIDATE_CHARS or CONTROL_RE.search(body):
+                continue
+            usable.append({"text": body, "confidence": c["confidence"], "sideEffect": c.get("sideEffect") is True})
+        usable.sort(key=lambda c: -c["confidence"])          # stable: ties keep the model's order
+        if not usable:
+            raise Suppress("invalid_model_output")
+        seen, unique = set(), []
+        for c in usable:
+            key = re.sub(r"\s+", " ", c["text"])
+            if key not in seen:
+                seen.add(key)
+                unique.append(c)
+        self.trace.update(candidates=len(unique), confidence=unique[0]["confidence"],
+                          threshold=opts["minCandidateConfidence"])
+        kept = [c for c in unique if c["confidence"] >= opts["minCandidateConfidence"] - 1e-9][:MAX_CANDIDATES]
+        if not kept:
+            raise Suppress("below_min_confidence")
+
+        candidates = []
+        for c in kept:
+            body = redact(c["text"], strict)
+            # a candidate that would act outside the workspace is flagged and confirmed, never dropped
+            candidates.append({"text": body, "confidence": c["confidence"], "sideEffect": c["sideEffect"],
+                               "confirmBeforeSend": c["sideEffect"] or bool(DESTRUCTIVE_RE.search(body))})
+        self.seq += 1
+        prediction = {"mode": "open", "id": f"p-{self.seq}", "sessionId": s.id, "sourceTurnId": turn_id,
+                      "text": candidates[0]["text"], "candidates": candidates, "locale": sig["user"]["locale"],
+                      "source": "model", "createdAt": at}
+        final = redact(final_agent_text([e for e in s.events if e.get("turnId") == turn_id]), strict)
+        if final.strip():
+            prediction["context"] = {"excerpt": "…" + final[-300:] if len(final) > 300 else final}
+        return prediction
+
     # -- surface actions (5.2, 5.3) ---------------------------------------
     def act(self, sid: str, params: dict, host_reply: dict = None):
         """Returns (status, dispatch request or None, emissions). Raises ValueError for -32602."""
@@ -984,14 +1115,28 @@ class Core:
         if not live:
             return "stale", None, []
         if action == "dismiss":
-            # the user turned down every option of a set, not just the first
-            for intent_id in [p["intent"]["id"]] + ([a["intentId"] for a in p["alternatives"]] if p.get("optionSet") else []):
-                s.cooldown[f"{p['packId']}/{p['scenarioId']}#{intent_id}"] = \
-                    len(s.completed) + self.options["cooldownTurnsAfterDismiss"]
+            # catalog mode: the user turned down every option of a set, not just the first. Open mode has no cooldown.
+            if p.get("mode") != "open":
+                for intent_id in [p["intent"]["id"]] + ([a["intentId"] for a in p["alternatives"]] if p.get("optionSet") else []):
+                    s.cooldown[f"{p['packId']}/{p['scenarioId']}#{intent_id}"] = \
+                        len(s.completed) + self.options["cooldownTurnsAfterDismiss"]
             return "recorded", None, [self._finalize(s, "dismissed")] + self._invalidate(s, "resolved")
 
-        item, selected, needs_confirm = p, {"kind": "primary"}, p["confirmBeforeSend"]
-        if "choice" in params:
+        if p.get("mode") == "open":
+            if "choice" in params or "alternative" in params:
+                raise ValueError("an open prediction has candidates, not choices or alternatives")
+            index = params.get("candidate", 0)
+            if not (isinstance(index, int) and 0 <= index < len(p["candidates"])):
+                raise ValueError("no such candidate")
+            item = p["candidates"][index]
+            selected, needs_confirm = {"kind": "candidate", "index": index}, item["confirmBeforeSend"]
+        elif "candidate" in params:
+            raise ValueError("a catalog prediction has no candidates")
+        else:
+            item, selected, needs_confirm = p, {"kind": "primary"}, p["confirmBeforeSend"]
+        if p.get("mode") == "open":
+            pass
+        elif "choice" in params:
             if not 0 <= params["choice"] < len(p.get("choices", [])):
                 raise ValueError("no such choice")
             item = {**p["choices"][params["choice"]], **({"action": p["action"]} if "action" in p else {})}
@@ -1041,7 +1186,7 @@ def check_prediction(expected: dict, p) -> list:
     if p is None:
         return ["expected a prediction, none was delivered"]
     exp = dict(expected)
-    probes = {
+    probes = {"candidateTexts": [c["text"] for c in p["candidates"]]} if p.get("mode") == "open" else {
         "intentId": p["intent"]["id"],
         "alternativeIds": [a["intentId"] for a in p["alternatives"]],
         "choiceTexts": [c["text"] for c in p.get("choices", [])],

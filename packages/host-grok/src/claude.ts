@@ -309,11 +309,14 @@ export function claudeTurnArgs(sessionId?: string): string[] {
 const SAMPLER_SYSTEM =
   'You are a strict classifier. Follow the instructions in the user message and reply with a single JSON object only. Never call tools.';
 
-/** Arguments of a classification call: default model, low effort, no tools, hooks, MCP or CLAUDE.md, no transcript. */
+/** Arguments of a classification call: default model and effort, no tools, hooks, MCP or CLAUDE.md, no transcript. */
 export const CLAUDE_SAMPLE_ARGS = [
   '-p', '--output-format', 'json', '--no-session-persistence', '--tools', '', '--safe-mode', '--strict-mcp-config',
-  '--permission-prompts', 'none', '--effort', 'low', '--system-prompt', SAMPLER_SYSTEM,
+  '--permission-prompts', 'none', '--system-prompt', SAMPLER_SYSTEM,
 ];
+/** The same, with low reasoning effort when the user chose it (cheaper and faster, explicitly). */
+export const claudeSampleArgs = (effort: 'default' | 'low' = 'default'): string[] =>
+  (effort === 'low' ? [...CLAUDE_SAMPLE_ARGS.slice(0, -2), '--effort', 'low', ...CLAUDE_SAMPLE_ARGS.slice(-2)] : CLAUDE_SAMPLE_ARGS);
 
 /** Claude Code. */
 export const claudeAdapter: AgentAdapter = {
@@ -350,7 +353,7 @@ export const claudeAdapter: AgentAdapter = {
     return { sessionId: mapper.sessionId };
   },
   async sample(prompt, ctx) {
-    const { code, stdout, stderr } = await runProcess(ctx.env.bins.claude ?? 'claude', CLAUDE_SAMPLE_ARGS, {
+    const { code, stdout, stderr } = await runProcess(ctx.env.bins.claude ?? 'claude', claudeSampleArgs(ctx.env.samplerEffort), {
       cwd: ctx.env.scratch(), input: prompt, signal: ctx.signal,
     });
     const out = jsonLines(stdout).find((l) => l.type === 'result');

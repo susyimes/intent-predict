@@ -5,7 +5,8 @@
 // A throwaway project is created; Grok may only edit files and run `node --test` there. The script plays
 // the user and the surface: it talks to Grok through the host, reads predictions from the surface's HTTP
 // endpoint, and sends one of them back. It checks the plumbing (events, signals, sampler, dispatch,
-// telemetry), not how good the model's predictions are.
+// telemetry) in open mode, the default, where Grok itself writes the user's likely next messages; it does
+// not judge how good those guesses are.
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -46,15 +47,32 @@ const describe = (n: Json) => {
   const t = n.params.trace ?? {};
   const p = r.prediction;
   const what = !p
-    ? `no suggestion: ${r.suppressedReason}${t.confidence !== undefined && t.confidence !== null ? ` (model said ${t.selected} at ${t.confidence}, needs ${t.threshold})` : ''}`
-    : p.optionSet
+    ? `no suggestion: ${r.suppressedReason}${typeof t.confidence === 'number' ? ` (best ${t.selected ?? 'candidate'} at ${t.confidence}, needs ${t.threshold})` : ''}`
+    : p.mode === 'open'
+      ? `writes ${p.candidates.length} candidate(s): ${p.candidates.map((c: Json) => `"${c.text}" (${c.confidence}${c.confirmBeforeSend ? ', confirm' : ''})`).join(' | ')}`
+      : p.optionSet
       ? `offers an option set (together ≥ ${t.threshold}): ${[{ text: p.text, intentId: p.intent.id, confidence: p.intent.confidence }, ...p.alternatives]
         .map((o: Json) => `"${o.text}" (${o.intentId} ${o.confidence})`).join(' | ')}`
       : `suggests "${p.text}" (${p.intent.id}, ${p.source}${p.intent.confidence === null ? '' : ' ' + p.intent.confidence})`;
-  return `${n.params.sourceTurnId}  scenario=${t.scenarioId ?? '—'}  ${what}`;
+  return `${n.params.sourceTurnId}  ${t.mode === 'open' ? 'open mode' : `scenario=${t.scenarioId ?? '—'}`}  ${what}`;
 };
 const PLUMBING_FAILURES = ['sampler_error', 'timeout', 'invalid_model_output', 'unknown_intent', 'no_sampler', 'prompt_too_large'];
 const checks: string[] = [];
+/** What the user would send from a prediction: its first candidate (open mode) or its primary (catalog mode). */
+const firstPick = (p: Json) => (p.mode === 'open'
+  ? { text: p.candidates[0].text, candidate: 0, confirmed: p.candidates[0].confirmBeforeSend || undefined }
+  : { text: p.text, confirmed: p.confirmBeforeSend || undefined });
+/** Open mode: what SPEC 4.9 promises about the candidates. */
+const checkCandidates = (n: Json) => {
+  const p = n.params.result.prediction;
+  if (p?.mode !== 'open') return;
+  const confidences = p.candidates.map((c: Json) => c.confidence);
+  assert.ok(p.candidates.length >= 1 && p.candidates.length <= 3, 'one to three candidates');
+  assert.deepEqual(confidences, [...confidences].sort((a: number, b: number) => b - a), 'likeliest first');
+  assert.ok(confidences.every((c: number) => c >= n.params.trace.threshold - 1e-9), 'none below the floor');
+  assert.equal(new Set(p.candidates.map((c: Json) => c.text)).size, p.candidates.length, 'each text once');
+  assert.equal(p.text, p.candidates[0].text);
+};
 const ok = (what: string) => {
   checks.push(what);
   say(`  ✔ ${what}`);
@@ -102,10 +120,11 @@ try {
   const e1 = await evaluationOf('t1');
   say('    ' + describe(e1));
   checkOptionSet(e1);
+  checkCandidates(e1);
   const s1 = JSON.parse(e1.params.trace.signalsJson);
-  assert.equal(e1.params.trace.scenarioId, 'coding.after_edit');
+  assert.equal(e1.params.trace.mode, 'open', 'open mode is the default');
   assert.ok(s1['lastTurn.filesChanged'] >= 1 && s1['lastTurn.checkRuns'] === 0, JSON.stringify(s1));
-  ok('Grok events became signals: a changed file, no check run, scenario coding.after_edit');
+  ok('Grok events became signals: a changed file, no check run');
   assert.equal(e1.params.trace.samplerMode, 'compact');
   assert.ok(!PLUMBING_FAILURES.includes(e1.params.result.suppressedReason), `sampler path broke: ${e1.params.result.suppressedReason}`);
   ok(`Grok served the compact sampler and its reply parsed (${e1.params.result.prediction ? 'delivered' : e1.params.result.suppressedReason})`);
@@ -114,7 +133,7 @@ try {
   const p1 = e1.params.result.prediction;
   if (p1) {
     say(`turn 2: send the suggestion from the surface: "${p1.text}"`);
-    const sent = await rpc('prediction/act', { predictionId: p1.id, action: 'send', text: p1.text, confirmed: p1.confirmBeforeSend || undefined });
+    const sent = await rpc('prediction/act', { predictionId: p1.id, action: 'send', ...firstPick(p1) });
     assert.equal(sent.result?.status, 'dispatched', JSON.stringify(sent));
     ok('a send from the surface was dispatched to Grok as the next user message');
     await waitFor('the dispatched turn to start', () => (host.busy || host.lastCompletedTurn === 't2' ? {} : undefined));
@@ -126,6 +145,7 @@ try {
   const e2 = await evaluationOf('t2');
   say('    ' + describe(e2));
   checkOptionSet(e2);
+  checkCandidates(e2);
   const s2 = JSON.parse(e2.params.trace.signalsJson);
   assert.ok(!PLUMBING_FAILURES.includes(e2.params.result.suppressedReason), `sampler path broke: ${e2.params.result.suppressedReason}`);
   if (s2['lastTurn.checkRuns'] >= 1) {
@@ -135,34 +155,41 @@ try {
     say('    (Grok did not run the tests this turn; nothing to check about check runs)');
   }
 
-  // ---- turn 3: numbered options -> deterministic rule, then send a choice -----------------------
+  // ---- turn 3: numbered options: in open mode Grok itself writes the likely answers ----------------
   say('turn 3: make Grok end with numbered options');
   await host.send('Do not use any tool. Reply with exactly these three lines and nothing else:\n' +
     'Which one should I do next?\n1. Add a subtract function to math.js\n2. Add one more test for add');
   const e3 = await evaluationOf('t3');
   say('    ' + describe(e3));
   checkOptionSet(e3);
+  checkCandidates(e3);
+  assert.ok(!PLUMBING_FAILURES.includes(e3.params.result.suppressedReason), `sampler path broke: ${e3.params.result.suppressedReason}`);
   const p3 = e3.params.result.prediction;
-  assert.ok(p3, `expected the options rule to fire, got ${e3.params.result.suppressedReason}`);
-  assert.equal(p3.intent.id, 'choose_option');
-  assert.equal(p3.source, 'rule');
-  assert.equal(p3.choices.length, 2);
-  assert.ok(p3.passThrough && p3.context.excerpt.includes('subtract'), 'a pass-through card must carry what it answers');
-  ok('numbered options became a rule-sourced choice card, with no model call, carrying the agent text it answers');
+  if (p3) {
+    assert.ok(p3.context.excerpt.includes('subtract'), 'a card carries the agent text it answers');
+    ok(`numbered options: Grok wrote ${p3.candidates.length} candidate(s), shown with the agent text they answer`);
+  } else {
+    say(`    (no candidate for the numbered options this time: ${e3.params.result.suppressedReason})`);
+  }
 
   const wrong = await rpc('prediction/act', { predictionId: p1?.id ?? 'p-unknown', action: 'send', text: 'x' });
   assert.equal(wrong.result?.status, 'stale');
   ok('an old prediction can no longer be sent (stale)');
-  const sent3 = await rpc('prediction/act', { predictionId: p3.id, action: 'send', text: p3.choices[0].text, choice: 0 });
-  assert.equal(sent3.result?.status, 'dispatched', JSON.stringify(sent3));
-  await waitFor('the dispatched turn to start', () => (host.busy || host.lastCompletedTurn === 't4' ? {} : undefined));
-  const again = await rpc('prediction/act', { predictionId: p3.id, action: 'send', text: p3.choices[0].text, choice: 0 });
-  assert.equal(again.result?.status, 'stale');
-  ok('the chosen option was dispatched once; a second click is refused');
+  if (p3) {
+    const sent3 = await rpc('prediction/act', { predictionId: p3.id, action: 'send', ...firstPick(p3) });
+    assert.equal(sent3.result?.status, 'dispatched', JSON.stringify(sent3));
+    await waitFor('the dispatched turn to start', () => (host.busy || host.lastCompletedTurn === 't4' ? {} : undefined));
+    const again = await rpc('prediction/act', { predictionId: p3.id, action: 'send', ...firstPick(p3) });
+    assert.equal(again.result?.status, 'stale');
+    ok('the picked candidate was dispatched once; a second click is refused');
+  } else {
+    await host.send('1');
+  }
   await host.idle();
   const e4 = await evaluationOf('t4');
   say('    ' + describe(e4));
   checkOptionSet(e4);
+  checkCandidates(e4);
 
   // ---- telemetry --------------------------------------------------------------------------------
   await host.stop();
@@ -170,7 +197,7 @@ try {
   const evaluations = records.filter((r) => r.record === 'evaluation');
   const outcomes = records.filter((r) => r.record === 'outcome');
   assert.deepEqual(evaluations.map((r) => r.sourceTurnId), ['t1', 't2', 't3', 't4'], 'one evaluation per completed turn');
-  assert.ok(outcomes.some((o) => o.outcome === 'sent' && o.selected?.kind === 'choice'));
+  if (p1 || p3) assert.ok(outcomes.some((o) => o.outcome === 'sent' && o.selected?.kind === 'candidate' && o.mode === 'open'));
   assert.ok(!JSON.stringify(records).includes('subtract'), 'telemetry must not contain message text');
   ok(`telemetry: ${evaluations.length} evaluation records, outcomes ${outcomes.map((o) => o.outcome).join(', ')}, no message text`);
   const latencies = evaluations.filter((r) => r.samplerMode).map((r) => r.usage?.latencyMs).filter((x) => typeof x === 'number');

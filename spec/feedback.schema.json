@@ -27,13 +27,14 @@
           "enum": [
             "primary",
             "choice",
-            "alternative"
+            "alternative",
+            "candidate"
           ]
         },
         "index": {
           "type": "integer",
           "minimum": 0,
-          "description": "Index into choices when kind is 'choice'."
+          "description": "Index into choices when kind is 'choice', into candidates when kind is 'candidate'."
         },
         "intentId": {
           "type": "string",
@@ -113,6 +114,18 @@
           "const": true,
           "description": "Present when the delivered prediction is an option set (SPEC 4.6)."
         },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "open",
+            "catalog"
+          ]
+        },
+        "candidates": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Open mode: how many usable candidates the model wrote."
+        },
         "samplerMode": {
           "type": "string",
           "enum": [
@@ -133,7 +146,6 @@
         "timestamp",
         "sessionId",
         "predictionId",
-        "qualifiedIntentId",
         "outcome"
       ],
       "properties": {
@@ -154,7 +166,12 @@
         },
         "qualifiedIntentId": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Catalog mode only."
+        },
+        "mode": {
+          "const": "open",
+          "description": "Present for an open-mode prediction, which has no qualifiedIntentId."
         },
         "outcome": {
           "$ref": "#/$defs/Outcome"

@@ -19,11 +19,11 @@ const ask = (method, params) => new Promise((resolve) => {
 async function prompt(id, params) {
   const sessionId = params.sessionId;
   const text = params.prompt?.map((p) => p.text).join('') ?? '';
-  if (text.includes('INTENT PREDICTION')) {
+  if (text.includes('INTENT PREDICTION') || text.includes('NEXT MESSAGE PREDICTION')) {
     if (text.includes('USE_TOOL')) update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 's1', title: 'Read', kind: 'read', status: 'pending' });
     update(sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'classifying' } });
-    update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '{"intent":"run_tests",' } });
-    update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '"confidence":0.9,"slots":{}}' } });
+    update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '{"candidates":[{"text":"跑一下测试",' } });
+    update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '"confidence":0.6}]}' } });
     send({ id, result: { stopReason: 'end_turn' } });
     return;
   }

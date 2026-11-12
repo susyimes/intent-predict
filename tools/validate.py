@@ -165,6 +165,7 @@ def main() -> int:
     missing = [name for name, src in reference.PATTERNS.items() if src not in spec]
     check("SPEC.md prints every pattern the evaluator uses", not missing, f"differs: {missing}")
     check("SPEC.md default prompt equals the evaluator's", reference.DEFAULT_PROMPT.strip() in spec)
+    check("SPEC.md open-mode prompt equals the evaluator's", reference.OPEN_PROMPT.strip() in spec)
     listed = re.search(r"\*\*`signals_json`\.\*\*(.*)", spec)
     keys = re.findall(r"`([A-Za-z]+\.[A-Za-z.]+)`", listed.group(1)) if listed else []
     check("SPEC.md signals_json keys equal the evaluator's", keys == reference.SIGNAL_KEYS, f"spec lists {keys}")

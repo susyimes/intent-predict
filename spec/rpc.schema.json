@@ -490,6 +490,22 @@
           "default": true,
           "description": "Offer an option set when the model's first choice is below minConfidence but it and its runner-ups together reach it (SPEC 4.6)."
         },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "open",
+            "catalog"
+          ],
+          "default": "open",
+          "description": "open: the session's own agent writes the user's likely next messages (SPEC 4.9). catalog: the closed-catalog pipeline (SPEC 4.3-4.8)."
+        },
+        "minCandidateConfidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.15,
+          "description": "Open mode: candidates below this confidence are not shown."
+        },
         "redact": {
           "type": "string",
           "enum": [
@@ -873,6 +889,11 @@
           "type": "string",
           "description": "intentId of the alternative the user picked."
         },
+        "candidate": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Open mode: index into prediction.candidates the user picked (default 0)."
+        },
         "confirmed": {
           "type": "boolean",
           "description": "True only if the surface showed a separate confirmation step and the user accepted it."
@@ -897,6 +918,22 @@
           "not": {
             "required": [
               "choice",
+              "alternative"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "candidate",
+              "choice"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "candidate",
               "alternative"
             ]
           }

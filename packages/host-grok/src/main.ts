@@ -3,7 +3,8 @@
 // headless mode; suggestions for your next message appear on the surface page whose address is printed at start.
 //
 //   node packages/host-grok/src/main.ts [--agent grok|hermes|codex|kimi|claude] [--cwd DIR] [--model ID]
-//     [--resume SESSION_ID] [--eagerness eager|conservative]
+//     [--resume SESSION_ID] [--mode open|catalog] [--min-candidate-confidence N] [--sampler-effort default|low]
+//     [--eagerness eager|conservative]
 //     [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]
 //     [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]
 //
@@ -26,7 +27,10 @@ const flag = (name: string) => {
 if (own.includes('--help')) {
   process.stdout.write(
     'usage: main.ts [--agent grok|hermes|codex|kimi|claude] [--cwd DIR] [--model ID] [--resume SESSION_ID]\n'
-    + '  [--eagerness eager|conservative]   (default eager: more suggestions while feedback is collected)\n'
+    + '  [--mode open|catalog]   (default open: the agent writes your likely next messages; catalog: a closed list)\n'
+    + '  [--min-candidate-confidence N]   (open mode; default 0.15)\n'
+    + '  [--sampler-effort default|low]   (default: the agent\'s own reasoning effort; low is cheaper and faster)\n'
+    + '  [--eagerness eager|conservative]   (catalog mode; default eager)\n'
     + '  [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]\n'
     + '  [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]\n',
   );
@@ -56,6 +60,10 @@ if (cooldownTurnsAfterDismiss !== undefined
   && (!Number.isInteger(cooldownTurnsAfterDismiss) || cooldownTurnsAfterDismiss < 0)) {
   fail('--cooldown-turns must be a non-negative integer');
 }
+const mode = flag('--mode') ?? 'open';
+if (mode !== 'open' && mode !== 'catalog') fail('--mode must be open or catalog');
+const samplerEffort = flag('--sampler-effort') ?? 'default';
+if (samplerEffort !== 'default' && samplerEffort !== 'low') fail('--sampler-effort must be default or low');
 const agentRaw = flag('--agent') ?? 'grok';
 if (!isAgentKind(agentRaw)) fail(`--agent must be one of ${AGENT_KINDS.join(', ')}`);
 const agent = agentRaw as AgentKind;
@@ -74,6 +82,9 @@ const say = (s: string) => {
 
 const host = new GrokHost({
   cwd, agent, grokArgs, model: flag('--model'), resume, logPath: flag('--log'),
+  mode: mode as 'open' | 'catalog',
+  minCandidateConfidence: confidenceFlag('--min-candidate-confidence'),
+  samplerEffort: samplerEffort as 'default' | 'low',
   eagerness,
   minConfidence: confidenceFlag('--min-confidence'),
   sideEffectMinConfidence: confidenceFlag('--side-effect-min-confidence'),
@@ -95,7 +106,9 @@ await host.start();
 const LABEL: Record<AgentKind, string> = { grok: 'Grok', hermes: 'Hermes', codex: 'Codex', kimi: 'Kimi', claude: 'Claude Code' };
 say(`intent-predict × ${LABEL[host.agent]}   cwd: ${cwd}`);
 if (host.agentSessionId) say(dim(`已绑定 ${LABEL[host.agent]} 会话：${host.agentSessionId}（经此发送的消息续接该会话）`));
-{
+if (mode === 'open') {
+  say(dim(`模式：开放生成——每轮结束后由会话自己的 Agent 写出你可能要发的下一句${samplerEffort === 'low' ? '（低推理强度）' : ''}；--mode catalog 切回封闭目录`));
+} else {
   const gate = host.gateSettings;
   if (gate.eagerness === 'eager' || gate.minConfidence !== undefined || gate.sideEffectMinConfidence !== undefined
     || gate.altMinConfidence !== undefined || gate.cooldownTurnsAfterDismiss !== undefined) {

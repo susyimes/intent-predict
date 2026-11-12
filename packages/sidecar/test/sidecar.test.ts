@@ -50,7 +50,7 @@ test('sidecar: stdio host protocol, loopback surface, turn-pinned dispatch, samp
     assert.equal(bad.error?.code, -32602);
     const init = (await call('initialize', {
       protocolVersion: '0.5', client: { name: 'test-host', version: '0' },
-      capabilities: { samplerModes: ['compact'], dispatchModes: ['message'] }, options: { settleMs: 0 },
+      capabilities: { samplerModes: ['compact'], dispatchModes: ['message'] }, options: { settleMs: 0, mode: 'catalog' },
     })).result;
     assert.deepEqual(init.loadedPacks, [{ id: 'builtin/coding', version: '0.5.0', scenarioCount: 7 }]);
     const url = new URL(init.surfaceUrl);

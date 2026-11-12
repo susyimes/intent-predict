@@ -22,6 +22,11 @@ export interface AgentEnv {
   bins: Partial<Record<AgentKind, Bin>>;
   /** Grok only: model override and extra arguments for driven turns (e.g. `--allow` rules). */
   grokModel?: string;
+  /**
+   * Reasoning effort of classification calls: the agent's own default unless the user explicitly chose `low`
+   * (cheaper and faster). Applied where the CLI has a flag for it: Grok and Claude Code.
+   */
+  samplerEffort?: 'default' | 'low';
   grokArgs: string[];
   /** A private directory for prompt files and classification calls. */
   scratch(): string;

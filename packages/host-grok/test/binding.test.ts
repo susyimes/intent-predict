@@ -349,7 +349,7 @@ test('a bound Codex session is replayed from its rollout and evaluated by Codex 
       assert.equal(bound.result.bound.kind, 'codex');
       assert.equal(bound.result.replayedTurns, 1);
       const evaluation = await firstEvaluation(rpc, host);
-      assert.equal(evaluation.result.prediction?.intent.id, 'run_tests', JSON.stringify(evaluation.result));
+      assert.equal(evaluation.result.prediction?.candidates?.[0]?.text, '跑一下测试', JSON.stringify(evaluation.result));
       const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
       assert.deepEqual(calls.map((c) => c.args), [CODEX_SAMPLE_ARGS], 'Codex itself picked the suggestion, in an ephemeral call');
     } finally {
@@ -385,7 +385,7 @@ test('a bound Kimi session is replayed from its wire log and evaluated by Kimi i
       const bound = await rpc('binding/bind', { kind: 'kimi', id: 'session_k1', cwd: process.cwd() });
       assert.equal(bound.result.replayedTurns, 1);
       const evaluation = await firstEvaluation(rpc, host);
-      assert.equal(evaluation.result.prediction?.intent.id, 'run_tests', JSON.stringify(evaluation.result));
+      assert.equal(evaluation.result.prediction?.candidates?.[0]?.text, '跑一下测试', JSON.stringify(evaluation.result));
     } finally {
       await host.stop();                                   // waits for the throwaway session's deletion
     }
@@ -440,7 +440,7 @@ test('a bound Claude Code session is replayed and evaluated by Claude itself; a 
       assert.equal(bound.result.replayedTurns, 1);
       const evaluation = await firstEvaluation(rpc, host);
       const p = evaluation.result.prediction;
-      assert.equal(p?.intent.id, 'run_tests', JSON.stringify(evaluation.result));
+      assert.equal(p?.candidates?.[0]?.text, '跑一下测试', JSON.stringify(evaluation.result));
       assert.deepEqual(calls().map((c) => c.args), [CLAUDE_SAMPLE_ARGS], 'Claude itself picked the suggestion, in a call that kept no session');
 
       // the session is open in a Claude Code window (this test process stands in for it)

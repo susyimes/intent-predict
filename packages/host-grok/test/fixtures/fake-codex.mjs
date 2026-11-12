@@ -13,7 +13,7 @@ process.stdin.on('end', () => {
   out({ type: 'turn.started' });
   if (args.includes('--ephemeral')) {
     if (input.includes('USE_TOOL')) out({ type: 'item.completed', item: { id: 'item_t', type: 'command_execution', command: 'ls', aggregated_output: '', exit_code: 0, status: 'completed' } });
-    out({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: '{"intent":"run_tests","confidence":0.9,"slots":{}}' } });
+    out({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: '{"candidates":[{"text":"跑一下测试","confidence":0.6}]}' } });
   } else {
     out({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'Running the tests.' } });
     out({ type: 'item.completed', item: { id: 'item_1', type: 'command_execution', command: 'npm test', aggregated_output: '1 failing\n', exit_code: 1, status: 'failed' } });

@@ -18,7 +18,7 @@ process.stdin.on('end', () => {
     const tool = input.includes('USE_TOOL');
     setTimeout(() => out({
       type: 'result', subtype: 'success', is_error: false, stop_reason: tool ? 'tool_use' : 'end_turn', num_turns: tool ? 2 : 1,
-      result: '{"intent":"run_tests","confidence":0.9,"slots":{}}', session_id: 'f00d0000-0000-4000-8000-000000000002',
+      result: '{"candidates":[{"text":"跑一下测试","confidence":0.6}]}', session_id: 'f00d0000-0000-4000-8000-000000000002',
       usage: { input_tokens: 5, cache_creation_input_tokens: 100, cache_read_input_tokens: 20, output_tokens: 10 }, permission_denials: [],
     }), Number(process.env.FAKE_CLAUDE_DELAY_MS ?? 0));
     return;

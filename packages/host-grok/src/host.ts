@@ -59,7 +59,16 @@ export interface GrokHostOptions {
   kimiBin?: Bin;
   claudeBin?: Bin;
   /**
-   * Prediction gate preset. eager (the default while Phase 1 collects feedback): lower floors and a prompt
+   * open (default): the session's own agent writes the user's likely next messages (SPEC 4.9). catalog: the
+   * closed-catalog pipeline, an explicit restriction; the preset and thresholds below apply to it only.
+   */
+  mode?: 'open' | 'catalog';
+  /** Open mode: candidates below this confidence are not shown (core default 0.15). */
+  minCandidateConfidence?: number;
+  /** Classification calls run at the agent's own reasoning effort unless the user explicitly asks for `low`. */
+  samplerEffort?: 'default' | 'low';
+  /**
+   * Catalog mode's gate preset. eager (the default while Phase 1 collects feedback): lower floors and a prompt
    * that leans away from `none`. conservative: the SPEC defaults (minConfidence 0.60).
    */
   eagerness?: GateSettings['eagerness'];
@@ -115,6 +124,14 @@ export class GrokHost {
       throw new Error('eagerness must be conservative or eager');
     }
     if (opts.agent !== undefined && !isAgentKind(opts.agent)) throw new Error(`agent must be one of ${AGENT_KINDS.join(', ')}`);
+    if (opts.mode !== undefined && opts.mode !== 'open' && opts.mode !== 'catalog') throw new Error('mode must be open or catalog');
+    if (opts.samplerEffort !== undefined && opts.samplerEffort !== 'default' && opts.samplerEffort !== 'low') {
+      throw new Error('samplerEffort must be default or low');
+    }
+    if (opts.minCandidateConfidence !== undefined
+      && (!Number.isFinite(opts.minCandidateConfidence) || opts.minCandidateConfidence < 0 || opts.minCandidateConfidence > 1)) {
+      throw new Error('minCandidateConfidence must be a number in [0, 1]');
+    }
     const confidence = (name: string, value: number | undefined) => {
       if (value !== undefined && (!Number.isFinite(value) || value < 0 || value > 1)) {
         throw new Error(`${name} must be a number in [0, 1]`);
@@ -143,6 +160,7 @@ export class GrokHost {
       hermesHome: opts.hermesHome,
       bins: { grok: opts.bin, hermes: opts.hermesBin, codex: opts.codexBin, kimi: opts.kimiBin, claude: opts.claudeBin },
       grokModel: opts.model,
+      samplerEffort: opts.samplerEffort ?? 'default',
       grokArgs: opts.grokArgs ?? [],
       scratch: () => this.scratch,
       promptFile: (text) => this.promptFile(text),
@@ -196,6 +214,8 @@ export class GrokHost {
         sideEffectMinConfidence: this.gateSettings.sideEffectMinConfidence,
       },
       options: {
+        mode: this.opts.mode ?? 'open',
+        minCandidateConfidence: this.opts.minCandidateConfidence,
         timeoutMs: this.opts.timeoutMs ?? 120_000,
         altMinConfidence: this.gateSettings.altMinConfidence,
         cooldownTurnsAfterDismiss: this.gateSettings.cooldownTurnsAfterDismiss,

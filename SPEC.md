@@ -2,13 +2,15 @@
 
 Status: Draft v0.5 — the Phase 1 contract (single-session observation, suggest-only)
 
-Purpose: define a deterministic shell around one constrained model call that, after an agent turn ends, predicts the user's next message as **one intent from a closed catalog, or nothing**. The shell is host-agnostic: a host feeds events and lends its model; a surface shows the suggestion; nothing is sent unless the user explicitly sends it.
+Purpose: define a thin shell around one model call that, after an agent turn ends, predicts the user's next message. By default (**open mode**, §4.9) the session's own agent writes up to three messages the user is likely to send next, in the user's own words, or nothing. A **catalog mode** (§4.3–§4.8), which picks one intent from a closed catalog and renders it from a template, remains available as an explicit, reversible restriction. The shell is host-agnostic: a host feeds events and lends its model; a surface shows the suggestion; nothing is sent unless the user explicitly sends it.
+
+Design principles: the model's capability is never capped silently (a cheaper or narrower mode is an explicit, reversible choice); rules stay few and loose; the model gets goals and real information rather than scripted steps; early phases favour exploration and learning speed over product-grade restriction. Only the user-protecting rules are firm: nothing is sent without the user, a send reaches only the turn it answers, the agent's own approvals stay in force, and secrets are redacted before text reaches a model or a surface.
 
 > **Using this specification with a coding agent**
 >
 > `"Implement intent-predict for <host/language> according to SPEC.md, load scenarios from INTENTS.md, and make every case in eval/golden.jsonl pass."`
 
-This document contains only what the current phase builds. Wider observation (agent-wide, ambient), speculative preparation, delegated execution, score fusion, online learning and model-written text are **not** part of this contract; their sketches live in the non-normative [docs/future.md](docs/future.md). Phasing is in [ROADMAP.md](ROADMAP.md).
+This document contains only what the current phase builds. Wider observation (agent-wide, ambient), speculative preparation, delegated execution, score fusion and online learning are **not** part of this contract; their sketches live in the non-normative [docs/future.md](docs/future.md). Phasing is in [ROADMAP.md](ROADMAP.md).
 
 ## Normative language
 
@@ -46,11 +48,11 @@ This version covers **O1 × A1**: observation is one session's own events; the o
 ### 1.3 Invariants
 
 - **I1 Fail closed.** Any guard, miss, model anomaly, validation failure or timeout yields no suggestion and exactly one `SuppressedReason`.
-- **I2 Closed catalog.** A prediction's intent is declared in a loaded pack. The model chooses an id; it cannot create one.
-- **I3 Template-only text.** Every character of a suggestion comes from a pack template or from a slot value that passed §4.7. Model output is never shown.
+- **I2 The model writes, the core checks.** In open mode the session's own agent writes the candidate messages; the core only checks, orders, redacts and flags them (§4.9). In catalog mode a prediction's intent is declared in a loaded pack: the model chooses an id and cannot create one.
+- **I3 Shown text is safe to show.** Every candidate is redacted (§7.1); one that looks like it would act outside the workspace is flagged for confirmation, never silently hidden. In catalog mode every character comes from a pack template or from a slot value that passed §4.7.
 - **I4 Explicit send.** Text leaves the core only through §5.2, in response to a user action on a surface. Nothing is sent automatically; no tool is executed.
 - **I5 Turn-pinned send.** A send is valid only for the turn the prediction answers (§5.3), and at most once per prediction.
-- **I6 Tighten-only packs.** A pack can make the confidence thresholds stricter than the host's, never looser (§3.3).
+- **I6 Tighten-only packs.** In catalog mode a pack can make the confidence thresholds stricter than the host's, never looser (§3.3).
 
 ---
 
@@ -172,7 +174,7 @@ The host policy is `initialize.policy` over the defaults `minConfidence = 0.60`,
 ### 4.1 Trigger and lifecycle
 
 - An evaluation is triggered by `turn.completed`. A second `turn.completed` for an already recorded `turnId` is ignored. No other event triggers an evaluation.
-- After the trigger the core waits `settleMs` (default 150) for trailing `artifact`/`state` events, then runs §4.2–§4.8.
+- After the trigger the core waits `settleMs` (default 150) for trailing `artifact`/`state` events, then runs the guards of §4.2 and, by `options.mode`, §4.9 (`open`, the default) or §4.3–§4.8 (`catalog`).
 - Every evaluation ends with exactly one `prediction/updated` carrying an `EvaluationResult`: a prediction, or `prediction: null` with one `suppressedReason`. `type: "failed"` is reserved for internal errors.
 - At most one evaluation and one `sampler/sample` are in flight per session. When an event carrying a different `turnId` (the next turn has begun) or a `prediction/cancel` arrives for the session during an evaluation, the core MUST abort it, send `sampler/cancel` if a sample is in flight, and report `aborted`. A sample that outlives `timeoutMs` (default 4000) is cancelled the same way and reported as `timeout`. Late sampler replies are discarded.
 
@@ -185,13 +187,15 @@ Checked in this order; the first that holds ends the evaluation without calling 
 | 1 | `options.enabled === false` | `disabled` |
 | 2 | `capabilities.interactive === false` | `non_interactive` |
 | 3 | `state.pendingApproval === true`, or `state.pendingInput === true`, or the turn's last `tool.call` has kind `ask_user` and no result | `pending_interaction` |
-| 4 | `lastTurn.status === "interrupted"` | `interrupted_turn` |
-| 5 | `lastTurn.status === "failed"` and no loaded scenario lists `failed` in `triggerOnTurnStatuses` | `failed_turn_unhandled` |
+| 4 | Catalog mode, and `lastTurn.status === "interrupted"` | `interrupted_turn` |
+| 5 | Catalog mode, `lastTurn.status === "failed"`, and no loaded scenario lists `failed` in `triggerOnTurnStatuses` | `failed_turn_unhandled` |
 | 6 | `state.mode` is in `options.blockedModes` (default `["plan"]`) | `mode_blocked` |
 | 7 | `state.incognito === true` | `incognito` |
 | 8 | `options.maxPerSession` is set and that many predictions were already delivered in the session | `max_per_session_reached` |
 
 ### 4.3 Routing and catalog
+
+*§4.3–§4.8 apply in catalog mode only.*
 
 1. A scenario is *eligible* when `lastTurn.status` is in its `triggerOnTurnStatuses` (default `["completed"]`) and its `match` holds.
 2. Pick **one** scenario: among eligible scenarios without `fallback`, the highest `priority` (ties: earliest in load order, then declaration order); if there is none, the same choice among eligible `fallback` scenarios; if there is none → `no_scenario_matched`.
@@ -307,6 +311,40 @@ Any failure above → `slot_validation_failed`.
 - `passThrough` mirrors the intent, on the prediction and on each alternative. When it is true on any of them, `context.excerpt` MUST be set: the redacted final agent message, cut to its last 300 characters and prefixed with `…` when cut.
 - `qualifiedIntentId` is `<packId>@<packVersion>/<scenarioId>#<intentId>`.
 
+### 4.9 Open mode
+
+The default (`options.mode: "open"`). No scenario, catalog, rule or template is involved: the session's own agent reads the conversation and writes what the user is likely to send next.
+
+1. **Availability and mode.** As §4.5 steps 1 and 2 (`no_sampler`, `budget_exhausted`).
+2. **Prompt.** This one, rendered with the template syntax of §4.5 step 3 (`{{user.locale}}`, `{{signals_json}}`, `{{transcript}}`, `{{#if compact}}`):
+
+```text
+[NEXT MESSAGE PREDICTION — do not continue the task. Do not call tools.]
+Below are the latest turns of a session between a user and an AI agent. Predict the message THE USER will send next.
+
+Write up to 3 candidates, each exactly as the user would type it: in the user's language and tone, about as long as their earlier messages. Make the candidates meaningfully different from each other. For each candidate give your probability that the user's next message means essentially the same. The probabilities together must not exceed 1. If nothing plausible comes to mind, return an empty list.
+
+Set "sideEffect": true on a candidate that would have the agent do something with effects outside the workspace, such as pushing, publishing, deploying, sending or deleting.
+
+User locale: {{user.locale}}
+{{#if compact}}
+Recent conversation (oldest first):
+{{transcript}}
+{{/if}}
+Signals: {{signals_json}}
+
+Reply with a single JSON object only:
+{"candidates":[{"text":"...","confidence":0.0,"sideEffect":false}]}
+```
+
+3. **Transcript.** As §4.5 step 6, but from the last 6 completed turns, with user messages cut to 2,000 characters, the final agent message to its last 4,000, and at most 12 tool lines per turn (the first 4 and the last 8 around `Tool: … (<n> more)`). Size: `fork` ≤ 4,000 bytes; `compact` ≤ 24,000 characters, dropping whole turns oldest first. Still too large → `prompt_too_large`.
+4. **Call.** `sampler/sample` with `maxOutputTokens` 800; errors as §4.5 step 7.
+5. **Parse.** As §4.5 step 8 up to the JSON parse. Not an object, or `candidates` not an array → `invalid_model_output`. An empty array → `model_none`.
+6. **Candidates.** An entry is usable when it is an object whose `text` is a string that, trimmed, is non-empty, at most 1,000 characters long and free of control characters other than tab and line breaks, and whose `confidence` is a finite number in [0, 1]; `sideEffect` counts only when it is `true`. None usable → `invalid_model_output`. Order the usable ones by confidence, highest first (ties keep the model's order); drop one whose text, with runs of whitespace collapsed to a single space, equals an earlier one's; keep those with confidence ≥ `options.minCandidateConfidence` (default 0.15), at most 3. None kept → `below_min_confidence`.
+7. **Prediction.** `mode: "open"`; `candidates` in that order; `text` is the first candidate's text; `source: "model"`; `context.excerpt` as in §4.8 whenever the final agent message is not empty. Each candidate's `text` is redacted (§7.1). Its `confirmBeforeSend` is true when `sideEffect` is true or the redacted text matches the destructive pattern of §2.2: a risky candidate is flagged, never dropped.
+
+Open mode has no cooldown and does not use `minConfidence`, `sideEffectMinConfidence`, `altMinConfidence`, `optionSets` or scenario packs. Of the guards of §4.2 it applies all but `interrupted_turn` and `failed_turn_unhandled`: an interrupted or failed turn is evaluated like any other.
+
 ---
 
 ## 5. Delivery, actions and dispatch
@@ -328,11 +366,11 @@ Nothing else invalidates a prediction. In particular an evaluation that ends wit
 A surface reports a user action with `prediction/act`; the result carries `status`.
 
 - **`copy`** → `recorded`, also for a prediction that is no longer live. A live prediction stays live.
-- **`dismiss`** → `stale` if the prediction is not live. Otherwise `recorded`; invalidated (`resolved`); the intent's session key enters cooldown — for an option set, every option's key, since the user turned all of them down: it is suppressed (`in_cooldown`) in the next `options.cooldownTurnsAfterDismiss` (default 3) evaluated turns of the session.
+- **`dismiss`** → `stale` if the prediction is not live. Otherwise `recorded`; invalidated (`resolved`). In catalog mode the intent's session key also enters cooldown — for an option set, every option's key, since the user turned all of them down: it is suppressed (`in_cooldown`) in the next `options.cooldownTurnsAfterDismiss` (default 3) evaluated turns of the session. Open mode has no cooldown.
 - **`send`**, checked in this order:
   1. The prediction is not live → `stale`.
-  2. `choice` / `alternative`, when present, must name an existing choice / alternative (otherwise JSON-RPC error `-32602`); the *selected item* is that one, else the primary.
-  3. The selected item is the primary or one of its choices, `confirmBeforeSend` is true and `confirmed !== true` → `confirmation_required`. (Alternatives are never `side_effect`, so they never need it.)
+  2. `choice` / `alternative` / `candidate`, when present, must name an existing item (otherwise JSON-RPC error `-32602`); `candidate` exists only on open predictions, `choice` and `alternative` only on catalog ones. The *selected item* is that one, else the primary (for an open prediction, the first candidate).
+  3. `confirmed !== true` and the selected item needs confirmation → `confirmation_required`. It does when it is a candidate whose `confirmBeforeSend` is true, or the primary or one of its choices while the prediction's `confirmBeforeSend` is true. (Alternatives are never `side_effect`, so they never need it.)
   4. The host declared no usable dispatch mode → `unsupported` (the surface falls back to copy). Another send for the session is still being dispatched → `busy`.
   5. Dispatch (§5.3). If `text` equals the selected item's rendered text, the item has a command action and the host accepts `command`, use `dispatch/command`; otherwise `dispatch/message` with `text`.
   6. Host reply: success → `dispatched`, invalidated (`resolved`). `TURN_MISMATCH` → `stale`, invalidated (`turn_started`). `SESSION_BUSY` → `busy`, still live. Any other error → `failed`, still live.
@@ -345,6 +383,7 @@ A surface MUST:
 - set `confirmed: true` only after a separate confirmation step that states what will be sent to which session;
 - not preselect a choice unless `preferredChoice` is present;
 - for an option set, present the primary and its alternatives as equal options and preselect none of them: the text to send stays empty until the user picks one;
+- for an open prediction, show every candidate in full; the first MAY start in the editor; a candidate with `confirmBeforeSend` goes through the confirmation step;
 - display only what the core gives it (which is already redacted).
 
 ### 5.3 Dispatch contract (host)
@@ -371,7 +410,7 @@ The core writes telemetry (`spec/feedback.schema.json`) to a local log: one eval
 
 Because the record is finalized once, the `message.user` echo of a dispatched send changes nothing. A host may start the turn before it answers the dispatch request: events that arrive while a prediction's send is still being dispatched are that send's own echo and MUST NOT finalize its outcome as `passed` or `expired`.
 
-`similarity(a, b)`: collapse whitespace and trim both strings. If both have at least 2 characters and one contains the other, it is 1. Otherwise it is the Dice coefficient over character bigrams, `2·|A ∩ B| / (|A| + |B|)` with multiset intersection. The recorded value is the maximum over the suggestion's candidate strings: the primary text, each choice text, each alternative text, and the command string of any command action.
+`similarity(a, b)`: collapse whitespace and trim both strings. If both have at least 2 characters and one contains the other, it is 1. Otherwise it is the Dice coefficient over character bigrams, `2·|A ∩ B| / (|A| + |B|)` with multiset intersection. The recorded value is the maximum over the suggestion's candidate strings: the primary text, each choice text, each alternative text, and the command string of any command action; for an open prediction, each candidate's text. An outcome record of an open prediction carries `mode: "open"` instead of `qualifiedIntentId`.
 
 `similarity` measures wording, not intent: a user who types `/review`, or "测一下", after the suggestion "跑一下测试验证看看" scores near 0. It is therefore **recorded only**. In this version the only user feedback that changes behaviour is an explicit dismiss (§5.2). Telemetry never contains message text.
 
@@ -385,7 +424,7 @@ The core borrows the host's model through `sampler/sample {sessionId, expectedTu
 2. Sample once, on an ephemeral branch: nothing is persisted, shown, or added to the session's history or usage shown to the user.
 3. Execute no tool. If the model asks for one, return `text: null`.
 4. Stop when `sampler/cancel` names the request, and answer it with `SAMPLER_ABORTED`.
-5. **`compact`**: send exactly `prompt` as a single user message on the host's own model connection, with no tools, deterministic settings where the provider allows, and reasoning off or minimal.
+5. **`compact`**: send exactly `prompt` as a single user message on the host's own model connection, with no tools and the model's normal settings. A cheaper or faster setting (lower reasoning effort, a smaller model) is allowed only as an explicit, reversible choice the user made, never as a silent default.
 6. **`fork`**: append `prompt` as the next user message to an exact copy of the session's request — same system prompt, tool declarations, history and request-level settings — so the provider's prompt cache is hit. Do not change reasoning or other request settings if that would change the cache key; `maxOutputTokens` then applies to visible output only.
 
 `compact` is the baseline every sampler-capable host is expected to offer; `fork` is optional.
@@ -481,7 +520,7 @@ Timing is logical: the settle delay is skipped and `timeout: true` stands for th
 **`kind: "pipeline"`** — `events` are observed in order; `state` entries, if any, are applied as `state` events just before the last event. `expect` describes the evaluation triggered by the last event and may combine:
 
 - `suppressedReason` — the evaluation ends with `prediction: null` and this reason;
-- `prediction` — a prediction is delivered and matches this subset (objects match recursively by subset; scalars and arrays by equality; a top-level key given as `null` asserts that the prediction does not have it). The shorthands `intentId`, `alternativeIds`, `choiceTexts`, `choiceLabels` and `contextIncludes` stand for `intent.id`, the alternatives' ids, the choices' texts and labels, and a substring of `context.excerpt`;
+- `prediction` — a prediction is delivered and matches this subset (objects match recursively by subset; scalars and arrays by equality; a top-level key given as `null` asserts that the prediction does not have it). The shorthands `intentId`, `alternativeIds`, `choiceTexts`, `choiceLabels`, `candidateTexts` and `contextIncludes` stand for `intent.id`, the alternatives' ids, the choices' texts and labels, the candidates' texts, and a substring of `context.excerpt`;
 - `signals` — these signal paths have these values (`null` asserts absence);
 - `catalog` — `{scenarioId, includes, excludes}` after §4.3;
 - `prompt` — `{includes, excludes, maxBytes}` on the rendered prompt.
@@ -516,6 +555,8 @@ Timing is logical: the settle delay is skipped and `timeout: true` stands for th
 | `sideEffectMinConfidence` | 0.80 | `policy` (host, pack, scenario) |
 | `altMinConfidence` | 0.15 | `options` |
 | `optionSets` | `true` | `options` |
+| `mode` | `open` | `options` |
+| `minCandidateConfidence` | 0.15 | `options` |
 | `cooldownTurnsAfterDismiss` | 3 | `options` |
 | `maxPerSession` | unlimited | `options` |
 | `modelBudget.maxCallsPerHour` | unlimited | `options` |

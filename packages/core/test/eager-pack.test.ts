@@ -23,7 +23,7 @@ async function evaluate(packRel: string, minConfidence: number): Promise<{ out: 
       prompt = request.prompt;
       return { text: JSON.stringify({ intent: 'run_tests', confidence: 0.4, slots: {} }) };
     },
-  }, { policy: { minConfidence }, options: { settleMs: 0 }, debugTrace: true });
+  }, { policy: { minConfidence }, options: { settleMs: 0, mode: 'catalog' }, debugTrace: true });
   const updated: UpdatedParams[] = [];
   core.on('updated', (p) => updated.push(p));
   core.observe('s', turn);
@@ -40,7 +40,8 @@ test('the eager pack admits a 0.4-confidence selection that the default pack sup
   assert.doesNotMatch(normal.prompt, /Prefer none|not confident/);
 
   const eager = await evaluate('../../pack-coding-eager/pack.json', 0.35);
-  assert.equal(eager.out.result.type === 'completed' && eager.out.result.prediction?.intent.id, 'run_tests');
+  const picked = eager.out.result.type === 'completed' ? eager.out.result.prediction : null;
+  assert.equal(picked && picked.mode !== 'open' ? picked.intent.id : undefined, 'run_tests');
   assert.equal(eager.out.trace?.threshold, 0.35);
   assert.match(eager.prompt, /Prefer the best fit/);
   assert.doesNotMatch(eager.prompt, /\*\*Prefer none\*\*|Honest probabilities/);

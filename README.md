@@ -1,37 +1,37 @@
 # intent-predict
 
-**intent-predict** 在一轮 agent 回复结束后，预测用户下一条消息——不是续写一句自由文本，而是从当前场景的**封闭意图目录里选一项，或者什么都不给**。它与宿主无关：宿主只负责上报会话事件、借出自己的模型；建议显示在一个独立的界面上；不经用户亲手点发送，什么都不会发出去。
+**intent-predict** 在一轮 agent 回复结束后，预测用户下一条消息：把最近几轮交给**这个会话自己的 Agent**，由它用你的口吻写出最多 3 条你可能要发的话，各带把握；没有把握就什么都不给。它与宿主无关：宿主只负责上报会话事件、借出自己的模型；建议显示在一个独立的界面上；不经用户亲手点发送，什么都不会发出去。
 
-> **当前状态：v0.5，Phase 1（单会话观察 × 纯建议）**。规范只覆盖这一阶段，附带参考实现，以及一个能驱动 Grok、Hermes、Codex、Kimi、Claude Code 五家命令行的宿主。
+设计遵循 [Agent 系统原则](https://github.com/susyimes/agent-coding-principle/blob/main/AGENT.md)：不限制模型的上限，规则保持宽松，给目标和真实信息而不是写死步骤，早期优先探索和学习速度。原来的「封闭意图目录 + 模板文字」仍保留为显式、可切换的目录模式（`--mode catalog`）。
+
+> **当前状态：v0.5，Phase 1（单会话观察 × 纯建议）**，默认是开放生成。规范只覆盖这一阶段，附带参考实现，以及一个能驱动 Grok、Hermes、Codex、Kimi、Claude Code 五家命令行的宿主。
 >
 > - 已验证：
->   - 111 条黄金用例在两套独立实现（Python 参考求值器、TypeScript 核心）上全部通过。
+>   - 131 条黄金用例（开放模式与目录模式）在两套独立实现（Python 参考求值器、TypeScript 核心）上全部通过。
 >   - sidecar 协议、会话绑定和五个 Agent 适配器都有单元测试，用的是实测录下的事件格式和测试替身。
 >   - 自带网页在无头 Chrome 里实际操作通过。
->   - 对 Grok CLI 1.0.77 的端到端检查通过；对 Hermes 0.22、Codex 0.159、Kimi Code 2.5、Claude Code 2.1.322 的实机检查也都通过。
-> - **没验证**：预测得准不准。还没有任何回放数据，默认阈值都是占位值。这是进入下一阶段前必须补的一项，见 [ROADMAP.md](ROADMAP.md)。
+>   - 对 Grok CLI 的端到端检查在开放模式下通过（4 轮都给出了候选）；对 Hermes 0.22、Codex 0.159、Kimi Code 2.5、Claude Code 2.1.322 的实机检查也都通过。
+> - **没验证**：预测得准不准。还没有任何回放数据，默认门槛都是占位值。这是进入下一阶段前必须补的一项，见 [ROADMAP.md](ROADMAP.md)。
 
 ## 一个例子
 
-agent 改完代码没跑测试。核心识别出场景 `coding.after_edit`，请宿主的模型在 5 个意图里选一个；模型选了 `run_tests`、置信度过线，于是界面上出现一张卡片「跑一下测试验证看看」。用户可以改字，点「发给 Agent」才会作为自己的下一条消息发出，且只对这一轮有效——agent 已经进入下一轮时，这次发送会被拒绝。
+agent 改完代码没跑测试。核心把最近几轮交给这个会话自己的 Agent，请它写出用户最可能发的下一句。它写了三条：「跑一下测试看看」（把握 0.45）、「顺便把 README 也更新一下」（0.25）和「推到远端吧」（0.15，可能有外部影响）。界面上列出这三条，第一条已经填在输入框里，可以改字，也可以换一条；点「发给 Agent」才会作为你的下一条消息发出。第三条发送前还要多确认一步。建议只对这一轮有效：agent 已经进入下一轮时，这次发送会被拒绝。
 
 <!-- validate: prediction.schema.json#/$defs/Prediction -->
 ```json
 {
+  "mode": "open",
   "id": "p-1",
   "sessionId": "s1",
   "sourceTurnId": "t7",
-  "packId": "builtin/coding",
-  "packVersion": "0.5.0",
-  "scenarioId": "coding.after_edit",
-  "qualifiedIntentId": "builtin/coding@0.5.0/coding.after_edit#run_tests",
-  "intent": { "id": "run_tests", "confidence": 0.82, "slots": {} },
-  "text": "跑一下测试验证看看",
+  "text": "跑一下测试看看",
+  "candidates": [
+    { "text": "跑一下测试看看", "confidence": 0.45, "sideEffect": false, "confirmBeforeSend": false },
+    { "text": "顺便把 README 也更新一下", "confidence": 0.25, "sideEffect": false, "confirmBeforeSend": false },
+    { "text": "推到远端吧", "confidence": 0.15, "sideEffect": true, "confirmBeforeSend": true }
+  ],
   "locale": "zh-CN",
-  "risk": "reversible",
-  "passThrough": false,
-  "confirmBeforeSend": false,
-  "alternatives": [],
+  "context": { "excerpt": "已经改完了登录逻辑。" },
   "source": "model",
   "createdAt": 1762675200450
 }
@@ -46,7 +46,7 @@ flowchart LR
   classDef surf fill:#fef5e7,stroke:#b9770e,color:#7e5109
 
   H["宿主 Host<br/>上报事件 · 借出模型 · 可选地接收发送"]:::host
-  C["核心 Core<br/>信号 → 场景 → 规则或模型 → 门控 → 模板渲染<br/>管理建议的有效期与发送规则"]:::core
+  C["核心 Core<br/>把最近几轮交给会话自己的 Agent → 检查、排序、脱敏、标风险<br/>管理建议的有效期与发送规则"]:::core
   S["界面 Surface<br/>显示当前建议 · 转达用户的发送 / 复制 / 关闭"]:::surf
 
   H -->|"session/observe"| C
@@ -80,14 +80,15 @@ node packages/host-grok/src/main.ts --agent claude --cwd <你的项目>
 # --agent 可选 grok（默认）/ hermes / codex / kimi / claude
 # 续接已有会话：--resume <会话 ID>
 # --model 只对 Grok 有效；其余几家都用各自的默认模型
-# 默认用 eager 预设：门槛 0.35，提示词不轻易答 none，前期多出建议、多攒反馈
-# 想少而稳就加 --eagerness conservative（规范默认值，门槛 0.60）
-# 还可用 --min-confidence、--side-effect-min-confidence、--alt-min-confidence、--cooldown-turns 细调
+# --mode catalog 切回封闭目录模式；--sampler-effort low 让挑建议用低推理强度（更快更省，默认不降）
+# 开放模式下低于 0.15 把握的候选不显示，可用 --min-candidate-confidence 调
+# 目录模式下默认用 eager 预设（门槛 0.35）；--eagerness conservative 回到规范默认值（0.60），
+#   还可用 --min-confidence、--side-effect-min-confidence、--alt-min-confidence、--cooldown-turns 细调
 ```
 
 启动后在终端里和 Agent 对话，终端会打印两个网页地址：
 
-- **「下一步建议」页**：每轮结束后显示建议卡片，可以先改字。点「发给 Agent」才会作为你的下一条消息发出，也可以只复制。下方的「轮次记录」每轮一行；点开一行，能看到这一轮里你说了什么、Agent 调了哪些工具、结果如何、改了哪些文件、最后回了什么，以及为什么给或没给建议（场景、候选意图、模型的选择和把握、门槛）。
+- **「下一步建议」页**：每轮结束后显示 Agent 写的候选，最可能的一条已经填进输入框，可以改字或换一条。点「发给 Agent」才会作为你的下一条消息发出，也可以只复制。下方的「轮次记录」每轮一行；点开一行，能看到这一轮里你说了什么、Agent 调了哪些工具、结果如何、改了哪些文件、最后回了什么，以及为什么给或没给建议（场景、候选意图、模型的选择和把握、门槛）。
 - **「选择会话」页**：列出本机活跃的 AI 会话。绑定后，宿主改为驱动这个会话：
   - 先还原最近 3 轮，并立即求值；
   - 之后你在原工具里继续的轮次，约 2 秒内自动同步进来，不用刷新页面；
@@ -116,23 +117,23 @@ npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自�
 
 ## 设计要点
 
-- **封闭目录**：模型只能选一个意图 id 或 `none`，造不出新意图；可以按分类问题离线评测。
-- **文字只来自模板**：界面上的每个字都出自场景包的模板和通过校验的槽位值，模型的输出从不直接上屏。
-- **宁缺毋滥**：任何守卫命中、未识别场景、模型异常、校验失败、超时，结果都是不给建议，并记录 24 种 `SuppressedReason` 之一。
-- **没把握时给一组，不硬给一个**：模型的首选单独不够把握、但它和备选加起来够时，平级给出 2–3 个选项（选项组），不预选，由用户挑；凑不够门槛就不给。有外部副作用的意图不进选项组。
+- **模型自己写**：会话自己的 Agent 读最近 6 轮，直接写出你可能要发的话，最多 3 条，各带把握；核心只做检查、排序、去重和脱敏，不替模型设场景、列选项、套模板。
+- **不悄悄限制模型**：挑建议默认用 Agent 自己的模型和推理强度；更省更快的设置（`--sampler-effort low`）、封闭目录模式（`--mode catalog`）都是显式、可切回的选择。
+- **出错就不给**：守卫命中、模型异常、回复格式不对、超时，结果都是不给建议，并记录 24 种 `SuppressedReason` 之一。
+- **有风险的标出来，不拦**：模型说会有外部影响、或文字像危险操作（推送、删除等）的候选照样显示，但发送前要再确认一次。
 - **发送必须是用户的显式动作，且钉在所属轮次**：过期的「可以，继续」到不了另一个提问；同一条建议最多发一次；有外部副作用的意图多一步确认。
 - **「照你说的办」类意图特殊对待**：agent 的提议看起来涉及推送、发布、删除时，这类一键同意不会被提供；提供时必须连同 agent 的原话一起显示。
-- **零配置借用宿主模型**：不需要单独配 API Key。绑定的会话由它自己的 Agent 用默认模型挑建议；这次调用不带工具，也不在会话里留下记录。
+- **零配置借用宿主模型**：不需要单独配 API Key。绑定的会话由它自己的 Agent 写建议；这次调用不带工具，也不在会话里留下记录。
 - **不替用户批准任何事**：宿主驱动的轮次走该 Agent 自己的审批规则，不用任何自动批准的模式，Agent 发来的权限请求一律拒绝。
-- **场景包只能收紧阈值**：仓库里带来的 `INTENTS.md` 不能把门槛调得比宿主更松，且必须显式启用。
+- **目录模式**：模型只能从场景包的封闭目录里选一个意图，文字来自模板；没把握时可给出 2–3 个并列选项（选项组）；场景包只能收紧门槛。适合需要稳定、可按分类评测的场合。
 
 ## 和 Codex composer predictions 的区别
 
 | | Codex composer predictions | intent-predict |
 |---|---|---|
-| 预测什么 | 一句开放文本 | 封闭目录中的一项或 `none`，附槽位与可选动作 |
+| 预测什么 | 一句开放文本 | 最多 3 条开放文本（会话自己的 Agent 写），附把握和风险标记；也可切到封闭目录 |
 | 在哪用 | Codex 桌面版 | 任意宿主，经 sidecar 的 JSON-RPC 接入；已接通 Grok、Hermes、Codex、Kimi、Claude Code 的命令行 |
-| 何时出现 | 策略未公开 | 写在规范里：守卫、场景路由、置信度门槛、冷却 |
+| 何时出现 | 策略未公开 | 写在规范里：守卫、把握门槛；目录模式另有场景路由和冷却 |
 | 如何评估 | 接受率 | 可回放的分类指标；接受率只是其中之一 |
 
 调研细节见 [docs/prior-art.md](docs/prior-art.md)。
@@ -143,10 +144,10 @@ npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自�
 |---|---|
 | [SPEC.md](SPEC.md) | 行为规范（本阶段唯一的规范性文本） |
 | [spec/](spec/) | 数据结构的 JSON Schema：事件、场景包、预测、遥测、RPC |
-| [INTENTS.md](INTENTS.md) | 内置编程场景包的唯一来源；普通包与积极包的 `pack.json` 均由它生成 |
-| [eval/golden.jsonl](eval/golden.jsonl) | 黄金用例，覆盖全部抑制原因，含录制的模型输出 |
+| [INTENTS.md](INTENTS.md) | 目录模式的内置编程场景包，唯一来源；普通包与积极包的 `pack.json` 均由它生成 |
+| [eval/golden.jsonl](eval/golden.jsonl) | 黄金用例：开放模式与目录模式，覆盖全部抑制原因，含录制的模型输出 |
 | [tools/](tools/) | `reference.py` 参考求值器（测试基准，不是产品）、`validate.py` 一致性校验、`build_pack.py` |
-| [packages/core](packages/core) | 核心：信号、路由、规则、模型分类、门控、渲染、发送与结果规则 |
+| [packages/core](packages/core) | 核心：信号、开放生成（默认）与目录模式的流水线、发送与结果规则 |
 | [packages/sidecar](packages/sidecar) | stdio JSON-RPC 服务 + 自带界面（「下一步建议」与「选择会话」两个网页，HTTP + SSE，仅回环地址） |
 | [packages/host-grok](packages/host-grok) | Agent 命令行宿主（包名沿用最初的 Grok 宿主）：Grok、Hermes、Codex、Kimi、Claude Code 五个适配器，负责驱动回合、还原历史、借模型挑建议、接收发送；以及本机会话的嗅探与绑定 |
 | [ROADMAP.md](ROADMAP.md) · [docs/design.md](docs/design.md) · [docs/future.md](docs/future.md) | 阶段计划与实测记录 · 设计理由与决策 · 后续阶段的非规范草案 |

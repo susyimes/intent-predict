@@ -29,6 +29,8 @@
   .context b { display:block; font-weight:600; font-size:12px; }
   .choices label { display:flex; gap:8px; padding:6px 8px; border:1px solid var(--line); border-radius:8px; margin-bottom:6px; cursor:pointer; }
   .choices small { color:var(--dim); display:block; overflow-wrap:anywhere; }
+  .choices .flag { color:var(--warn); }
+  .choices span { white-space:pre-wrap; overflow-wrap:anywhere; }
   textarea { width:100%; min-height:64px; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px; resize:vertical; }
   .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center; }
   button { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:6px 14px; cursor:pointer; }
@@ -130,11 +132,15 @@ function verdict(e) {
   const t = e.trace || {};
   if (r.type === 'failed') return '内部错误：' + r.error;
   const p = r.prediction;
+  if (p && isOpen(p)) return '给出建议：' + p.candidates.map((c) => c.text).join(' / ');
   if (p) {
     const texts = [p.text, ...p.alternatives.map((a) => a.text)];
     return p.optionSet ? '给出选项组：' + texts.join(' / ') : '给出建议：' + p.text + (p.alternatives.length ? '（备选：' + texts.slice(1).join(' / ') + '）' : '');
   }
-  const why = REASON[r.suppressedReason] || r.suppressedReason;
+  const why = t.mode === 'open' && r.suppressedReason === 'model_none' ? 'Agent 想不出你接下来会说什么' : REASON[r.suppressedReason] || r.suppressedReason;
+  if (t.mode === 'open' && r.suppressedReason === 'below_min_confidence' && typeof t.confidence === 'number') {
+    return `没出建议：${why}（最可能的一条 ${fixed(t.confidence)}，门槛 ${fixed(t.threshold)}）`;
+  }
   return r.suppressedReason === 'below_min_confidence' && typeof t.confidence === 'number'
     ? `没出建议：${why}（${t.selected} ${fixed(t.confidence)}，门槛 ${fixed(t.threshold)}）`
     : '没出建议：' + why;
@@ -181,18 +187,19 @@ async function rpc(method, params) {
 }
 
 // Options of an option set (SPEC 4.6): the primary and its alternatives, as equals. null otherwise.
-const setOptions = (p) => (p && p.optionSet
+const isOpen = (p) => !!p && p.mode === 'open';
+const setOptions = (p) => (p && !isOpen(p) && p.optionSet
   ? [{ alternative: null, intentId: p.intent.id, text: p.text, confidence: p.intent.confidence },
     ...p.alternatives.map((a) => ({ alternative: a.intentId, intentId: a.intentId, text: a.text, confidence: a.confidence }))]
   : null);
 // nothing is preselected for a choice list without a recommended item, or for an option set
-const needsPick = (p) => !!p && ((p.choices && p.preferredChoice === undefined) || !!p.optionSet);
+const needsPick = (p) => !!p && !isOpen(p) && ((p.choices && p.preferredChoice === undefined) || !!p.optionSet);
 
 function resetDraft(p) {
   draft = {
     id: p ? p.id : null, text: p && !needsPick(p) ? p.text : '',
     choice: p && p.choices && p.preferredChoice !== undefined ? p.preferredChoice : null,
-    alternative: null, picked: false, confirming: false, status: '', bad: false,
+    alternative: null, candidate: isOpen(p) ? 0 : null, picked: false, confirming: false, status: '', bad: false,
   };
 }
 
@@ -210,6 +217,7 @@ async function act(action, extra = {}) {
     params.text = draft.text;
     if (draft.choice !== null) params.choice = draft.choice;
     if (draft.alternative !== null) params.alternative = draft.alternative;
+    if (draft.candidate !== null) params.candidate = draft.candidate;
   }
   try {
     const { status } = await rpc('prediction/act', params);
@@ -241,14 +249,16 @@ function renderCard() {
   const card = el('div', { className: 'card' + (live ? '' : ' stale') });
   const options = setOptions(p);
 
-  const conf = p.intent.confidence === null ? '规则命中'
+  const open = isOpen(p);
+  const conf = open ? 'Agent 写的 ' + p.candidates.length + ' 条候选'
+    : p.intent.confidence === null ? '规则命中'
     : options ? '合计把握 ' + options.reduce((sum, o) => sum + o.confidence, 0).toFixed(2)
     : '置信度 ' + p.intent.confidence.toFixed(2);
   card.append(el('div', { className: 'meta' },
-    el('span', { className: 'tag', textContent: options ? options.map((o) => o.intentId).join(' / ') : p.intent.id }),
-    el('span', { className: 'tag', textContent: p.scenarioId }),
+    open ? el('span', { className: 'tag', textContent: '开放生成' }) : el('span', { className: 'tag', textContent: options ? options.map((o) => o.intentId).join(' / ') : p.intent.id }),
+    open ? null : el('span', { className: 'tag', textContent: p.scenarioId }),
     el('span', { className: 'tag', textContent: conf }),
-    p.risk === 'side_effect' ? el('span', { className: 'tag risk', textContent: '有外部副作用' }) : null,
+    !open && p.risk === 'side_effect' ? el('span', { className: 'tag risk', textContent: '有外部副作用' }) : null,
     live ? null : el('span', { className: 'tag', textContent: '已过期' }),
     lookAtTurn(s, p)));
 
@@ -256,8 +266,23 @@ function renderCard() {
     card.append(el('div', { className: 'context' }, el('b', { textContent: 'Agent 刚才说（节选）：' }), p.context.excerpt));
   }
   if (!live) {
-    card.append(el('div', { textContent: options ? options.map((o) => o.text).join(' / ') : p.text }));
+    card.append(el('div', { textContent: open ? p.candidates.map((c) => c.text).join(' / ') : options ? options.map((o) => o.text).join(' / ') : p.text }));
     return box.append(card);
+  }
+
+  if (open) {
+    // the agent's guesses at your next message, likeliest first; the first starts in the editor
+    const group = el('div', { className: 'choices', role: 'radiogroup' });
+    p.candidates.forEach((c, i) => {
+      const radio = el('input', { type: 'radio', name: 'candidate', checked: draft.candidate === i });
+      radio.addEventListener('change', () => {
+        Object.assign(draft, { candidate: i, text: c.text, confirming: false });
+        render();
+      });
+      group.append(el('label', {}, radio, el('span', {}, c.text,
+        el('small', {}, '把握 ' + fixed(c.confidence), c.confirmBeforeSend ? el('span', { className: 'flag', textContent: ' · 可能有外部影响，发送前要确认' }) : null))));
+    });
+    card.append(group);
   }
 
   if (options) {
@@ -299,7 +324,7 @@ function renderCard() {
     card.append(el('div', { className: 'status', textContent: '不改字直接发送时，将作为命令 ' + p.action.command + ' 执行。' }));
   }
 
-  if (p.alternatives.length && !options) {
+  if (!open && p.alternatives.length && !options) {
     const alts = el('div', { className: 'row alts' }, el('span', { className: 'status', textContent: '或者：' }));
     for (const a of p.alternatives) {
       const b = el('button', { textContent: a.text, title: a.intentId });
@@ -312,7 +337,7 @@ function renderCard() {
     card.append(alts);
   }
 
-  const needsConfirm = p.confirmBeforeSend && draft.alternative === null;
+  const needsConfirm = open ? !!p.candidates[draft.candidate]?.confirmBeforeSend : p.confirmBeforeSend && draft.alternative === null;
   const sendBtn = el('button', { className: 'primary', textContent: '发给 Agent', disabled: !draft.text.trim() });
   sendBtn.addEventListener('click', () => {
     if (needsConfirm) { draft.confirming = true; render(); } else act('send');
@@ -332,7 +357,7 @@ function renderCard() {
     const no = el('button', { textContent: '取消' });
     no.addEventListener('click', () => { draft.confirming = false; render(); });
     card.append(el('div', { className: 'confirm', role: 'alertdialog' },
-      el('div', { textContent: '这条消息会让 Agent 做有外部影响的事。将把下面这句话作为你的消息发到会话 ' + p.sessionId + '：' }),
+      el('div', { textContent: (open ? '这条消息可能让 Agent 做有外部影响的事（推送、发布、删除等）。' : '这条消息会让 Agent 做有外部影响的事。') + '将把下面这句话作为你的消息发到会话 ' + p.sessionId + '：' }),
       el('pre', { textContent: draft.text }),
       p.context ? el('div', { className: 'context' }, el('b', { textContent: '它回应的是：' }), p.context.excerpt) : null,
       el('div', { className: 'row' }, yes, no)));
@@ -352,7 +377,12 @@ function lookAtTurn(s, p) {
 
 function renderDetail(e) {
   const t = e.trace || {};
-  const facts = [['场景', t.scenarioId || '没有匹配的场景']];
+  const facts = t.mode === 'open'
+    ? [['方式', '开放生成：会话自己的 Agent 读了最近几轮，直接写出你可能要发的话']]
+    : [['场景', t.scenarioId || '没有匹配的场景']];
+  if (t.mode === 'open' && typeof t.candidates === 'number') {
+    facts.push(['候选', `写了 ${t.candidates} 条可用的` + (typeof t.confidence === 'number' ? `，最可能的一条把握 ${fixed(t.confidence)}，门槛 ${fixed(t.threshold)}` : '')]);
+  }
   if (t.catalog) facts.push(['候选意图', t.catalog.join('、') || '（无）']);
   if (t.selected) {
     facts.push([t.source === 'rule' ? '规则选中' : '模型选了',
@@ -401,10 +431,10 @@ function renderLog() {
   for (const e of (s?.log || []).slice(-50).reverse()) {
     const r = e.result;
     const t = e.trace || {};
-    const shown = r.prediction && (r.prediction.optionSet
+    const shown = r.prediction && (isOpen(r.prediction) ? r.prediction.candidates.length + ' 条候选' : r.prediction.optionSet
       ? [r.prediction.intent.id, ...r.prediction.alternatives.map((a) => a.intentId)].join(' / ') + '（选项组）'
       : r.prediction.intent.id);
-    const outcome = r.type === 'failed' ? '内部错误：' + r.error : r.prediction ? '给出 ' + shown : '没出建议：' + (REASON[r.suppressedReason] || r.suppressedReason);
+    const outcome = r.type === 'failed' ? '内部错误：' + r.error : r.prediction ? '给出 ' + shown : verdict(e);
     const conf = typeof t.confidence === 'number' ? fixed(t.confidence) + (typeof t.threshold === 'number' ? ' / ' + fixed(t.threshold) : '') : t.source === 'rule' ? '规则命中' : '—';
     const open = expanded === e;
     const tr = el('tr', { className: 'turn' + (open ? ' open' : '') + (e.fresh ? ' fresh' : ''), tabIndex: 0, title: '点击查看这一轮' },

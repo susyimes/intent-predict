@@ -1,21 +1,27 @@
 // The core: session state, the pipeline of SPEC 4, and the action rules of SPEC 5.
 import type {
-  ActParams, ActStatus, AgentEvent, Alternative, Choice, CoreConfig, DispatchRequest, EvaluationRecord,
+  ActParams, ActStatus, AgentEvent, Alternative, Candidate, CatalogPrediction, Choice, CoreConfig, DispatchRequest, EvaluationRecord,
   EvaluationResult, GatePolicy, HostBridge, IntentSpec, InvalidatedParams, InvalidationReason, Options,
-  OutcomeRecord, Prediction, SampleResult, SamplerMode, ScenarioPack, ScenarioSpec, Selected, Signals,
+  OpenPrediction, OutcomeRecord, Prediction, SampleResult, SamplerMode, ScenarioPack, ScenarioSpec, Selected, Signals,
   SuppressedReason, Trace, TurnDigest, TurnItem, UpdatedParams,
 } from './types.ts';
 import { INVALID_PARAMS, RpcError, SESSION_BUSY, TURN_MISMATCH } from './types.ts';
 import { extractSignals, finalAgentText, holds, resolve, toolKind } from './signals.ts';
-import { DEFAULT_PROMPT, renderPrompt, signalsJson, transcript } from './prompt.ts';
+import { DEFAULT_PROMPT, OPEN_LIMITS, renderOpenPrompt, renderPrompt, signalsJson, transcript } from './prompt.ts';
 import { Suppress, commandString, renderItem, resolveSlots } from './render.ts';
-import { cpLength, cut, cutStart, isNum, redact, similarity } from './text.ts';
+import { DESTRUCTIVE_RE, cpLength, cut, cutStart, isNum, redact, similarity } from './text.ts';
 
 export const DEFAULT_POLICY: GatePolicy = { minConfidence: 0.6, sideEffectMinConfidence: 0.8 };
 export const DEFAULT_OPTIONS: Options = {
   enabled: true, blockedModes: ['plan'], settleMs: 150, timeoutMs: 4000, samplerMode: 'compact',
   cooldownTurnsAfterDismiss: 3, altMinConfidence: 0.15, redact: 'default', optionSets: true,
+  mode: 'open', minCandidateConfidence: 0.15,
 };
+/** Open mode (SPEC 4.9): how much conversation the agent sees, and the most it writes back. */
+const OPEN_TURNS = 6;
+const OPEN_PROMPT_CHARS = 24_000;
+const MAX_CANDIDATES = 3;
+const MAX_CANDIDATE_CHARS = 1000;
 const MAX_TURNS = 50;
 const MAX_EVENTS = 500;
 const HOUR_MS = 3_600_000;
@@ -36,6 +42,20 @@ interface Session {
 type Listeners = { updated: Array<(p: UpdatedParams) => void>; invalidated: Array<(p: InvalidatedParams) => void> };
 
 const str = (x: unknown): x is string => typeof x === 'string';
+const isObj = (x: unknown): x is Record<string, unknown> => x !== null && typeof x === 'object' && !Array.isArray(x);
+const validConf = (c: unknown): c is number => isNum(c) && c >= 0 && c <= 1;
+/** Control characters other than tab and line breaks: not something a user types. */
+const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+/** A sampler reply: JSON, optionally inside one ```json fence; no salvage of partial output (SPEC 4.5 step 8). */
+function parseReply(text: string): unknown {
+  const body = text.trim();
+  const fenced = /^```(?:json)?[ \t]*\n([\s\S]*?)\n?```$/.exec(body);
+  try {
+    return JSON.parse(fenced ? fenced[1]! : body);
+  } catch {
+    throw new Suppress('invalid_model_output');
+  }
+}
 /** Accept only well-formed events of a type this version defines (SPEC 1.2); everything else is ignored. */
 function known(raw: unknown): AgentEvent | undefined {
   if (raw === null || typeof raw !== 'object') return undefined;
@@ -214,8 +234,11 @@ export class Core {
     };
     if (result.type === 'completed') {
       if (result.prediction) {
-        Object.assign(record, { predictionId: result.prediction.id, qualifiedIntentId: result.prediction.qualifiedIntentId });
-        if (result.prediction.usage) record.usage = result.prediction.usage;
+        const p = result.prediction;
+        record.predictionId = p.id;
+        if (p.mode === 'open') record.candidates = p.candidates.length;
+        else record.qualifiedIntentId = p.qualifiedIntentId;
+        if (p.usage) record.usage = p.usage;
       } else {
         record.suppressedReason = result.suppressedReason;
       }
@@ -225,7 +248,9 @@ export class Core {
     if (trace.confidence !== undefined) record.confidence = trace.confidence;
     if (trace.threshold !== undefined) record.threshold = trace.threshold;
     if (trace.samplerMode) record.samplerMode = trace.samplerMode;
-    if (result.type === 'completed' && result.prediction?.optionSet) record.optionSet = true;
+    if (trace.mode) record.mode = trace.mode;
+    if (trace.candidates !== undefined && record.candidates === undefined) record.candidates = trace.candidates;
+    if (result.type === 'completed' && result.prediction && result.prediction.mode !== 'open' && result.prediction.optionSet) record.optionSet = true;
     this.config.telemetry?.(record);
     const params: UpdatedParams = { sessionId: s.id, sourceTurnId: turnId, result, trace, at: record.timestamp };
     s.recent.push(params);
@@ -256,8 +281,8 @@ export class Core {
     s.open = undefined;
     this.config.telemetry?.({
       record: 'outcome', timestamp: this.now(), sessionId: s.id, predictionId: open.prediction.id,
-      qualifiedIntentId: open.prediction.qualifiedIntentId, outcome, copied: open.copied,
-      msSinceShown: Math.max(0, this.now() - open.shownAt), ...extra,
+      ...(open.prediction.mode === 'open' ? { mode: 'open' as const } : { qualifiedIntentId: open.prediction.qualifiedIntentId }),
+      outcome, copied: open.copied, msSinceShown: Math.max(0, this.now() - open.shownAt), ...extra,
     });
   }
 
@@ -294,7 +319,7 @@ export class Core {
     this.emitUpdated(s, ev.turnId, result, trace);
   }
 
-  private sample(s: Session, ev: Evaluation, mode: SamplerMode, prompt: string): Promise<SampleResult> {
+  private sample(s: Session, ev: Evaluation, mode: SamplerMode, prompt: string, maxOutputTokens = 120): Promise<SampleResult> {
     const signal = ev.controller.signal;
     return new Promise((resolvePromise, reject) => {
       const timer = setTimeout(() => {
@@ -305,7 +330,7 @@ export class Core {
         clearTimeout(timer);
         reject(new Suppress('aborted'));
       }, { once: true });
-      this.host.sample!({ sessionId: s.id, expectedTurnId: ev.turnId, mode, prompt, maxOutputTokens: 120 }, signal).then(
+      this.host.sample!({ sessionId: s.id, expectedTurnId: ev.turnId, mode, prompt, maxOutputTokens }, signal).then(
         (r) => { clearTimeout(timer); resolvePromise(r); },
         () => { clearTimeout(timer); reject(new Suppress('sampler_error')); },
       );
@@ -318,6 +343,7 @@ export class Core {
     const opts = this.options;
     const sig = extractSignals({ events: s.events, completedCount: s.turnCount, state: s.state }, turnId);
     trace.signalsJson = signalsJson(sig);
+    trace.mode = opts.mode;
     if (this.config.debugTrace) trace.signals = sig;
     const status = sig.lastTurn.status;
     const turnEvents = s.events.filter((e) => 'turnId' in e && e.turnId === turnId);
@@ -332,13 +358,15 @@ export class Core {
       [this.host.interactive === false, 'non_interactive'],
       [s.state.pendingApproval === true || s.state.pendingInput === true
         || (lastCall?.type === 'tool.call' && toolKind(lastCall) === 'ask_user' && !answered.has(lastCall.callId)), 'pending_interaction'],
-      [status === 'interrupted', 'interrupted_turn'],
-      [status === 'failed' && !scenarios.some(({ scn }) => statuses(scn).includes('failed')), 'failed_turn_unhandled'],
+      // catalog mode only: in open mode the agent sees an interrupted or failed turn like any other (SPEC 4.9)
+      [opts.mode === 'catalog' && status === 'interrupted', 'interrupted_turn'],
+      [opts.mode === 'catalog' && status === 'failed' && !scenarios.some(({ scn }) => statuses(scn).includes('failed')), 'failed_turn_unhandled'],
       [str(s.state.mode) && opts.blockedModes.includes(s.state.mode), 'mode_blocked'],
       [s.state.incognito === true, 'incognito'],
       [opts.maxPerSession !== undefined && s.delivered >= opts.maxPerSession, 'max_per_session_reached'],
     ];
     for (const [tripped, reason] of guards) if (tripped) throw new Suppress(reason);
+    if (opts.mode === 'open') return this.openPipeline(s, ev, trace, sig, turnEvents);
 
     // 4.3 routing and catalog
     const eligible = scenarios.filter(({ scn }) => (statuses(scn) as string[]).includes(status) && holds(scn.match, sig));
@@ -440,16 +468,7 @@ export class Core {
       usage = { ...sampled.usage, latencyMs: Math.max(0, this.now() - started) };
       if (!str(sampled.text) || !sampled.text.trim()) throw new Suppress('invalid_model_output');
 
-      const body = sampled.text.trim();
-      const fenced = /^```(?:json)?[ \t]*\n([\s\S]*?)\n?```$/.exec(body);
-      let reply: unknown;
-      try {
-        reply = JSON.parse(fenced ? fenced[1]! : body);
-      } catch {
-        throw new Suppress('invalid_model_output');
-      }
-      const validConf = (c: unknown): c is number => isNum(c) && c >= 0 && c <= 1;
-      const isObj = (x: unknown): x is Record<string, unknown> => x !== null && typeof x === 'object' && !Array.isArray(x);
+      const reply = parseReply(sampled.text);
       if (!isObj(reply) || !validConf(reply.confidence) || ('slots' in reply && !isObj(reply.slots))) {
         throw new Suppress('invalid_model_output');
       }
@@ -538,8 +557,8 @@ export class Core {
       ? set.alternatives
       : runnerUps.map(offerable).filter((a): a is Alternative => a !== undefined);
 
-    const prediction: Prediction = {
-      id: this.config.newId?.() ?? `p-${Date.now().toString(36)}-${++this.seq}`,
+    const prediction: CatalogPrediction = {
+      id: this.newId(),
       sessionId: s.id, sourceTurnId: turnId,
       packId: pack.id, packVersion: pack.version, scenarioId: scn.id,
       qualifiedIntentId: `${pack.id}@${pack.version}/${scn.id}#${selected.id}`,
@@ -561,6 +580,81 @@ export class Core {
     return prediction;
   }
 
+  private newId(): string {
+    return this.config.newId?.() ?? `p-${Date.now().toString(36)}-${++this.seq}`;
+  }
+
+  /**
+   * SPEC 4.9, open mode: the session's own agent reads the recent conversation and writes the messages the
+   * user is likely to send next. The core keeps the usable ones, likeliest first, and flags risky ones.
+   */
+  private async openPipeline(s: Session, ev: Evaluation, trace: Trace, sig: Signals, turnEvents: AgentEvent[]): Promise<OpenPrediction> {
+    const { turnId, at } = ev;
+    const opts = this.options;
+    const strict = opts.redact === 'strict';
+    const modes = this.host.samplerModes ?? [];
+    if (!modes.length || !this.host.sample) throw new Suppress('no_sampler');
+    s.modelCalls = s.modelCalls.filter((t) => at - t < HOUR_MS);
+    if (opts.modelBudget && s.modelCalls.length >= opts.modelBudget.maxCallsPerHour) throw new Suppress('budget_exhausted');
+    const mode = modes.includes(opts.samplerMode) ? opts.samplerMode : modes[0]!;
+    trace.samplerMode = mode;
+    const fits = (p: string) => (mode === 'fork' ? Buffer.byteLength(p, 'utf8') <= 4000 : cpLength(p) <= OPEN_PROMPT_CHARS);
+    let turns = s.recentTurns.slice(-OPEN_TURNS);
+    const build = () => renderOpenPrompt(sig, mode, transcript(s.events, turns, strict, OPEN_LIMITS));
+    let prompt = build();
+    while (!fits(prompt) && mode === 'compact' && turns.length) {
+      turns = turns.slice(1);
+      prompt = build();
+    }
+    if (this.config.debugTrace) trace.prompt = prompt;
+    if (!fits(prompt)) throw new Suppress('prompt_too_large');
+
+    s.modelCalls.push(at);
+    ev.phase = 'sampling';
+    const started = this.now();
+    const sampled = await this.sample(s, ev, mode, prompt, 800);
+    ev.phase = 'running';
+    const usage = { ...sampled.usage, latencyMs: Math.max(0, this.now() - started) };
+    if (!str(sampled.text) || !sampled.text.trim()) throw new Suppress('invalid_model_output');
+    const reply = parseReply(sampled.text);
+    if (!isObj(reply) || !Array.isArray(reply.candidates)) throw new Suppress('invalid_model_output');
+    if (!reply.candidates.length) throw new Suppress('model_none');
+
+    // usable candidates, likeliest first (a stable sort keeps the model's order on ties), each text once
+    const usable = reply.candidates.flatMap((c: unknown) => {
+      if (!isObj(c) || !str(c.text) || !validConf(c.confidence)) return [];
+      const text = c.text.trim();
+      if (!text || cpLength(text) > MAX_CANDIDATE_CHARS || CONTROL_RE.test(text)) return [];
+      return [{ text, confidence: c.confidence, sideEffect: c.sideEffect === true }];
+    }).sort((a, b) => b.confidence - a.confidence);
+    if (!usable.length) throw new Suppress('invalid_model_output');
+    const seen = new Set<string>();
+    const unique = usable.filter((c) => {
+      const key = c.text.replace(/\s+/g, ' ');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    trace.candidates = unique.length;
+    trace.confidence = unique[0]!.confidence;
+    trace.threshold = opts.minCandidateConfidence;
+    const kept = unique.filter((c) => c.confidence >= opts.minCandidateConfidence - 1e-9).slice(0, MAX_CANDIDATES);
+    if (!kept.length) throw new Suppress('below_min_confidence');
+
+    const candidates: Candidate[] = kept.map((c) => {
+      const text = redact(c.text, strict);
+      // a candidate that would act outside the workspace is flagged and confirmed, never dropped
+      return { text, confidence: c.confidence, sideEffect: c.sideEffect, confirmBeforeSend: c.sideEffect || DESTRUCTIVE_RE.test(text) };
+    });
+    const prediction: OpenPrediction = {
+      mode: 'open', id: this.newId(), sessionId: s.id, sourceTurnId: turnId,
+      text: candidates[0]!.text, candidates, locale: sig.user.locale, source: 'model', createdAt: this.now(), usage,
+    };
+    const finalText = finalAgentText(turnEvents);
+    if (finalText.trim()) prediction.context = { excerpt: cutStart(redact(finalText, strict), 300) };
+    return prediction;
+  }
+
   // ---- surface actions (SPEC 5.2, 5.3) -----------------------------------
   async act(params: ActParams): Promise<ActStatus> {
     const s = this.sessions.get(this.owners.get(params.predictionId) ?? '');
@@ -572,29 +666,47 @@ export class Core {
     const p = s.live?.id === params.predictionId ? s.live : undefined;
     if (!p) return 'stale';
     if (params.action === 'dismiss') {
-      // the user turned down every option of a set, not just the first
-      for (const id of [p.intent.id, ...(p.optionSet ? p.alternatives.map((a) => a.intentId) : [])]) {
-        s.cooldown.set(`${p.packId}/${p.scenarioId}#${id}`, s.turnCount + this.options.cooldownTurnsAfterDismiss);
+      // catalog mode: the user turned down every option of a set, not just the first. Open mode has no cooldown.
+      if (p.mode !== 'open') {
+        for (const id of [p.intent.id, ...(p.optionSet ? p.alternatives.map((a) => a.intentId) : [])]) {
+          s.cooldown.set(`${p.packId}/${p.scenarioId}#${id}`, s.turnCount + this.options.cooldownTurnsAfterDismiss);
+        }
       }
       this.finalize(s, 'dismissed');
       this.invalidate(s, 'resolved');
       return 'recorded';
     }
 
-    let item: { text: string; action?: Prediction['action'] } = p;
+    let item: { text: string; action?: CatalogPrediction['action'] };
     let selected: Selected = { kind: 'primary' };
-    let needsConfirm = p.confirmBeforeSend;
-    if (params.choice !== undefined) {
+    let needsConfirm: boolean;
+    if (p.mode === 'open') {
+      if (params.choice !== undefined || params.alternative !== undefined) {
+        throw new RpcError(INVALID_PARAMS, 'an open prediction has candidates, not choices or alternatives');
+      }
+      const index = params.candidate ?? 0;
+      const candidate = Number.isInteger(index) ? p.candidates[index] : undefined;
+      if (!candidate) throw new RpcError(INVALID_PARAMS, 'no such candidate');
+      item = candidate;
+      selected = { kind: 'candidate', index };
+      needsConfirm = candidate.confirmBeforeSend;
+    } else if (params.candidate !== undefined) {
+      throw new RpcError(INVALID_PARAMS, 'a catalog prediction has no candidates');
+    } else if (params.choice !== undefined) {
       const choice = p.choices?.[params.choice];
       if (!Number.isInteger(params.choice) || !choice) throw new RpcError(INVALID_PARAMS, 'no such choice');
       item = { text: choice.text, action: p.action };
       selected = { kind: 'choice', index: params.choice };
+      needsConfirm = p.confirmBeforeSend;
     } else if (params.alternative !== undefined) {
       const alt = p.alternatives.find((a) => a.intentId === params.alternative);
       if (!alt) throw new RpcError(INVALID_PARAMS, 'no such alternative');
       item = alt;
       selected = { kind: 'alternative', intentId: alt.intentId };
       needsConfirm = false;
+    } else {
+      item = p;
+      needsConfirm = p.confirmBeforeSend;
     }
     const text = params.text;
     if (!str(text) || !text.trim() || cpLength(text) > 4000) throw new RpcError(INVALID_PARAMS, 'send needs 1-4000 characters of text');
@@ -634,6 +746,7 @@ export class Core {
 }
 
 function outcomeSimilarity(p: Prediction, text: string): number {
+  if (p.mode === 'open') return Math.round(Math.max(...p.candidates.map((c) => similarity(c.text, text))) * 1e4) / 1e4;
   const candidates = [p.text, ...(p.choices ?? []).map((c) => c.text), ...p.alternatives.map((a) => a.text)];
   for (const item of [p, ...p.alternatives]) {
     const command = commandString(item.action);

@@ -78,7 +78,9 @@ export interface Alternative {
   risk: Risk; passThrough: boolean; action?: ActionDescriptor;
 }
 export interface Usage { inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; latencyMs: number }
-export interface Prediction {
+/** A catalog-mode prediction (SPEC 4.3-4.8): one intent of a scenario pack, rendered from its template. */
+export interface CatalogPrediction {
+  mode?: undefined;
   id: string; sessionId: string; sourceTurnId: string;
   packId: string; packVersion: string; scenarioId: string; qualifiedIntentId: string;
   intent: { id: string; confidence: number | null; slots: Record<string, unknown> };
@@ -92,6 +94,21 @@ export interface Prediction {
   source: 'rule' | 'model';
   createdAt: number; usage?: Usage;
 }
+/** One message the model expects the user may send next (SPEC 4.9). */
+export interface Candidate { text: string; confidence: number; sideEffect: boolean; confirmBeforeSend: boolean }
+/** An open-mode prediction (SPEC 4.9): the session's own agent wrote the candidates; the first is the likeliest. */
+export interface OpenPrediction {
+  mode: 'open';
+  id: string; sessionId: string; sourceTurnId: string;
+  /** The first candidate's text. */
+  text: string;
+  candidates: Candidate[];
+  locale: string;
+  context?: { excerpt: string };
+  source: 'model';
+  createdAt: number; usage?: Usage;
+}
+export type Prediction = CatalogPrediction | OpenPrediction;
 export type EvaluationResult =
   | { type: 'completed'; prediction: Prediction }
   | { type: 'completed'; prediction: null; suppressedReason: SuppressedReason }
@@ -103,6 +120,9 @@ export interface Trace {
   confidence?: number | null; threshold?: number; samplerMode?: SamplerMode;
   /** The intents of an option set, primary first. */
   optionSet?: string[];
+  mode?: 'open' | 'catalog';
+  /** Open mode: how many usable candidates the model wrote. */
+  candidates?: number;
   signalsJson?: string;
   /** Only with `debugTrace`: unredacted, never sent to a surface. */
   signals?: Signals; prompt?: string;
@@ -131,11 +151,14 @@ export interface EvaluationRecord {
   predictionId?: string; qualifiedIntentId?: string; scenarioId?: string; source?: 'rule' | 'model';
   confidence?: number | null; threshold?: number; samplerMode?: SamplerMode; usage?: Usage;
   optionSet?: true;
+  mode?: 'open' | 'catalog';
+  candidates?: number;
 }
 export type Selected =
-  | { kind: 'primary' } | { kind: 'choice'; index: number } | { kind: 'alternative'; intentId: string };
+  | { kind: 'primary' } | { kind: 'choice'; index: number } | { kind: 'alternative'; intentId: string }
+  | { kind: 'candidate'; index: number };
 export interface OutcomeRecord {
-  record: 'outcome'; timestamp: number; sessionId: string; predictionId: string; qualifiedIntentId: string;
+  record: 'outcome'; timestamp: number; sessionId: string; predictionId: string; qualifiedIntentId?: string; mode?: 'open';
   outcome: 'sent' | 'dismissed' | 'passed' | 'expired';
   selected?: Selected; edited?: boolean; copied?: boolean; similarity?: number; msSinceShown?: number;
 }
@@ -168,6 +191,10 @@ export interface Options {
   cooldownTurnsAfterDismiss: number; altMinConfidence: number; redact: 'default' | 'strict';
   /** Offer an option set when the first choice alone is below minConfidence (SPEC 4.6). */
   optionSets: boolean;
+  /** open (default): the session's own agent writes the candidates (SPEC 4.9). catalog: the v0.5 pipeline. */
+  mode: 'open' | 'catalog';
+  /** Open mode: candidates below this confidence are not shown. */
+  minCandidateConfidence: number;
 }
 export interface CoreConfig {
   policy?: Partial<GatePolicy>;
@@ -183,6 +210,8 @@ export interface CoreConfig {
 export interface ActParams {
   predictionId: string; action: 'send' | 'copy' | 'dismiss';
   text?: string; choice?: number; alternative?: string; confirmed?: boolean;
+  /** Open mode: index into prediction.candidates (default 0). */
+  candidate?: number;
 }
 export type ActStatus =
   | 'dispatched' | 'recorded' | 'stale' | 'busy' | 'confirmation_required' | 'unsupported' | 'failed';

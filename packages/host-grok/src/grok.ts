@@ -290,13 +290,14 @@ const SAMPLER_SYSTEM =
  * Grok has no ephemeral mode, so the call leaves a session behind; its id is returned for deletion.
  */
 export async function sampleWithGrok(
-  promptFile: string, opts: { cwd: string; model?: string; signal?: AbortSignal; bin?: Bin },
+  promptFile: string, opts: { cwd: string; model?: string; signal?: AbortSignal; bin?: Bin; lowEffort?: boolean },
 ): Promise<SampleResult & { sessionId?: string }> {
   const args = [
     '--prompt-file', promptFile, '--output-format', 'json', '--max-turns', '1', '--no-subagents', '--no-plan',
-    '--disable-web-search', '--reasoning-effort', 'low', '--disallowed-tools', ALL_TOOLS,
+    '--disable-web-search', '--disallowed-tools', ALL_TOOLS,
     '--system-prompt-override', SAMPLER_SYSTEM,
   ];
+  if (opts.lowEffort) args.push('--reasoning-effort', 'low');      // only when the user chose it
   if (opts.model) args.push('--model', opts.model);
   const { code, stdout, stderr } = await runGrok(args, opts);
   let out: GrokLine;
@@ -351,7 +352,7 @@ export const grokAdapter: AgentAdapter = {
   async sample(prompt, ctx) {
     const bin = ctx.env.bins.grok ?? 'grok';
     const { sessionId, ...result } = await sampleWithGrok(ctx.env.promptFile(prompt), {
-      cwd: ctx.env.scratch(), model: ctx.env.grokModel, signal: ctx.signal, bin,
+      cwd: ctx.env.scratch(), model: ctx.env.grokModel, signal: ctx.signal, bin, lowEffort: ctx.env.samplerEffort === 'low',
     });
     // Grok has no ephemeral mode: remove the session the call stored
     return isSafeName(sessionId) ? { ...result, cleanup: deleteGrokSession(sessionId, bin) } : result;

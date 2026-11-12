@@ -145,7 +145,7 @@
         }
       }
     },
-    "Prediction": {
+    "CatalogPrediction": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -327,6 +327,112 @@
               }
             }
           }
+        }
+      ],
+      "description": "Catalog mode (SPEC 4.3-4.8): one intent of a scenario pack, rendered from its template."
+    },
+    "Candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "confidence",
+        "sideEffect",
+        "confirmBeforeSend"
+      ],
+      "description": "One message the model expects the user may send next (SPEC 4.9).",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "description": "Written by the session's own agent, then redacted (SPEC 7.1)."
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "sideEffect": {
+          "type": "boolean",
+          "description": "The model says this would make the agent act outside the workspace."
+        },
+        "confirmBeforeSend": {
+          "type": "boolean",
+          "description": "sideEffect, or the text looks destructive: a surface puts a separate confirmation step before sending it."
+        }
+      }
+    },
+    "OpenPrediction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "id",
+        "sessionId",
+        "sourceTurnId",
+        "text",
+        "candidates",
+        "locale",
+        "source",
+        "createdAt"
+      ],
+      "description": "Open mode (SPEC 4.9): the session's own agent wrote the candidates; the first is the likeliest.",
+      "properties": {
+        "mode": {
+          "const": "open"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceTurnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "description": "The first candidate's text."
+        },
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/$defs/Candidate"
+          }
+        },
+        "locale": {
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/$defs/Context"
+        },
+        "source": {
+          "const": "model"
+        },
+        "createdAt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        }
+      }
+    },
+    "Prediction": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/CatalogPrediction"
+        },
+        {
+          "$ref": "#/$defs/OpenPrediction"
         }
       ]
     },

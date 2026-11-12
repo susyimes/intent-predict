@@ -1,7 +1,30 @@
-// Classification prompt, signals_json and compact transcript (SPEC 4.5).
+// Prompts (SPEC 4.5: catalog mode; SPEC 4.9: open mode), signals_json and the compact transcript.
 import type { AgentEvent, IntentSpec, SamplerMode, ScenarioSpec, Signals, ToolCall, ToolResult } from './types.ts';
 import { finalAgentText, resolve } from './signals.ts';
 import { cut, cutStart, firstCps, redact } from './text.ts';
+
+/** Open mode (SPEC 4.9): the session's own agent writes the user's likely next messages itself. */
+export const OPEN_PROMPT = `[NEXT MESSAGE PREDICTION — do not continue the task. Do not call tools.]
+Below are the latest turns of a session between a user and an AI agent. Predict the message THE USER will send next.
+
+Write up to 3 candidates, each exactly as the user would type it: in the user's language and tone, about as long as their earlier messages. Make the candidates meaningfully different from each other. For each candidate give your probability that the user's next message means essentially the same. The probabilities together must not exceed 1. If nothing plausible comes to mind, return an empty list.
+
+Set "sideEffect": true on a candidate that would have the agent do something with effects outside the workspace, such as pushing, publishing, deploying, sending or deleting.
+
+User locale: {{user.locale}}
+{{#if compact}}
+Recent conversation (oldest first):
+{{transcript}}
+{{/if}}
+Signals: {{signals_json}}
+
+Reply with a single JSON object only:
+{"candidates":[{"text":"...","confidence":0.0,"sideEffect":false}]}`;
+
+/** How much of each turn the compact transcript keeps: catalog mode (SPEC 4.5 step 6) and open mode (4.9). */
+export interface TranscriptLimits { user: number; agent: number; tools: number }
+export const CATALOG_LIMITS: TranscriptLimits = { user: 500, agent: 1500, tools: 6 };
+export const OPEN_LIMITS: TranscriptLimits = { user: 2000, agent: 4000, tools: 12 };
 
 export const DEFAULT_PROMPT = `[INTENT PREDICTION — do not continue the task. Do not call tools.]
 Predict the user's NEXT message in this session by choosing from a fixed catalog.
@@ -45,12 +68,12 @@ export function signalsJson(signals: Signals): string {
   return JSON.stringify(obj);
 }
 
-export function transcript(events: AgentEvent[], turnIds: string[], strict: boolean): string {
+export function transcript(events: AgentEvent[], turnIds: string[], strict: boolean, limits: TranscriptLimits = CATALOG_LIMITS): string {
   const lines: string[] = [];
   for (const turnId of turnIds) {
     const evs = events.filter((e) => 'turnId' in e && e.turnId === turnId);
     const results = new Map(evs.filter((e): e is ToolResult => e.type === 'tool.result').map((r) => [r.callId, r]));
-    for (const e of evs) if (e.type === 'message.user') lines.push('User: ' + cut(redact(e.text, strict), 500));
+    for (const e of evs) if (e.type === 'message.user') lines.push('User: ' + cut(redact(e.text, strict), limits.user));
     let tools: string[] = [];
     for (const c of evs.filter((e): e is ToolCall => e.type === 'tool.call')) {
       const r = results.get(c.callId);
@@ -60,10 +83,13 @@ export function transcript(events: AgentEvent[], turnIds: string[], strict: bool
       if (r.summary) line += ': ' + redact(r.summary, strict);
       tools.push(firstCps(line, 200));
     }
-    if (tools.length > 6) tools = [...tools.slice(0, 2), `Tool: … (${tools.length - 6} more)`, ...tools.slice(-4)];
+    if (tools.length > limits.tools) {
+      const head = Math.floor(limits.tools / 3);
+      tools = [...tools.slice(0, head), `Tool: … (${tools.length - limits.tools} more)`, ...tools.slice(-(limits.tools - head))];
+    }
     lines.push(...tools);
     const final = redact(finalAgentText(evs), strict);
-    if (final) lines.push('Assistant: ' + cutStart(final, 1500));
+    if (final) lines.push('Assistant: ' + cutStart(final, limits.agent));
   }
   return lines.join('\n');
 }
@@ -101,4 +127,9 @@ export function renderPrompt(
     transcript: transcriptText,
   };
   return out.replace(/\{\{\s*([^{}]*?)\s*\}\}/g, (_m, name: string) => scalars[name] ?? '');
+}
+
+/** The open-mode prompt (SPEC 4.9): no scenario and no catalog, only the conversation and its signals. */
+export function renderOpenPrompt(signals: Signals, mode: SamplerMode, transcriptText: string, template = OPEN_PROMPT): string {
+  return renderPrompt(template, { id: '', description: '' } as ScenarioSpec, [], signals, mode, transcriptText, false);
 }

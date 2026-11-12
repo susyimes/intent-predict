@@ -38,12 +38,14 @@ function subset(expected: unknown, actual: unknown): boolean {
 
 function checkPrediction(expected: Json, p: Prediction): string[] {
   const exp = { ...expected };
-  const probes: Json = {
-    intentId: p.intent.id,
-    alternativeIds: p.alternatives.map((a) => a.intentId),
-    choiceTexts: (p.choices ?? []).map((c) => c.text),
-    choiceLabels: (p.choices ?? []).map((c) => c.label),
-  };
+  const probes: Json = p.mode === 'open'
+    ? { candidateTexts: p.candidates.map((c) => c.text) }
+    : {
+      intentId: p.intent.id,
+      alternativeIds: p.alternatives.map((a) => a.intentId),
+      choiceTexts: (p.choices ?? []).map((c) => c.text),
+      choiceLabels: (p.choices ?? []).map((c) => c.label),
+    };
   const errs: string[] = [];
   for (const [k, v] of Object.entries(probes)) {
     if (k in exp && !subset(exp[k], v)) errs.push(`prediction.${k}: expected ${JSON.stringify(exp[k])}, got ${JSON.stringify(v)}`);
@@ -71,7 +73,7 @@ function checkStep(expect: Json, log: StepLog, addressed: Prediction | undefined
   const reason = result?.type === 'completed' && !result.prediction ? result.suppressedReason : undefined;
   if (expect.noEvaluation && log.updated.length) errs.push(`expected no evaluation, got ${JSON.stringify(result)}`);
   if ('suppressedReason' in expect && reason !== expect.suppressedReason) {
-    errs.push(`expected suppression ${expect.suppressedReason}, got ${reason ?? (delivered ? 'prediction ' + delivered.intent.id : JSON.stringify(result) ?? 'no evaluation')}`);
+    errs.push(`expected suppression ${expect.suppressedReason}, got ${reason ?? (delivered ? 'prediction ' + (delivered.mode === 'open' ? delivered.text : delivered.intent.id) : JSON.stringify(result) ?? 'no evaluation')}`);
   }
   if ('prediction' in expect) {
     if (!delivered) errs.push(`expected a prediction, got ${reason ?? 'no evaluation'}`);
