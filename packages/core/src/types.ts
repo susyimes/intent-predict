@@ -108,6 +108,19 @@ export interface Trace {
   signals?: Signals; prompt?: string;
 }
 export interface UpdatedParams { sessionId: string; sourceTurnId: string; result: EvaluationResult; trace?: Trace; at?: number }
+
+/** One retained turn as a surface may show it (SPEC 8 `session/turn`): redacted, cut, in event order. */
+export type TurnItem =
+  | { kind: 'user'; text: string }
+  | { kind: 'agent'; text: string; final: boolean }
+  | { kind: 'tool'; name: string; toolKind: ToolKind; command?: string; status?: 'ok' | 'error' | 'denied'; exitCode?: number; summary?: string }
+  | { kind: 'artifact'; artifactKind: string; ref: string };
+export interface TurnDigest {
+  sessionId: string; turnId: string;
+  status?: 'completed' | 'failed' | 'interrupted';
+  startedAt?: number; completedAt?: number;
+  items: TurnItem[];
+}
 export type InvalidationReason = 'turn_started' | 'resolved' | 'cancelled';
 export interface InvalidatedParams { sessionId: string; predictionId: string; reason: InvalidationReason }
 

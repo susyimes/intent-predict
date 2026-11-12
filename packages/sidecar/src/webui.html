@@ -47,6 +47,27 @@
   th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); vertical-align:top; overflow-wrap:anywhere; }
   th { color:var(--dim); font-weight:600; }
   .scroll { overflow-x:auto; }
+  .lastturn { font-size:13px; color:var(--dim); flex-basis:100%; overflow-wrap:anywhere; }
+  .hint { font-weight:400; font-size:12px; }
+  tr.turn { cursor:pointer; }
+  tr.turn:hover td, tr.turn.open td { background:var(--bg); }
+  tr.turn.open td { font-weight:600; }
+  tr.turn:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  tr.fresh td { animation:fresh 3s ease-out; }
+  @keyframes fresh { from { background:rgba(36,87,214,.22); } to { background:transparent; } }
+  tr.detail > td { background:var(--panel); padding:10px 12px 14px; }
+  .detail h3 { font-size:13px; margin:4px 0 6px; color:var(--dim); }
+  .detail dl { display:grid; grid-template-columns:max-content 1fr; gap:2px 12px; margin:0 0 10px; }
+  .detail dt { color:var(--dim); }
+  .detail dd { margin:0; overflow-wrap:anywhere; }
+  .turnlog { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:6px; }
+  .turnlog li { border-left:3px solid var(--line); padding:2px 10px; }
+  .turnlog li.u { border-color:var(--accent); }
+  .turnlog li.final { border-color:#17b26a; }
+  .turnlog li.t { border-color:var(--warn); }
+  .turnlog b { display:block; font-size:12px; color:var(--dim); font-weight:600; }
+  .turnlog .txt { white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto; }
+  .linkish { background:none; border:none; padding:0; color:var(--accent); cursor:pointer; font-size:12px; text-decoration:underline; }
 </style>
 </head>
 <body>
@@ -57,6 +78,7 @@
     <label>会话 <select id="session"></select></label>
     <a id="bindLink" hidden>选择会话</a>
     <span id="bound" hidden></span>
+    <span id="lastTurn" class="lastturn" aria-live="polite"></span>
   </header>
 
   <section aria-live="polite">
@@ -65,9 +87,9 @@
   </section>
 
   <section>
-    <h2>检查面：最近的求值（含被抑制的）</h2>
+    <h2>轮次记录 <span class="hint">点一行，看这一轮的内容和为什么给、为什么没给建议</span></h2>
     <div class="scroll"><table>
-      <thead><tr><th>时间</th><th>轮次</th><th>结果</th><th>场景</th><th>来源</th><th>置信度 / 阈值</th></tr></thead>
+      <thead><tr><th>时间</th><th>轮次</th><th>结果</th><th>场景</th><th>把握 / 门槛</th></tr></thead>
       <tbody id="log"></tbody>
     </table></div>
   </section>
@@ -84,8 +106,58 @@ const el = (tag, props = {}, ...children) => {
   return node;
 };
 const KIND_LABEL = { grok: 'Grok', hermes: 'Hermes', codex: 'Codex', kimi: 'Kimi', claude: 'Claude Code' };
-const sessions = new Map();   // sessionId -> { live, stale, log: [] }
+const sessions = new Map();   // sessionId -> { live, stale, log: [], newest }
 let current = null;
+let expanded = null;          // the log entry whose turn is shown
+const turns = new Map();      // `${sessionId}|${turnId}` -> { loading } | { digest } | { error }
+const allTools = new Set();   // turns whose every tool call is shown
+
+// why there was no suggestion, in words (SPEC Appendix A)
+const REASON = {
+  disabled: '预测已关闭', non_interactive: '宿主不是交互式的', pending_interaction: 'Agent 正在等你批准或回答，不打扰',
+  interrupted_turn: '这一轮被中断了', failed_turn_unhandled: '这一轮失败了，没有对应的场景', mode_blocked: '当前模式（如计划模式）下不给建议',
+  incognito: '隐身模式', max_per_session_reached: '这个会话的建议次数到上限了', no_scenario_matched: '这一轮不属于任何场景',
+  empty_catalog: '这个场景下没有可选的意图', no_sampler: '宿主没有借出模型', budget_exhausted: '模型调用次数到上限了',
+  prompt_too_large: '上下文太长', sampler_error: '调用模型出错', timeout: '模型超时', aborted: '下一轮已经开始，这一轮不再需要建议',
+  invalid_model_output: '模型回复的格式不对', unknown_intent: '模型选了目录之外的意图', model_none: '模型认为下一句不在目录里',
+  in_cooldown: '刚关掉过这条建议，冷却中', below_min_confidence: '把握不够', slot_validation_failed: '槽位没通过校验',
+  output_invalid: '建议文本不合格', output_dangerous: '建议文本像是危险操作',
+};
+const fixed = (x) => (typeof x === 'number' ? x.toFixed(2) : '—');
+/** One line on what an evaluation came to. */
+function verdict(e) {
+  const r = e.result;
+  const t = e.trace || {};
+  if (r.type === 'failed') return '内部错误：' + r.error;
+  const p = r.prediction;
+  if (p) {
+    const texts = [p.text, ...p.alternatives.map((a) => a.text)];
+    return p.optionSet ? '给出选项组：' + texts.join(' / ') : '给出建议：' + p.text + (p.alternatives.length ? '（备选：' + texts.slice(1).join(' / ') + '）' : '');
+  }
+  const why = REASON[r.suppressedReason] || r.suppressedReason;
+  return r.suppressedReason === 'below_min_confidence' && typeof t.confidence === 'number'
+    ? `没出建议：${why}（${t.selected} ${fixed(t.confidence)}，门槛 ${fixed(t.threshold)}）`
+    : '没出建议：' + why;
+}
+async function loadTurn(sessionId, turnId) {
+  const key = sessionId + '|' + turnId;
+  if (turns.has(key) && !turns.get(key).error) return;
+  turns.set(key, { loading: true });
+  try {
+    turns.set(key, { digest: await rpc('session/turn', { sessionId, turnId }) });
+  } catch (err) {
+    turns.set(key, { error: String(err.message || err) });
+  }
+  render();
+}
+function showTurn(entry, scroll = false) {
+  expanded = expanded === entry ? null : entry;
+  render();
+  if (expanded) {
+    void loadTurn(entry.sessionId, entry.sourceTurnId);
+    if (scroll) document.querySelector('tr.turn.open')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+}
 let bound = null;
 let bindingSupported = false;
 let dispatchModes = [];
@@ -156,7 +228,14 @@ function renderCard() {
   box.replaceChildren();
   const s = sessions.get(current);
   const p = s?.live || s?.stale;
-  if (!p) return box.append(el('div', { className: 'empty', textContent: '现在没有建议。没有把握时就不给，这是正常情况。' }));
+  if (!p) {
+    const last = s?.newest;
+    const look = last ? el('button', { className: 'linkish', textContent: '查看这一轮' }) : null;
+    look?.addEventListener('click', () => showTurn(last, true));
+    return box.append(el('div', { className: 'empty' },
+      '现在没有建议。没有把握时就不给，这是正常情况。',
+      last ? el('div', {}, `最近一轮 ${last.sourceTurnId}：${verdict(last)} `, look) : null));
+  }
   const live = s.live === p;
   if (live && draft.id !== p.id) resetDraft(p);
   const card = el('div', { className: 'card' + (live ? '' : ' stale') });
@@ -170,7 +249,8 @@ function renderCard() {
     el('span', { className: 'tag', textContent: p.scenarioId }),
     el('span', { className: 'tag', textContent: conf }),
     p.risk === 'side_effect' ? el('span', { className: 'tag risk', textContent: '有外部副作用' }) : null,
-    live ? null : el('span', { className: 'tag', textContent: '已过期' })));
+    live ? null : el('span', { className: 'tag', textContent: '已过期' }),
+    lookAtTurn(s, p)));
 
   if (p.context) {
     card.append(el('div', { className: 'context' }, el('b', { textContent: 'Agent 刚才说（节选）：' }), p.context.excerpt));
@@ -261,21 +341,92 @@ function renderCard() {
   box.append(card);
 }
 
+/** The card's link to the turn its suggestion answers. */
+function lookAtTurn(s, p) {
+  const entry = [...(s?.log || [])].reverse().find((e) => e.result.prediction && e.result.prediction.id === p.id);
+  if (!entry) return null;
+  const b = el('button', { className: 'linkish', textContent: '查看这一轮（' + p.sourceTurnId + '）' });
+  b.addEventListener('click', () => showTurn(entry, true));
+  return b;
+}
+
+function renderDetail(e) {
+  const t = e.trace || {};
+  const facts = [['场景', t.scenarioId || '没有匹配的场景']];
+  if (t.catalog) facts.push(['候选意图', t.catalog.join('、') || '（无）']);
+  if (t.selected) {
+    facts.push([t.source === 'rule' ? '规则选中' : '模型选了',
+      t.selected + (typeof t.confidence === 'number' ? '，把握 ' + fixed(t.confidence) + (typeof t.threshold === 'number' ? '，门槛 ' + fixed(t.threshold) : '') : '')]);
+  }
+  if (t.optionSet) facts.push(['选项组', t.optionSet.join(' / ') + '（单独都不够把握，合起来够）']);
+  facts.push(['结论', verdict(e)]);
+  const box = el('div', { className: 'detail' },
+    el('h3', { textContent: '判断过程' }),
+    el('dl', {}, ...facts.flatMap(([k, v]) => [el('dt', { textContent: k }), el('dd', { textContent: v })])),
+    el('h3', { textContent: '这一轮发生了什么' }));
+  const got = turns.get(e.sessionId + '|' + e.sourceTurnId);
+  if (!got || got.loading) return box.append(el('div', { className: 'status', textContent: '读取中…' })), box;
+  if (got.error) return box.append(el('div', { className: 'status', textContent: '读不到这一轮（核心只保留最近 50 轮）：' + got.error })), box;
+  const d = got.digest;
+  const ended = { completed: '正常结束', failed: '失败', interrupted: '被中断' }[d.status] || '还没结束';
+  const list = el('ol', { className: 'turnlog' });
+  // a long turn shows its first and last few tool calls; the rest open on request
+  const key = e.sessionId + '|' + e.sourceTurnId;
+  const toolAt = d.items.flatMap((it, i) => (it.kind === 'tool' ? [i] : []));
+  const hidden = new Set(toolAt.length > 12 && !allTools.has(key) ? toolAt.slice(6, -6) : []);
+  for (const [i, it] of d.items.entries()) {
+    if (hidden.has(i)) {
+      if (i === toolAt[6]) {
+        const more = el('button', { className: 'linkish', textContent: `显示中间的 ${hidden.size} 次工具调用` });
+        more.addEventListener('click', () => { allTools.add(key); render(); });
+        list.append(el('li', { className: 't' }, more));
+      }
+      continue;
+    }
+    if (it.kind === 'user') list.append(el('li', { className: 'u' }, el('b', { textContent: '用户' }), el('div', { className: 'txt', textContent: it.text })));
+    else if (it.kind === 'agent') list.append(el('li', { className: it.final ? 'final' : '' }, el('b', { textContent: it.final ? 'Agent（最终回复）' : 'Agent' }), el('div', { className: 'txt', textContent: it.text })));
+    else if (it.kind === 'tool') {
+      const status = { ok: '成功', error: '失败', denied: '被拒绝' }[it.status] || '没有结果';
+      const lines = [it.command, status + (it.exitCode !== undefined ? '，退出码 ' + it.exitCode : ''), it.summary].filter(Boolean);
+      list.append(el('li', { className: 't' }, el('b', { textContent: '工具 ' + it.name }), el('div', { className: 'txt', textContent: lines.join('\n') })));
+    } else list.append(el('li', {}, el('b', { textContent: '文件' }), el('div', { className: 'txt', textContent: it.artifactKind + '  ' + it.ref })));
+  }
+  box.append(el('div', { className: 'status', textContent: '这一轮' + ended + (d.items.length ? '' : '，没有记录到内容') }), list);
+  return box;
+}
+
 function renderLog() {
-  const rows = (sessions.get(current)?.log || []).slice(-50).reverse().map((e) => {
+  const s = sessions.get(current);
+  const rows = [];
+  for (const e of (s?.log || []).slice(-50).reverse()) {
     const r = e.result;
+    const t = e.trace || {};
     const shown = r.prediction && (r.prediction.optionSet
       ? [r.prediction.intent.id, ...r.prediction.alternatives.map((a) => a.intentId)].join(' / ') + '（选项组）'
       : r.prediction.intent.id);
-    const outcome = r.type === 'failed' ? '内部错误：' + r.error : r.prediction ? '给出 ' + shown : '抑制：' + r.suppressedReason;
-    const t = e.trace || {};
-    const conf = t.confidence === undefined || t.confidence === null ? '—' : t.confidence.toFixed(2) + (t.threshold === undefined ? '' : ' / ' + t.threshold.toFixed(2));
-    return el('tr', {},
+    const outcome = r.type === 'failed' ? '内部错误：' + r.error : r.prediction ? '给出 ' + shown : '没出建议：' + (REASON[r.suppressedReason] || r.suppressedReason);
+    const conf = typeof t.confidence === 'number' ? fixed(t.confidence) + (typeof t.threshold === 'number' ? ' / ' + fixed(t.threshold) : '') : t.source === 'rule' ? '规则命中' : '—';
+    const open = expanded === e;
+    const tr = el('tr', { className: 'turn' + (open ? ' open' : '') + (e.fresh ? ' fresh' : ''), tabIndex: 0, title: '点击查看这一轮' },
       el('td', { textContent: new Date(e.at).toLocaleTimeString() }), el('td', { textContent: e.sourceTurnId }),
-      el('td', { textContent: outcome }), el('td', { textContent: t.scenarioId || '—' }),
-      el('td', { textContent: t.source || '—' }), el('td', { textContent: conf }));
-  });
+      el('td', { textContent: outcome }), el('td', { textContent: t.scenarioId || '—' }), el('td', { textContent: conf }));
+    tr.setAttribute('aria-expanded', String(open));
+    tr.addEventListener('click', () => showTurn(e));
+    tr.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        showTurn(e);
+      }
+    });
+    rows.push(tr);
+    if (open) rows.push(el('tr', { className: 'detail' }, el('td', { colSpan: 5 }, renderDetail(e))));
+  }
   $('log').replaceChildren(...rows);
+}
+
+function renderLastTurn() {
+  const last = sessions.get(current)?.newest;
+  $('lastTurn').textContent = last ? `最近一轮 ${last.sourceTurnId} · ${new Date(last.at).toLocaleTimeString()} · ${verdict(last)}` : '';
 }
 
 function renderBound() {
@@ -292,6 +443,7 @@ function render() {
   renderBound();
   const select = $('session');
   select.replaceChildren(...[...sessions.keys()].map((id) => el('option', { value: id, textContent: id, selected: id === current })));
+  renderLastTurn();
   renderCard();
   renderLog();
 }
@@ -309,7 +461,11 @@ function onNotification(msg) {
   }
   const s = sessionOf(p.sessionId);
   if (msg.method === 'prediction/updated') {
-    s.log.push({ ...p, at: p.at || Date.now() });
+    // a new turn was evaluated: flash its row for a moment so the page visibly reacts
+    const entry = { ...p, at: p.at || Date.now(), fresh: true };
+    s.log.push(entry);
+    s.newest = entry;
+    setTimeout(() => { entry.fresh = false; }, 3000);
     if (p.result.type === 'completed' && p.result.prediction) { s.live = p.result.prediction; s.stale = null; }
   } else if (msg.method === 'prediction/invalidated' && s.live && s.live.id === p.predictionId) {
     s.stale = s.live;
@@ -335,6 +491,7 @@ $('session').addEventListener('change', (e) => { current = e.target.value; rende
       const st = sessionOf(s.sessionId);
       st.live = s.live || null;
       if (Array.isArray(s.recent)) for (const p of s.recent) st.log.push({ ...p, at: p.at || Date.now() });
+      st.newest = st.log.at(-1) || null;
     }
     if (attached.activeSessionId) {
       sessionOf(attached.activeSessionId);

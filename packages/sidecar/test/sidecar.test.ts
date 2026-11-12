@@ -103,6 +103,14 @@ test('sidecar: stdio host protocol, loopback surface, turn-pinned dispatch, samp
     assert.ok(!('prompt' in updated.params.trace) && !('signals' in updated.params.trace), 'no unredacted diagnostics on the wire');
     assert.deepEqual((await rpc('surface/attach', {})).result.dispatchModes, ['message']);
 
+    // -- a surface can look back at the turn it answers --
+    const looked = (await rpc('session/turn', { sessionId: 's1', turnId: 't1' })).result;
+    assert.equal(looked.status, 'completed');
+    assert.deepEqual(looked.items.map((i: Json) => i.kind), ['user', 'artifact', 'agent']);
+    assert.equal(looked.items[0].text, '继续处理这个任务');
+    assert.equal((await rpc('session/turn', { sessionId: 's1', turnId: 't9' })).error.code, -32602, 'a turn that is not retained');
+    assert.equal((await rpc('session/turn', { sessionId: 's1' })).error.code, -32602);
+
     // -- send: refused while the host is busy, then dispatched, pinned to the turn, exactly once --
     dispatchError = -32001;
     assert.equal((await rpc('prediction/act', { predictionId: p.id, action: 'send', text: p.text })).result.status, 'busy');

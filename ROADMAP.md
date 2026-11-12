@@ -30,9 +30,9 @@ O1 单会话  Phase 1（当前）
 | 契约 | SPEC v0.5、5 份 JSON Schema、内置场景包（7 个场景）、黄金用例（覆盖全部 24 种抑制原因，含录制的模型输出与会话流程） | `python tools/validate.py` 全过 |
 | 1A 核心 | 信号、路由、两条确定性规则、模型分类、门控、槽位与模板、输出检查、建议有效期、发送规则、结果记录（TypeScript，`packages/core`） | 111 条黄金用例在 Python 参考求值器与 TypeScript 核心上都通过 |
 | 1A+ 选项组 | 首选单独不够把握、但它和备选合起来够时，平级给出 2–3 个选项；不预选，关掉时整组进入冷却；`options.optionSets: false` 可关闭 | 12 条新黄金用例在两套实现上通过（原有用例结果不变）；`npm run smoke:webui` 覆盖选项组的展示与发送；Grok 端到端检查（见下） |
-| 1B sidecar 与界面 | stdio JSON-RPC、反向采样与取消、发送派发；自带界面（单网页，HTTP + SSE，仅回环地址 + 每次启动随机 token + Host/Origin 校验） | `packages/sidecar/test`：协议全程、越权请求被拒、发送钉轮次且只发一次、采样取消、迟到回复被丢弃；`npm run smoke:webui` 在无头 Chrome 里渲染卡片、选备选、选选项组中的一项、点发送 |
+| 1B sidecar 与界面 | stdio JSON-RPC、反向采样与取消、发送派发；自带界面（单网页，HTTP + SSE，仅回环地址 + 每次启动随机 token + Host/Origin 校验） | `packages/sidecar/test`：协议全程、越权请求被拒、发送钉轮次且只发一次、采样取消、迟到回复被丢弃；`npm run smoke:webui` 在无头 Chrome 里渲染卡片、点开一轮看内容和判断过程、选备选、选选项组中的一项、点发送；`session/turn` 的摘要按 Schema 校验 |
 | 1C 第一个真实宿主 | Grok CLI 适配：无头回合的事件映射、借 Grok 模型做 `compact` 采样、以续接会话的方式接收发送（`packages/host-grok`） | `npm run e2e:grok` 在 Grok CLI 1.0.77 上通过；录制回合的映射测试 |
-| 1C+ 更多宿主与会话绑定 | 同一宿主经适配器驱动 Hermes、Codex、Kimi、Claude Code；可绑定它们已有的会话、还原近几轮历史；建议由会话自己的 Agent 用默认模型挑；发出的消息走各自的审批规则，权限请求一律拒绝 | 单元测试（实测录下的事件格式，测试替身 ACP Agent、假 codex 和假 claude）；对 Hermes 0.22、Codex 0.159、Kimi Code 2.5、Claude Code 2.1.322 的实机检查（见下） |
+| 1C+ 更多宿主与会话绑定 | 同一宿主经适配器驱动 Hermes、Codex、Kimi、Claude Code；可绑定它们已有的会话、还原近几轮历史，之后在原工具里完成的轮次每 2 秒自动同步；建议由会话自己的 Agent 用默认模型挑；发出的消息走各自的审批规则，权限请求一律拒绝 | 单元测试（实测录下的事件格式，测试替身 ACP Agent、假 codex 和假 claude）；对 Hermes 0.22、Codex 0.159、Kimi Code 2.5、Claude Code 2.1.322 的实机检查（见下） |
 
 端到端跑出来的事实（两次运行，每次 4 轮，结果一致，但不构成效果结论）：
 

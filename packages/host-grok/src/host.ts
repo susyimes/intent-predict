@@ -69,6 +69,11 @@ export interface GrokHostOptions {
   cooldownTurnsAfterDismiss?: number;
   /** Completed turns restored from the bound session's store initially (default 3; 0 disables history sync). */
   replayTurns?: number;
+  /**
+   * How often the bound session's store is checked for turns taken in the agent's own interface, so they are
+   * evaluated without a page refresh (default 2000 ms; 0 checks only when a surface loads or refreshes).
+   */
+  syncIntervalMs?: number;
   hermesHome?: string;
   onLine?: (line: GrokLine) => void;
   onInfo?: (message: string) => void;
@@ -102,6 +107,7 @@ export class GrokHost {
   private drivingTurns = 0;
   private stopping = false;
   private readonly inflight = new Set<Promise<unknown>>();
+  private syncTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(opts: GrokHostOptions) {
     const eagerness = opts.eagerness ?? 'eager';
@@ -197,6 +203,14 @@ export class GrokHost {
     })) as { surfaceUrl?: string; loadedPacks?: GrokHost['loadedPacks'] };
     this.surfaceUrl = init.surfaceUrl;
     this.loadedPacks = init.loadedPacks ?? [];
+    const every = this.opts.syncIntervalMs ?? 2000;
+    if (every > 0) {
+      // turns the user takes in the agent's own interface reach the surface without a refresh (SPEC 8)
+      this.syncTimer = setInterval(() => {
+        if (!this.stopping) this.syncBoundHistory();
+      }, every);
+      this.syncTimer.unref();
+    }
   }
 
   private observe(events: AgentEvent[]): void {
@@ -395,6 +409,7 @@ export class GrokHost {
 
   async stop(): Promise<void> {
     this.stopping = true;                                  // refuse new requests from here on
+    clearInterval(this.syncTimer);
     this.sampling?.abort();
     await this.idle();
     await Promise.allSettled([...this.inflight]);          // e.g. a sample that was running: its reply goes out first

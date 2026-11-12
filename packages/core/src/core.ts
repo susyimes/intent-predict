@@ -3,7 +3,7 @@ import type {
   ActParams, ActStatus, AgentEvent, Alternative, Choice, CoreConfig, DispatchRequest, EvaluationRecord,
   EvaluationResult, GatePolicy, HostBridge, IntentSpec, InvalidatedParams, InvalidationReason, Options,
   OutcomeRecord, Prediction, SampleResult, SamplerMode, ScenarioPack, ScenarioSpec, Selected, Signals,
-  SuppressedReason, Trace, UpdatedParams,
+  SuppressedReason, Trace, TurnDigest, TurnItem, UpdatedParams,
 } from './types.ts';
 import { INVALID_PARAMS, RpcError, SESSION_BUSY, TURN_MISMATCH } from './types.ts';
 import { extractSignals, finalAgentText, holds, resolve, toolKind } from './signals.ts';
@@ -89,6 +89,46 @@ export class Core {
   /** A session's retained evaluations, oldest first, for a surface attaching after the fact. */
   recent(sessionId: string): UpdatedParams[] {
     return this.sessions.get(sessionId)?.recent ?? [];
+  }
+
+  /**
+   * What happened in one retained turn, for a surface that lets the user look back (SPEC 8 `session/turn`).
+   * Every text is redacted (7.1) and cut; tool outputs never leave the core. Undefined once the turn is gone.
+   */
+  turn(sessionId: string, turnId: string): TurnDigest | undefined {
+    const s = this.sessions.get(sessionId);
+    const events = s?.events.filter((e) => 'turnId' in e && e.turnId === turnId) ?? [];
+    if (!s || !events.length) return undefined;
+    const strict = this.options.redact === 'strict';
+    const clean = (text: string, n: number) => cut(redact(text, strict), n);
+    const digest: TurnDigest = { sessionId, turnId, items: [] };
+    const tools = new Map<string, Extract<TurnItem, { kind: 'tool' }>>();
+    for (const e of events) {
+      switch (e.type) {
+        case 'turn.started': digest.startedAt = e.at; break;
+        case 'turn.completed': digest.status = e.status; digest.completedAt = e.at; break;
+        case 'message.user': digest.items.push({ kind: 'user', text: clean(e.text, 2000) }); break;
+        case 'message.agent': digest.items.push({ kind: 'agent', text: clean(e.text, 4000), final: e.final === true }); break;
+        case 'tool.call': {
+          const item: Extract<TurnItem, { kind: 'tool' }> = { kind: 'tool', name: e.name, toolKind: toolKind(e) };
+          if (e.command) item.command = clean(e.command, 300);
+          tools.set(e.callId, item);
+          digest.items.push(item);
+          break;
+        }
+        case 'tool.result': {
+          const item = tools.get(e.callId);
+          if (!item) break;
+          item.status = e.status;
+          if (isNum(e.exitCode)) item.exitCode = e.exitCode;
+          if (e.summary) item.summary = clean(e.summary, 200);
+          break;
+        }
+        case 'artifact': digest.items.push({ kind: 'artifact', artifactKind: e.kind, ref: clean(e.ref, 200) }); break;
+        default: break;
+      }
+    }
+    return digest;
   }
 
   // ---- events (SPEC 4.1, 5.1, 5.4) ---------------------------------------

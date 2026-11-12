@@ -36,6 +36,7 @@
         "initialize",
         "surface/attach",
         "prediction/act",
+        "session/turn",
         "binding/list",
         "binding/bind",
         "sampler/sample",
@@ -122,6 +123,22 @@
             "properties": {
               "params": {
                 "$ref": "#/$defs/PredictionActParams"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "session/turn"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "$ref": "#/$defs/SessionTurnParams"
               }
             }
           }
@@ -904,6 +921,174 @@
             "unsupported",
             "failed"
           ]
+        }
+      }
+    },
+    "SessionTurnParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "turnId"
+      ],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "description": "Ask for one retained turn of a session (SPEC 8). A turn that is not retained (any more) is -32602."
+    },
+    "TurnItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "text"
+          ],
+          "properties": {
+            "kind": {
+              "const": "user"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 2001
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "text",
+            "final"
+          ],
+          "properties": {
+            "kind": {
+              "const": "agent"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 4001
+            },
+            "final": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name",
+            "toolKind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "tool"
+            },
+            "name": {
+              "type": "string"
+            },
+            "toolKind": {
+              "enum": [
+                "read",
+                "search",
+                "edit",
+                "delete",
+                "execute",
+                "fetch",
+                "ask_user",
+                "other"
+              ]
+            },
+            "command": {
+              "type": "string",
+              "maxLength": 301
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "error",
+                "denied"
+              ]
+            },
+            "exitCode": {
+              "type": "integer"
+            },
+            "summary": {
+              "type": "string",
+              "maxLength": 201
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "artifactKind",
+            "ref"
+          ],
+          "properties": {
+            "kind": {
+              "const": "artifact"
+            },
+            "artifactKind": {
+              "type": "string"
+            },
+            "ref": {
+              "type": "string",
+              "maxLength": 201
+            }
+          }
+        }
+      ]
+    },
+    "SessionTurnResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "turnId",
+        "items"
+      ],
+      "description": "What happened in the turn, in event order. Every text is redacted (SPEC 7.1) and cut; tool output is never included.",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "failed",
+            "interrupted"
+          ]
+        },
+        "startedAt": {
+          "type": "number"
+        },
+        "completedAt": {
+          "type": "number"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TurnItem"
+          }
         }
       }
     },

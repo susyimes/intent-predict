@@ -123,6 +123,17 @@ try {
   assert.equal(await page(`document.querySelectorAll('.card img').length + (document.title === 'pwned' ? 1 : 0)`), 0, 'agent text must never become markup');
   console.log('  ✔ the card shows the suggestion, the agent text it answers, and the inspector row; agent text is inert');
 
+  // look back at the turn: what was said and done in it, and why it got this suggestion
+  assert.ok((await page(`document.getElementById('lastTurn').textContent`)).includes('最近一轮 t1'), 'the header says which turn was evaluated last');
+  await page(`[...document.querySelectorAll('tr.turn')].find((r) => r.cells[1].textContent === 't1').click()`);
+  await until('the turn details', () => page(`!!document.querySelector('tr.detail') && document.querySelector('tr.detail').innerText.includes('Agent（最终回复）')`));
+  const detail = await page(`document.querySelector('tr.detail').innerText`);
+  for (const expected of ['判断过程', '模型选了', 'confirm，把握 0.90，门槛 0.60', '这一轮发生了什么', '继续处理这个任务', '改成 5 次，可以吗？', '这一轮正常结束']) {
+    assert.ok(detail.includes(expected), `the turn details do not show ${JSON.stringify(expected)}: ${JSON.stringify(detail)}`);
+  }
+  assert.equal(await page(`document.querySelectorAll('tr.detail img').length + (document.title === 'pwned' ? 1 : 0)`), 0, 'turn text is inert too');
+  console.log('  ✔ clicking a turn shows what happened in it and why it got its suggestion');
+
   await clickButton('先说说这样做的利弊');
   assert.equal(await page(`document.querySelector('.card textarea').value`), '先说说这样做的利弊');
   await clickButton('发给 Agent');

@@ -135,6 +135,15 @@ export async function startSurface(core: Core, options: { port?: number; binding
           }
           result = { status: await core.act(params as unknown as ActParams) };
           break;
+        case 'session/turn': {
+          if (typeof params.sessionId !== 'string' || typeof params.turnId !== 'string') {
+            throw new RpcError(INVALID_PARAMS, 'session/turn needs sessionId and turnId');
+          }
+          const digest = core.turn(params.sessionId, params.turnId);
+          if (!digest) throw new RpcError(INVALID_PARAMS, 'that turn is not retained (any more)');
+          result = digest;
+          break;
+        }
         case 'prediction/cancel':
           if (typeof params.sessionId !== 'string') throw new RpcError(INVALID_PARAMS, 'sessionId is required');
           core.cancel(params.sessionId);

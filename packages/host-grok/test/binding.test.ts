@@ -251,6 +251,27 @@ test('refreshing a surface syncs external turns added since bind', async () => {
   }
 });
 
+test('turns taken in the agent itself are synced without any surface refresh', async () => {
+  const hermesHome = seedHermesHome();
+  try {
+    const { host, rpc } = await started({ hermesHome, syncIntervalMs: 100 });
+    try {
+      await rpc('binding/bind', { kind: 'hermes', id: 'h-replay', cwd: process.cwd() });
+      const last = (): string | undefined => host.lastCompletedTurn;
+      assert.equal(last(), 't2');
+      appendHermesTurn(hermesHome);                        // the user goes on in Hermes; no page is loaded or refreshed
+      for (const end = Date.now() + 5000; Date.now() < end && last() !== 't3';) await new Promise((r) => setTimeout(r, 50));
+      assert.equal(last(), 't3', 'the host picked the new turn up on its own');
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(last(), 't3', 'and only once');
+    } finally {
+      await host.stop();
+    }
+  } finally {
+    rmSync(hermesHome, { recursive: true, force: true });
+  }
+});
+
 test('binding refuses ids, profiles and cwds that could act as options or leave the stores', async () => {
   const { host, rpc } = await started();
   try {
