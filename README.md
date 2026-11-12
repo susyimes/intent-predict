@@ -86,6 +86,8 @@ node packages/host-grok/src/main.ts --agent claude --cwd <你的项目>
 #   还可用 --min-confidence、--side-effect-min-confidence、--alt-min-confidence、--cooldown-turns 细调
 ```
 
+要在后台启动，比如让另一个 Agent 替你打开页面，就加 `--headless`：不读终端输入，只用网页，进程一直跑到被结束。具体做法见 [LAUNCHER.md](LAUNCHER.md)。
+
 启动后在终端里和 Agent 对话，终端会打印两个网页地址：
 
 - **「下一步建议」页**：每轮结束后显示 Agent 写的候选，最可能的一条已经填进输入框，可以改字或换一条。点「发给 Agent」才会作为你的下一条消息发出，也可以只复制。标着「可能有外部影响」的候选，发送前还要再确认一次。
@@ -151,7 +153,8 @@ npm run smoke:webui             # 在无头 Chrome / Edge 里实际点一遍自�
 | [tools/](tools/) | `reference.py` 参考求值器（测试基准，不是产品）、`validate.py` 一致性校验、`build_pack.py` |
 | [packages/core](packages/core) | 核心：信号、开放生成（默认）与目录模式的流水线、发送与结果规则 |
 | [packages/sidecar](packages/sidecar) | stdio JSON-RPC 服务 + 自带界面（「下一步建议」与「选择会话」两个网页，HTTP + SSE，仅回环地址） |
-| [packages/host-grok](packages/host-grok) | Agent 命令行宿主（包名沿用最初的 Grok 宿主）：Grok、Hermes、Codex、Kimi、Claude Code 五个适配器，负责驱动回合、还原历史、借模型挑建议、接收发送；以及本机会话的嗅探与绑定 |
+| [packages/host-grok](packages/host-grok) | Agent 命令行宿主（包名沿用最初的 Grok 宿主）：Grok、Hermes、Codex、Kimi、Claude Code 五个适配器，负责驱动回合、还原历史、请会话自己的 Agent 写建议、接收发送；以及本机会话的嗅探与绑定 |
+| [LAUNCHER.md](LAUNCHER.md) | 给 Agent 看的启动说明：后台启动、取页面地址、经接口绑定会话、重启与结束 |
 | [ROADMAP.md](ROADMAP.md) · [docs/design.md](docs/design.md) · [docs/future.md](docs/future.md) | 阶段计划与实测记录 · 设计理由与决策 · 后续阶段的非规范草案 |
 | [docs/diagrams.md](docs/diagrams.md) · [docs/review-issues.md](docs/review-issues.md) · [docs/prior-art.md](docs/prior-art.md) | 说明图 · 审查和实测中发现的问题及处理 · 同类产品调研 |
 

@@ -6,8 +6,10 @@
 //     [--resume SESSION_ID] [--mode open|catalog] [--min-candidate-confidence N] [--sampler-effort default|low]
 //     [--eagerness eager|conservative]
 //     [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]
-//     [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]
+//     [--cooldown-turns N] [--log FILE] [--timeout MS] [--headless] [-- <grok args>]
 //
+// --headless: no terminal input; the pages are the only way in, and the process runs until it is ended.
+// For starting it in the background, e.g. by another agent (LAUNCHER.md): without it, a closed stdin quits at once.
 // Everything after `--` goes to every `grok` turn, e.g. `-- --allow search_replace` to let it edit.
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
@@ -32,7 +34,8 @@ if (own.includes('--help')) {
     + '  [--sampler-effort default|low]   (default: the agent\'s own reasoning effort; low is cheaper and faster)\n'
     + '  [--eagerness eager|conservative]   (catalog mode; default eager)\n'
     + '  [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]\n'
-    + '  [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]\n',
+    + '  [--cooldown-turns N] [--log FILE] [--timeout MS] [--headless] [-- <grok args>]\n'
+    + '  (--headless: no terminal input, send from the page; runs until ended; for background starts)\n',
   );
   process.exit(0);
 }
@@ -72,8 +75,9 @@ if (resume !== undefined && !isSafeName(resume)) {
   fail(`--resume needs a session id (letters, digits, '.', '_' or '-', starting with a letter or digit)`);
 }
 
+const headless = own.includes('--headless');
 const cwd = resolve(flag('--cwd') ?? process.cwd());
-const dim = (s: string) => `\u001b[2m${s}\u001b[0m`;
+const dim = (s: string) => (process.stdout.isTTY ? `\u001b[2m${s}\u001b[0m` : s);
 let midLine = false;
 const say = (s: string) => {
   process.stdout.write((midLine ? '\n' : '') + s + '\n');
@@ -117,17 +121,24 @@ if (mode === 'open') {
 }
 say(`打开这个页面看「下一步建议」：${host.surfaceUrl}`);
 if (host.surfaceUrl) say(dim(`选择要绑定的会话：${host.surfaceUrl.replace('/?t=', '/sessions?t=')}`));
-say(dim('输入消息后回车发送；空行忽略；Ctrl+C 退出。'));
-
-const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '› ' });
-rl.prompt();
-rl.on('line', (line) => {
-  const text = line.trim();
-  if (!text) return rl.prompt();
-  if (host.busy) return say(dim(`· ${LABEL[host.agent]} 还在运行，等它结束再发。`));
-  void host.send(text).then(() => {
-    say('');
-    rl.prompt();
+const quit = () => void host.stop().then(() => process.exit(0));
+if (headless) {
+  say(dim('无终端输入（--headless）：在建议页上发消息；Ctrl+C 或结束进程退出。'));
+  process.once('SIGINT', quit);
+  process.once('SIGTERM', quit);
+  setInterval(() => {}, 3_600_000);   // nothing else is sure to keep this process alive between turns
+} else {
+  say(dim('输入消息后回车发送；空行忽略；Ctrl+C 退出。'));
+  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '› ' });
+  rl.prompt();
+  rl.on('line', (line) => {
+    const text = line.trim();
+    if (!text) return rl.prompt();
+    if (host.busy) return say(dim(`· ${LABEL[host.agent]} 还在运行，等它结束再发。`));
+    void host.send(text).then(() => {
+      say('');
+      rl.prompt();
+    });
   });
-});
-rl.on('close', () => void host.stop().then(() => process.exit(0)));
+  rl.on('close', quit);
+}
