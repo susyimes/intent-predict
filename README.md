@@ -80,7 +80,9 @@ node packages/host-grok/src/main.ts --agent claude --cwd <你的项目>
 # --agent 可选 grok（默认）/ hermes / codex / kimi / claude
 # 续接已有会话：--resume <会话 ID>
 # --model 只对 Grok 有效；其余几家都用各自的默认模型
-# 建议太少时加 --eagerness eager；还可用 --min-confidence、--side-effect-min-confidence、--alt-min-confidence、--cooldown-turns 细调
+# 默认用 eager 预设：门槛 0.35，提示词不轻易答 none，前期多出建议、多攒反馈
+# 想少而稳就加 --eagerness conservative（规范默认值，门槛 0.60）
+# 还可用 --min-confidence、--side-effect-min-confidence、--alt-min-confidence、--cooldown-turns 细调
 ```
 
 启动后在终端里和 Agent 对话，终端会打印两个网页地址：

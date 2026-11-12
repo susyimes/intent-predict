@@ -58,7 +58,10 @@ export interface GrokHostOptions {
   codexBin?: Bin;
   kimiBin?: Bin;
   claudeBin?: Bin;
-  /** Prediction gate preset: conservative (default) or eager (lower floors and prompt). */
+  /**
+   * Prediction gate preset. eager (the default while Phase 1 collects feedback): lower floors and a prompt
+   * that leans away from `none`. conservative: the SPEC defaults (minConfidence 0.60).
+   */
   eagerness?: GateSettings['eagerness'];
   minConfidence?: number;
   sideEffectMinConfidence?: number;
@@ -101,7 +104,7 @@ export class GrokHost {
   private readonly inflight = new Set<Promise<unknown>>();
 
   constructor(opts: GrokHostOptions) {
-    const eagerness = opts.eagerness ?? 'conservative';
+    const eagerness = opts.eagerness ?? 'eager';
     if (eagerness !== 'conservative' && eagerness !== 'eager') {
       throw new Error('eagerness must be conservative or eager');
     }

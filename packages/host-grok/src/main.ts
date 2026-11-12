@@ -3,7 +3,7 @@
 // headless mode; suggestions for your next message appear on the surface page whose address is printed at start.
 //
 //   node packages/host-grok/src/main.ts [--agent grok|hermes|codex|kimi|claude] [--cwd DIR] [--model ID]
-//     [--resume SESSION_ID] [--eagerness conservative|eager]
+//     [--resume SESSION_ID] [--eagerness eager|conservative]
 //     [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]
 //     [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]
 //
@@ -26,7 +26,7 @@ const flag = (name: string) => {
 if (own.includes('--help')) {
   process.stdout.write(
     'usage: main.ts [--agent grok|hermes|codex|kimi|claude] [--cwd DIR] [--model ID] [--resume SESSION_ID]\n'
-    + '  [--eagerness conservative|eager]\n'
+    + '  [--eagerness eager|conservative]   (default eager: more suggestions while feedback is collected)\n'
     + '  [--min-confidence N] [--side-effect-min-confidence N] [--alt-min-confidence N]\n'
     + '  [--cooldown-turns N] [--log FILE] [--timeout MS] [-- <grok args>]\n',
   );
@@ -48,7 +48,7 @@ const confidenceFlag = (name: string) => {
   if (value !== undefined && (value < 0 || value > 1)) fail(`${name} must be between 0 and 1`);
   return value;
 };
-const eagernessRaw = flag('--eagerness') ?? 'conservative';
+const eagernessRaw = flag('--eagerness') ?? 'eager';
 if (eagernessRaw !== 'conservative' && eagernessRaw !== 'eager') fail('--eagerness must be conservative or eager');
 const eagerness = eagernessRaw as 'conservative' | 'eager';
 const cooldownTurnsAfterDismiss = numberFlag('--cooldown-turns');
